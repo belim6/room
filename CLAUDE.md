@@ -1,171 +1,59 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repository.
 
-## Project Overview
+## What Room is
 
-This is a Discord bot that connects Discord to Letta (formerly MemGPT), allowing users to interact with stateful AI agents through Discord channels and DMs. The bot uses the Letta TypeScript SDK to communicate with a Letta server and Discord.js to handle Discord interactions.
+Room is a local, single-user web app for conversations between AI characters and a human, built as a research instrument: every generation is durable, inspectable evidence, and conversations can be branched, retconned, and compared. The user is Deniz.
 
-## Development Commands
+Read these before non-trivial work:
+
+- **WORKBENCH.md** — what is implemented and how to use it. Keep it current when behavior changes.
+- **PRODUCT_SPEC.md** — product direction and the four-release plan. Proposal, not implementation.
+- **JEV_SPEC.md** — Jev (TypeSafe's probability model) as a shadow observation instrument for speaker selection.
+
+The repo started from `letta-ai/letta-discord-bot-example`; that history was dropped. The **Discord pipeline is abandoned** — the browser workbench is the only frontend. Don't extend Discord code or propose fixes on that path, even where the specs still mention Discord.
+
+## Commands
 
 ```bash
-# Install dependencies
-npm install
-
-# Run in development mode (with auto-reload)
-npm run dev
-
-# Run in production mode
-npm start
-
-# Build TypeScript to JavaScript
-npm run build
+npm run workbench        # serve on http://127.0.0.1:4317 (ROOM_PORT, ROOM_DATA_DIR override)
+npm run test:workbench   # node:test suite, mocked providers, temp data dirs
+npx tsc --noEmit         # typecheck
 ```
 
-## Environment Setup
+Node 22, run through `tsx`; no build step and no auto-reload. Server code changes need a restart. `web/` is static and re-read on page reload.
 
-Copy `.env.template` to `.env` and configure:
-- **Letta**: `LETTA_API_KEY`, `LETTA_BASE_URL`, `LETTA_AGENT_ID`
-- **Letta Context**:
-  - `LETTA_USE_SENDER_PREFIX`: Include sender info in message prefix
-  - `LETTA_CONTEXT_MESSAGE_COUNT`: Number of recent messages to include as context (default: 5, set to 0 to disable)
-  - `LETTA_THREAD_CONTEXT_ENABLED`: Enable full thread context when in threads (default: true)
-  - `LETTA_THREAD_MESSAGE_LIMIT`: Max messages to fetch from threads (default: 50, 0 for unlimited)
-- **Discord**: `APP_ID`, `DISCORD_TOKEN`, `PUBLIC_KEY`
-- **Channel filtering**:
-  - `DISCORD_CHANNEL_ID`: Only listen to messages in this channel (ignores all other channels)
-  - `DISCORD_RESPONSE_CHANNEL_ID`: Only respond in this channel (agent sees all messages but only replies here)
-- **Behavior flags**: `RESPOND_TO_DMS`, `RESPOND_TO_MENTIONS`, `RESPOND_TO_BOTS`, `RESPOND_TO_GENERIC`
-- **Timer settings**: `ENABLE_TIMER`, `TIMER_INTERVAL_MINUTES`, `FIRING_PROBABILITY`
-- **Message batching**: `MESSAGE_BATCH_ENABLED`, `MESSAGE_BATCH_SIZE`, `MESSAGE_BATCH_TIMEOUT_MS`
+## Worktrees and data
 
-## Architecture
+- `~/dev/room` (`main`) is the working copy. `~/dev/room-stable` (`stable`) is a git worktree Deniz uses on 4317 against the real data (`ROOM_DATA_DIR=~/dev/room/.room-data`). Update it with `git -C ~/dev/room-stable merge main` plus a restart, only when asked.
+- `.room-data/` holds Deniz's research records. **Never write test turns to it.** To exercise the app, run a second instance on another port with a throwaway `ROOM_DATA_DIR` in the scratchpad. One server process per data directory.
+- `saves/`, `saved/`, `oldsaves/`, `prompt-archive/`, `_dead/` are private transcripts and retired code, gitignored. Don't commit them.
+- No remote is configured. Commit only when asked; never push without asking.
 
-### Core Files
+## Layout
 
-- **src/server.ts**: Main Discord bot server
-  - Sets up Express server and Discord client
-  - Handles Discord events (`messageCreate`, `ready`)
-  - Routes messages based on type (DM, mention, reply, generic)
-  - Implements random timer feature that triggers agent heartbeats
-  - Message routing logic determines whether to respond based on env flags
+- `src/workbench/` — the app.
+  - `store.ts` — JSON-file store: one atomically written file per record, `.room-data/<kind>/<id>.json`.
+  - `engine.ts` — branches, immutable state revisions, turns, speaker selection, forks, retcons, trash.
+  - `generation.ts` — provider calls (`demo`, `opengateway`, `together`); persists the request before dispatch and the outcome after.
+  - `jev.ts` — nonblocking shadow Jev call per turn.
+  - `comparisons.ts` — saved side-by-side comparisons of live branches.
+  - `server.ts` — Express API, loopback-only.
+- `web/` — vanilla JS/CSS frontend (`app.js` holds all UI state).
+- Shared with the workbench: `src/personas/personas.ts` (the cast), `src/speakerTurn.ts` (speaker input + wrong-speaker check), `src/replyLimit.ts` (2,000-char cap), `GLOBAL_SYSTEM` from `src/modelRouter.ts`.
+- Legacy, not used by the workbench: `src/discord.ts`, `jevLog.ts`, `jevSpeaker.ts`, `research.ts`, `webhooks.ts`, `personaWebhooks.ts`, `participants.ts`, and the Letta leftovers `src/server.ts`, `src/messages.ts`, `setup.sh`. `scripts/jevEval.ts` holds the Jev measurements cited in JEV_SPEC §3.
 
-- **src/messages.ts**: Letta API integration
-  - Handles streaming responses from Letta API
-  - Processes different message types (assistant, reasoning, tool calls, tool returns)
-  - Sends intermediate messages to Discord (reasoning and tool calls visible as separate messages)
-  - Manages typing indicators during agent processing
-  - Auto-splits long messages to fit Discord's 2000 character limit
+## Invariants — don't break these
 
-### Message Flow
+- **Evidence is never overwritten.** Revisions, attempts, outcomes, selections, and Jev records are append-only. Edits create new revisions or branches; they don't mutate old ones.
+- **Request before dispatch.** Every provider request is on disk before it is sent; its outcome (raw response, transformations, validation, usage, errors) is a separate record. Rejected and failed attempts survive.
+- **Optimistic concurrency.** Mutations take the branch head they expect (`expected`) and reject if it moved. A response that arrives after the branch changed is stored as detached, never appended.
+- **Research material never reaches model context.** Observations, Jev output, and edit history stay out of character prompts.
+- **Selection provenance.** Every turn records `method` (`forced` | `locked` | `random`; `jev`/`silence-breaker` are reserved for later) plus run info. JEV_SPEC §5 treats this as load-bearing: a pick repeated across a multi-turn run is one decision (`forced` then `locked`), not N.
+- **Credentials stay server-side** and are excluded from stored and exported records.
+- **No automatic spending.** Branch/edit operations make no provider calls; nothing triggers paid generation, Jev calls, or training without an explicit user action.
 
-1. Discord message received → `server.ts` filters based on type and configuration
-2. **Conversation history fetched** → Last N messages retrieved from channel (configurable via `LETTA_CONTEXT_MESSAGE_COUNT`)
-3. Message formatted with sender context + channel name + conversation history → sent to Letta agent via `messages.ts`
-4. Letta streams response chunks → processed and displayed in Discord
-5. Stream includes:
-   - **Reasoning messages**: Sent as separate Discord messages with "Reasoning" header
-   - **Tool calls**: Sent as separate messages showing tool name and arguments
-   - **Tool returns**: Sent showing return values (truncated to 200 chars)
-   - **Assistant message**: Final response sent as reply (auto-split if longer than 2000 characters)
+## Style
 
-### Conversation History
-
-The bot includes message history as context for the agent:
-
-**Regular channels:**
-- Fetches the last N messages (default 5, configured via `LETTA_CONTEXT_MESSAGE_COUNT`)
-- Includes both user and bot messages for full conversational context
-- Filters out messages starting with `!` (command messages)
-- Formatted as a context block prepended to the current message:
-  ```
-  [Recent conversation context:]
-  - username1: message text
-  - username2: message text
-  - botname: response text
-  [End context]
-
-  [Current message from user]
-  ```
-- Set `LETTA_CONTEXT_MESSAGE_COUNT=0` to disable
-
-**Threads:**
-- Automatically detects when message is in a thread
-- Fetches the thread starter message and all thread messages (up to `LETTA_THREAD_MESSAGE_LIMIT`, default 50)
-- Formatted as thread context:
-  ```
-  [Thread: "Thread name"]
-  [Thread started by username: "original message"]
-
-  [Thread conversation history:]
-  - user1: message
-  - user2: reply
-  - user3: another reply
-  [End thread context]
-
-  [Current message from user]
-  ```
-- Thread context takes precedence over regular conversation history
-- Set `LETTA_THREAD_CONTEXT_ENABLED=false` to disable thread context
-
-### Message Types
-
-The bot distinguishes between four message types and includes channel context in the message sent to the agent:
-- **DM**: Direct messages to the bot
-  - Format: `[username (id=123) sent you a direct message] message`
-- **MENTION**: Messages that @mention the bot
-  - Format: `[username (id=123) sent a message in #channel-name mentioning you] message`
-- **REPLY**: Replies to bot's previous messages (includes truncated context)
-  - Format: `[username (id=123) replied to you in #channel-name] message`
-- **GENERIC**: Non-mention messages in channels (only if `RESPOND_TO_GENERIC=true`)
-  - Format: `[username (id=123) sent a message in #channel-name] message`
-
-### Response Channel Gating
-
-The bot supports two types of channel filtering:
-- **Listen filtering** (`DISCORD_CHANNEL_ID`): Bot only processes messages from this channel, ignoring all others
-- **Response filtering** (`DISCORD_RESPONSE_CHANNEL_ID`): Bot processes messages from all channels (sends to agent) but only responds in this channel
-  - Agent sees and learns from all conversations
-  - Agent only sends visible responses in the specified channel
-  - No typing indicators or intermediate messages shown outside response channel
-  - Useful for having the agent observe multiple channels but only speak in one
-
-### Message Batching
-
-When enabled, the bot accumulates messages before sending to the agent:
-- **Per-channel buffers**: Each channel has its own message batch
-- **Drain conditions**: Batch drains when reaching `MESSAGE_BATCH_SIZE` messages OR `MESSAGE_BATCH_TIMEOUT_MS` timeout
-- **Batch format**: All messages formatted as numbered list with user context
-  ```
-  [Batch of 5 messages from #general]
-  1. [username (id=123) mentioned you] message text
-  2. [username2 (id=456)] another message
-  3. [username (id=123)] follow up
-  ...
-  ```
-- **Benefits**: Reduces API calls, provides better conversation context, natural flow
-- **Agent response**: Agent sees entire batch and can respond once to all messages
-
-### Timer Feature
-
-When enabled, the bot sends periodic heartbeat events to the agent:
-- Random interval between 1 minute and `TIMER_INTERVAL_MINUTES`
-- Fires based on `FIRING_PROBABILITY` (default 10%)
-- Requires `DISCORD_CHANNEL_ID` to be set for message destination
-- Allows agent to initiate conversations or update its memory autonomously
-
-## TypeScript Configuration
-
-- Target: ES2020
-- Module: CommonJS
-- Strict mode enabled
-- Source files in `src/` directory
-
-## Key Dependencies
-
-- `@letta-ai/letta-client`: Letta TypeScript SDK for agent communication
-- `discord.js`: Discord API library (v14+)
-- `express`: Web server framework
-- `dotenv`: Environment variable management
-- `ts-node`: TypeScript execution for development
-- `ts-node-dev`: Auto-reload during development
+Match the surrounding code: terse, dense TypeScript, few comments, one where the reason isn't obvious. No new dependencies without asking. Add tests to `tests/workbench.test.ts` for behavior changes; use mocked transports, never live keys.

@@ -2,6 +2,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let boot, data, current=localStorage.getItem('room-branch'), tab='characters', character='Boris', selected=null;
 let comparison=null, category=localStorage.getItem('room-library')||'conversations', refreshVersion=0;
+let showJev=localStorage.getItem('room-show-jev')==='true',jevTimer,jevPollVersion=0;
 const records=new Map(), runs=new Map(), drafts=new Map();
 async function api(url,body) {const r=await fetch('/api'+url,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const value=await r.json();if(!r.ok)throw Error(value.error||'Request failed');return value;}
 function error(e){$('#error').textContent=e.message||String(e);$('#error').hidden=false;}
@@ -24,7 +25,8 @@ async function refresh(){
   rememberInputs();const version=++refreshVersion;
   const next=await api('/bootstrap');
   if(comparison && ![comparison.left,comparison.right].every(key=>next.branches.some(b=>b.id===key))){comparison=null;localStorage.removeItem('room-comparison');}
-  if(!next.branches.some(b=>b.id===current)){current=next.branches.find(b=>!b.parent)?.id;selected=null;}
+  if(!comparison&&next.branches.find(b=>b.id===current)?.comparison)current=null;
+  if(!next.branches.some(b=>b.id===current)){current=next.branches.find(b=>!b.parent&&!b.comparison)?.id;selected=null;}
   const ids=comparison?[comparison.left,comparison.right]:current?[current]:[];
   const values=await Promise.all(ids.map(id=>api('/branches/'+id)));
   if(version!==refreshVersion)return;
@@ -48,7 +50,7 @@ function renderLibrary(){
   $('#library-label').textContent=category==='conversations'?'CONVERSATIONS':category==='trash'?'TRASH':'SAVED COMPARISONS';localStorage.setItem('room-library',category);
   if(category==='conversations'){
     const root=rootOf(current);
-    $('#branches').innerHTML=boot.branches.filter(b=>!b.parent).map(b=>`<button data-branch="${b.id}" class="${!comparison&&root?.id===b.id?'active':''}">${esc(b.name)}<small>${boot.branches.filter(x=>x.id!==b.id&&rootOf(x.id)?.id===b.id).length} branches</small></button>`).join('')||'<p class="muted">No conversations yet.</p>';
+    $('#branches').innerHTML=boot.branches.filter(b=>!b.parent&&!b.comparison).map(b=>`<button data-branch="${b.id}" class="${!comparison&&root?.id===b.id?'active':''}">${esc(b.name)}<small>${boot.branches.filter(x=>x.id!==b.id&&rootOf(x.id)?.id===b.id).length} branches</small></button>`).join('')||'<p class="muted">No conversations yet.</p>';
     document.querySelectorAll('[data-branch]').forEach(b=>b.onclick=action(()=>choose(b.dataset.branch)));
   }else if(category==='trash'){
     $('#branches').innerHTML=(boot.trash||[]).map(t=>`<div class="trash-item"><strong>${esc(t.name)}</strong><small>${t.branches.length-1} included branches · ${esc(new Date(t.deletedAt).toLocaleDateString())}</small><button data-restore="${t.id}" ${t.canRestore?'':'disabled'}>Restore</button>${t.canRestore?'':'<small>Restore its parent conversation first.</small>'}</div>`).join('')||'<p class="muted">Trash is empty.</p>';
@@ -58,18 +60,45 @@ function renderLibrary(){
     document.querySelectorAll('[data-comparison]').forEach(b=>b.onclick=action(async()=>openComparison(await api('/comparisons/'+b.dataset.comparison))));
   }
 }
-function messagesHtml(state,key){return state.messages.map(m=>`<article class="message ${m.source==='human'?'human':''}"><div class="avatar">${esc(m.speaker[0])}</div><div><div class="message-head"><strong>${esc(m.speaker)}</strong><span class="badge">${esc(m.source)}</span></div><p>${esc(m.text)}</p><div class="message-actions"><button data-inspect="${m.id}" data-owner="${key}">Inspect</button><button data-fork="${m.id}" data-owner="${key}">Branch here</button><button data-retcon="${m.id}" data-owner="${key}">Retcon</button><button data-note="${m.id}" data-owner="${key}">Observe</button></div></div></article>`).join('')||'<div class="empty"><h2>What should we get into?</h2><p>Add a thought, or let a character begin.</p></div>';}
+function paintJev(){
+  $('#show-jev').checked=showJev;$('#refresh-jev').hidden=!showJev;$('#jev-help').hidden=!showJev;
+  document.querySelectorAll('[data-jev-message]').forEach(el=>{
+    el.hidden=!showJev;if(!showJev){el.innerHTML='';return;}
+    const record=records.get(el.dataset.owner),message=record?.branch.revision.state.messages.find(m=>m.id===el.dataset.jevMessage);
+    el.innerHTML=message?RoomJev.render(message,record.jev,record.selections):'';
+  });
+}
+function scheduleJevPoll(){
+  clearTimeout(jevTimer);const version=++jevPollVersion;
+  if(showJev)jevTimer=setTimeout(()=>refreshJevObservations(version,0,false),1200);
+}
+async function refreshJevObservations(version,round,manual){
+  if(!showJev||version!==jevPollVersion)return;
+  const visible=comparison?[comparison.left,comparison.right]:current?[current]:[];
+  const keys=visible.filter(key=>manual||records.get(key)?.jev.some(j=>!j.outcome&&records.get(key).branch.revision.state.messages.some(m=>m.turnId===j.turnId)));
+  if(!keys.length)return;
+  // Read saved evidence only. Never trigger another Jev/model request.
+  const results=await Promise.allSettled(keys.map(async key=>({key,value:await api('/branches/'+key)})));
+  if(!showJev||version!==jevPollVersion)return;
+  for(const result of results)if(result.status==='fulfilled'&&records.has(result.value.key))records.get(result.value.key).jev=result.value.value.jev;
+  paintJev();
+  const failed=results.some(r=>r.status==='rejected');
+  $('#jev-refresh-status').textContent=failed?'Could not refresh. Try Refresh observations.':'';
+  if(!failed&&round<5)jevTimer=setTimeout(()=>refreshJevObservations(version,round+1,false),1200);
+}
+function messagesHtml(state,key){return state.messages.map(m=>`<article class="message ${m.source==='human'?'human':''}"><div class="avatar">${esc(m.speaker[0])}</div><div><div class="message-head"><strong>${esc(m.speaker)}</strong><span class="badge">${esc(m.source)}</span></div><p>${esc(m.text)}</p><div class="message-actions"><button data-inspect="${m.id}" data-owner="${key}">Inspect</button><button data-fork="${m.id}" data-owner="${key}">Branch here</button><button data-retcon="${m.id}" data-owner="${key}">Retcon</button><button data-note="${m.id}" data-owner="${key}">Observe</button><button data-delete-message="${m.id}" data-owner="${key}">Delete message</button></div><div data-jev-message="${m.id}" data-owner="${key}" hidden></div></div></article>`).join('')||'<div class="empty"><h2>What should we get into?</h2><p>Add a thought, or let a character begin.</p></div>';}
 function controlsHtml(key){
   const s=records.get(key).branch.revision.state,d=drafts.get(key)||{},busy=isBusy(key),run=runs.get(key);
   return `<div class="turn-controls"><label>Next voice <select data-speaker><option value="">Random participant</option>${s.participants.map(p=>`<option ${p===d.speaker?'selected':''}>${p}</option>`).join('')}</select></label><label>Turns <input data-count type="number" value="${esc(d.count||1)}" min="1" max="20"></label><button data-generate="${key}" class="primary" ${busy?'disabled':''}>Continue ↗</button><button data-stop="${key}" ${busy?'':'hidden'}>Stop</button><span class="muted">${run?esc(run.stopping?'Stopping…':`Generating ${run.index} of ${run.count}…`):busy?'Generating…':''}</span></div><form data-compose="${key}"><textarea data-text aria-label="Your message" rows="2" placeholder="Say something to this conversation…">${esc(d.text||'')}</textarea><button class="primary" type="submit" ${busy?'disabled':''}>Send</button></form>`;
 }
 function render(){
+  clearTimeout(jevTimer);++jevPollVersion;
   rememberInputs();renderLibrary();$('#connection').textContent=`OpenGateway ${boot.keys.opengateway?'● ready':'○ no key'} · Together ${boot.keys.together?'● ready':'○ no key'}`;
   document.querySelector('.workspace').classList.toggle('comparing',!!comparison);
   $('#messages').hidden=!!comparison;$('#comparison').hidden=!comparison;document.querySelector('main > footer').hidden=!!comparison||!data;
   for(const key of ['family','fork','history','compare','export','delete'])$('#'+key).disabled=!data;
   for(const key of ['family','fork','history','export','delete'])$('#'+key).hidden=!!comparison;
-  $('#save-comparison').hidden=!comparison;$('#fork-comparison').hidden=!comparison?.id;
+  $('#save-comparison').hidden=!comparison;$('#fork-comparison').hidden=!comparison?.id||!!comparison?.draft;
   $('#fork-comparison').disabled=!!comparison?.dirty;
   $('#save-comparison').textContent=comparison?.dirty?'Save comparison *':'Save comparison';
   $('#compare').textContent=comparison?'Close comparison':'Compare';
@@ -81,7 +110,7 @@ function render(){
   }
   $('#delete').textContent=data.branch.parent?'Delete branch':'Delete conversation';
   if(comparison){
-    $('#title').textContent=comparison.name||'Compare conversations';$('#subtitle').textContent='Two live conversations · controls apply to their own pane';
+    $('#title').textContent=comparison.name||'Compare conversations';$('#subtitle').textContent='Independent conversation copies · changes stay in this comparison';
     const positions=new Map([...document.querySelectorAll('[data-pane]')].map(p=>[p.dataset.pane,p.querySelector('.pane-messages').scrollTop]));
     $('#comparison').innerHTML=[comparison.left,comparison.right].map((key,index)=>{
       const b=records.get(key).branch;
@@ -95,12 +124,13 @@ function render(){
     $('#messages').innerHTML=messagesHtml(s,current);
     const footer=document.querySelector('main > footer');footer.dataset.controls=current;footer.innerHTML=controlsHtml(current)+'<div class="footnote">Sending adds your message. Continue gives a character the floor.</div>';
   }
-  bindControls();renderPanel(false);
+  bindControls();renderPanel(false);paintJev();scheduleJevPoll();
 }
 function bindControls(){
   document.querySelectorAll('[data-inspect]').forEach(b=>b.onclick=()=>focusPane(b.dataset.owner,'inspect',b.dataset.inspect));
   document.querySelectorAll('[data-note]').forEach(b=>b.onclick=()=>focusPane(b.dataset.owner,'notes',b.dataset.note));
   document.querySelectorAll('[data-fork]').forEach(b=>b.onclick=action(()=>forkAt(b.dataset.owner,b.dataset.fork)));
+  document.querySelectorAll('[data-delete-message]').forEach(b=>b.onclick=action(()=>deleteMessage(b.dataset.owner,b.dataset.deleteMessage)));
   document.querySelectorAll('[data-retcon]').forEach(b=>b.onclick=action(()=>retcon(b.dataset.owner,b.dataset.retcon)));
   document.querySelectorAll('[data-settings]').forEach(b=>b.onclick=()=>focusPane(b.dataset.settings,'characters'));
   document.querySelectorAll('[data-pane-fork]').forEach(b=>b.onclick=action(()=>forkAt(b.dataset.paneFork)));
@@ -138,10 +168,12 @@ function renderPanel(force = true) {
   } else if(tab==='inspect') {
     const message=s.messages.find(m=>m.id===selected);
     const attempts=message ? data.attempts.filter(a=>a.turnId===message.turnId && message.turnId) : data.attempts;
-    const turnIds=new Set(attempts.map(a=>a.turnId));
+    const deleted=new Map();for(const revision of data.revisions){const change=revision.change;if(change?.kind==='delete-message'&&!s.messages.some(m=>m.id===change.message.id)&&!deleted.has(change.message.id))deleted.set(change.message.id,revision);}
+    const removedHtml=[...deleted.values()].map(r=>`<details><summary>${esc(r.change.message.speaker)} · deleted message</summary><p>${esc(r.change.message.text)}</p><button data-restore-message="${r.id}">Restore message</button></details>`).join('');
     const selections=message ? data.selections.filter(r=>r.id===message.turnId) : data.selections;
     const jev=message ? data.jev.filter(r=>r.turnId===message.turnId) : data.jev;
-    panel.innerHTML=`<h2>${message?'Behind this message':'Turn records'}</h2><p class="muted">${message?esc(message.speaker)+' · '+esc(message.source):'Every attempt survives, including failures and rejected replies.'}</p><button id="all-attempts">All attempts</button> <button id="refresh-evidence">Refresh</button>${message?.source==='imported'?'<p class="notice">Historical prompts, selection methods and raw responses were not saved. Current defaults do not reconstruct them.</p>':''}${message?.source==='edited'?'<p class="notice">This text was retconned. Any linked generation describes the original text, not the edit.</p>':''}${selections.map(r=>details('Selection · '+r.method+' → '+r.chosen,r)).join('')}${[...attempts].reverse().map(a=>`<details open><summary>${esc(a.persona)} · ${esc(a.provider)} · ${esc(a.outcome?.status||'pending')}<br><span class="muted">${esc(a.body.model)}</span></summary>${details('Exact dispatched request', {endpoint:a.endpoint,body:a.body,revision:a.revision,retryOf:a.retryOf})}${details('Raw response & processing',a.outcome||{status:'pending'})}</details>`).join('')}${jev.map(j=>details('Jev shadow · '+(j.outcome?.status||'pending'),j)).join('')}${!attempts.length?'<p class="muted">No generation attempt for this selection.</p>':''}<div class="divider"></div><h2>State history</h2>${data.revisions.slice(0,30).map(r=>details(r.reason+' · '+new Date(r.at).toLocaleTimeString(),r)).join('')}`;
+    panel.innerHTML=`<h2>${message?'Behind this message':'Turn records'}</h2><p class="muted">${message?esc(message.speaker)+' · '+esc(message.source):'Every attempt survives, including failures and rejected replies.'}</p><button id="all-attempts">All attempts</button> <button id="refresh-evidence">Refresh</button>${message?.source==='imported'?'<p class="notice">Historical prompts, selection methods and raw responses were not saved. Current defaults do not reconstruct them.</p>':''}${message?.source==='edited'?'<p class="notice">This text was retconned. Any linked generation describes the original text, not the edit.</p>':''}${selections.map(r=>details('Selection · '+r.method+' → '+r.chosen,r)).join('')}${[...attempts].reverse().map(a=>`<details open><summary>${esc(a.persona)} · ${esc(a.provider)} · ${esc(a.outcome?.status||'pending')}<br><span class="muted">${esc(a.body.model)}</span></summary>${details('Exact dispatched request', {endpoint:a.endpoint,body:a.body,revision:a.revision,retryOf:a.retryOf})}${details('Raw response & processing',a.outcome||{status:'pending'})}</details>`).join('')}${jev.map(j=>details('Jev shadow · '+(j.outcome?.status||'pending'),j)).join('')}${!attempts.length?'<p class="muted">No generation attempt for this selection.</p>':''}${removedHtml?'<div class="divider"></div><h2>Deleted messages</h2>'+removedHtml:''}<div class="divider"></div><h2>State history</h2>${data.revisions.slice(0,30).map(r=>details(r.reason+' · '+new Date(r.at).toLocaleTimeString(),r)).join('')}`;
+    document.querySelectorAll('[data-restore-message]').forEach(b=>b.onclick=action(async()=>{if(isBusy(current))throw Error('Stop generation before restoring a message.');await api('/branches/'+current+'/messages/restore',{expected:data.branch.head,deletion:b.dataset.restoreMessage});await refresh();}));
     $('#all-attempts').onclick=()=>{selected=null;renderPanel();};$('#refresh-evidence').onclick=action(refresh);
   } else {
     panel.innerHTML=`<h2>Field notes</h2><p class="muted">${selected?'Linked to the selected message.':'Linked to the current branch revision.'} Record what happened, your interpretation, alternatives, and what to test next.</p><textarea id="observation" rows="8" placeholder="Observation…&#10;&#10;Possible explanations…&#10;&#10;Next experiment…"></textarea><button id="save-note" class="primary wide">Save observation</button><p><a href="/api/branches/${current}/notebook">Export Markdown</a></p>${data.observations.map(o=>`<div class="note"><span class="muted">${esc(new Date(o.at).toLocaleString())}</span><br>${esc(o.text)}</div>`).join('')}`;
@@ -156,6 +188,13 @@ async function saveSettings(all) {
   if(all) for(const c of Object.values(s.characters)) { c.provider=$('#provider').value;c.model=$('#model').value;c.temperature=Number($('#temperature').value); }
   s.system=$('#system').value;s.human=$('#human').value;s.shadow=$('#shadow').checked;s.policy=$('#policy').value;
   await api('/branches/'+current+'/settings',{...s,expected:data.branch.head});$('#panel').dataset.key='';await refresh();
+}
+async function deleteMessage(key,messageId){
+  if(isBusy(key))throw Error('Stop generation before deleting a message.');
+  const source=records.get(key).branch,message=source.revision.state.messages.find(m=>m.id===messageId);
+  const f=await dialog('Delete message?',`<p>Remove this message from <strong>${esc(source.name)}</strong>?</p><blockquote>${esc(message.text.slice(0,240))}${message.text.length>240?'…':''}</blockquote><p class="muted">Later messages and retained memories stay as they are. Future replies will use the remaining history. You can restore the message under Inspect → Deleted messages.</p>`,'Delete message');
+  if(!f)return;
+  await api('/branches/'+key+'/messages/'+messageId+'/delete',{expected:source.head});selected=null;await refresh();
 }
 async function forkAt(key,messageId){
   if(isBusy(key))throw Error('Stop this conversation before branching');
@@ -192,7 +231,7 @@ $('#delete').onclick=action(async()=>{
   const source=data.branch,subtree=new Set([source.id]);
   let size;do{size=subtree.size;for(const b of boot.branches)if(subtree.has(b.parent))subtree.add(b.id);}while(size!==subtree.size);
   if([...subtree].some(isBusy))throw Error('Stop generation in this conversation and its branches before deleting it.');
-  const f=await dialog(source.parent?'Delete branch?':'Delete conversation?',`<p>Move <strong>${esc(source.name)}</strong>${subtree.size>1?' and its '+(subtree.size-1)+' branches':''} to Trash?</p><p class="muted">You can restore it from the Trash tab. Messages and research records are kept. Comparisons using these branches will be hidden until restored.</p>`,'Move to Trash');
+  const f=await dialog(source.parent?'Delete branch?':'Delete conversation?',`<p>Move <strong>${esc(source.name)}</strong>${subtree.size>1?' and its '+(subtree.size-1)+' branches':''} to Trash?</p><p class="muted">You can restore it from the Trash tab. Messages and research records are kept. Saved comparisons keep their own copies.</p>`,'Move to Trash');
   if(!f)return;
   const entry=await api('/branches/'+source.id+'/trash',{expected:source.head});
   for(const key of entry.branches){records.delete(key);drafts.delete(key);}
@@ -202,16 +241,16 @@ $('#export').onclick=()=>{location.href='/api/branches/'+current+'/export';};
 $('#import').onchange=action(async e=>{const file=e.target.files[0];if(file){const b=await api('/import',JSON.parse(await file.text()));await choose(b.id);}e.target.value='';});
 $('#compare').onclick=action(async()=>{
   if(comparison){if(comparison.dirty)throw Error('Save this comparison before closing, or open another conversation to leave the unsaved pairing.');await choose(current);return;}
-  const options=boot.branches.filter(b=>b.id!==current);if(!options.length)throw Error('Create another conversation or branch to compare');
+  const options=boot.branches.filter(b=>b.id!==current&&!b.comparison);if(!options.length)throw Error('Create another conversation or branch to compare');
   const f=await dialog('Compare continuations',`<label>Right conversation<select name="branch">${options.map(b=>`<option value="${b.id}">${esc(rootOf(b.id).name)}${b.parent?' / '+esc(b.name):''}</option>`).join('')}</select></label>`,'Compare');
-  if(f)await openComparison({left:current,right:f.get('branch'),name:'Unsaved comparison',dirty:false});
+  if(f)await openComparison(await api('/comparisons/draft',{left:current,right:f.get('branch')}));
 });
 $('#save-comparison').onclick=action(async()=>{
   const source={...comparison};
-  const f=await dialog('Save comparison',`<label>Name<input name="name" value="${esc(source.id?source.name:'Conversation comparison')}" required></label><p class="muted">Saves this pair of live branches. Messages and edits persist automatically. Branch comparison makes independent copies of both sides.</p>`);
+  const f=await dialog('Save comparison',`<label>Name<input name="name" value="${esc(source.id&&!source.draft?source.name:'Conversation comparison')}" required></label><p class="muted">Saves these independent copies. Changes here stay within this comparison; changes to the source conversations stay outside it. Branch comparison copies both sides into another independent comparison.</p>`);
   if(!f)return;
   const saved=await api('/comparisons',{id:source.id,expected:source.version,name:f.get('name'),left:source.left,right:source.right});
-  comparison=saved;category='comparisons';localStorage.setItem('room-comparison',saved.id);await refresh();
+  await openComparison(saved);
 });
 $('#fork-comparison').onclick=action(async()=>{
   const source={...comparison};if(source.dirty)throw Error('Save the changed pairing before branching it');
@@ -219,6 +258,9 @@ $('#fork-comparison').onclick=action(async()=>{
   const f=await dialog('Branch both conversations',`<label>Name<input name="name" value="${esc(source.name+' · alternative')}" required></label><p class="muted">Copies the current prompts, memories and history of both sides. The original comparison stays independent.</p>`,'Branch comparison');
   if(f)await openComparison(await api('/comparisons/'+source.id+'/fork',{expected:source.version,name:f.get('name')}));
 });
+$('#show-jev').checked=showJev;
+$('#show-jev').onchange=()=>{showJev=$('#show-jev').checked;localStorage.setItem('room-show-jev',String(showJev));$('#jev-refresh-status').textContent='';paintJev();scheduleJevPoll();};
+$('#refresh-jev').onclick=()=>{clearTimeout(jevTimer);void refreshJevObservations(++jevPollVersion,0,true);};
 for(const name of ['conversations','comparisons','trash'])$('#show-'+name).onclick=()=>{category=name;renderLibrary();};
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;renderPanel();});
 action(async()=>{const saved=localStorage.getItem('room-comparison');if(saved){try{comparison=await api('/comparisons/'+saved);current=comparison.left;}catch{localStorage.removeItem('room-comparison');}}await refresh();})();

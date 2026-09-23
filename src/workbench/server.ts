@@ -45,14 +45,15 @@ export function createApp(engine = new Engine(defaultStore())) {
       jev: store.list('jev-requests').filter(relevant).map(r => ({ ...r, outcome: jevResults.get(r.id) || null })) };
   };
   app.get('/api/bootstrap', route((_req,res) => {
-    const library = engine.library(), visible = new Set(library.branches.map(b => b.id));
-    res.json({ ...library, comparisons: store.list('comparisons').filter(c => visible.has(c.left) && visible.has(c.right)),
+    const saved = comparisons.list(), library = engine.library();
+    res.json({ ...library, comparisons: saved,
       keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY },
       active: [...engine.active.keys()] });
   }));
   app.post('/api/branches/:id/trash', route((req,res) => res.json(engine.trash(req.params.id,req.body.expected))));
   app.post('/api/trash/:id/restore', route((req,res) => res.json(engine.restore(req.params.id))));
   app.get('/api/comparisons/:id', route((req,res) => res.json(comparisons.get(req.params.id))));
+  app.post('/api/comparisons/draft', route((req,res) => res.json(comparisons.save({name:'Unsaved comparison',left:req.body.left,right:req.body.right},null,true))));
   app.post('/api/comparisons', route((req,res) => res.json(comparisons.save(req.body))));
   app.post('/api/comparisons/:id/fork', route((req,res) => res.json(comparisons.fork(req.params.id,req.body.name,req.body.expected))));
   app.post('/api/branches', route((req,res) => res.json(engine.create(String(req.body.name || 'New room')))));
@@ -64,6 +65,8 @@ export function createApp(engine = new Engine(defaultStore())) {
     res.json(engine.commit(b.id, req.body.expected, { ...s, system, human, participants, characters, shadow, policy }, 'Settings updated'));
   }));
   app.post('/api/branches/:id/messages', route((req,res) => res.json(engine.message(req.params.id, req.body.expected, req.body.text || ''))));
+  app.post('/api/branches/:id/messages/:message/delete', route((req,res) => res.json(engine.deleteMessage(req.params.id,req.body.expected,req.params.message))));
+  app.post('/api/branches/:id/messages/restore', route((req,res) => res.json(engine.restoreMessage(req.params.id,req.body.expected,req.body.deletion))));
   app.post('/api/branches/:id/turn', route(async(req,res) => res.json(await engine.turn(req.params.id, req.body.expected, req.body.speaker || undefined, runInfo(req.body.run)))));
   app.post('/api/branches/:id/stop', route((req,res) => { engine.cancel(req.params.id); res.json({ ok: true }); }));
   app.post('/api/branches/:id/fork', route((req,res) => res.json(engine.fork(req.params.id, req.body.revision, String(req.body.name || 'Alternate continuation'), req.body.messageId))));

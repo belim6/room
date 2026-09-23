@@ -64,13 +64,13 @@ Tests cover request-before-dispatch persistence, rejected retries, raw responses
 This is the first usable conversation/research loop, not all four releases in PRODUCT_SPEC.md. Dataset curation and training jobs, blind/scored comparison batches, character-specific histories, automatic memory generation, and browser tool/research calls remain later work. Storage currently uses atomically written JSON files instead of the spec's proposed SQLite; this keeps the initial single-user record inspectable without a database dependency.
 
 
-## Live comparisons and branch library
+## Independent comparisons and branch library
 
 The sidebar has **Conversations** and **Comparisons** tabs. Conversations lists originals only. Open an original and use **Branches** to choose any descendant, including retcons; nested branches stay associated with their original conversation.
 
-**Compare** now opens two live panes. Each has its own message composer, speaker selection, turn count, Continue/Stop, Branch, Edit history, and Characters & settings controls. Inspect and notebook actions target the clicked pane. Both sides can generate concurrently; stopping one side does not stop the other. Editing history or branching replaces only that pane with the newly created branch.
+**Compare** creates independent snapshots of the selected conversations and opens them in two panes. Copies include history, prompts, memories, participants, and provider settings. Even before saving, changes in either pane do not affect its source conversation. Each has its own message composer, speaker selection, turn count, Continue/Stop, Branch, Edit history, and Characters & settings controls. Inspect and notebook actions target the clicked pane. Both sides can generate concurrently; stopping one side does not stop the other. Editing history or branching replaces only that pane with the newly created branch.
 
-**Save comparison** names and persists the pair in the Comparisons category. A saved comparison refers to two live branches, so later messages and settings edits are visible when it is reopened. Changing which branch a pane displays marks the pairing unsaved; use Save comparison to retain that change. Existing conversation and research data are never deleted by saving a comparison.
+**Save comparison** names and saves the independent pair in the Comparisons category. Later changes to source conversations do not enter the comparison; only changes made within its own panes do. Comparison copies and their branches stay out of the Conversations library. Changing which branch a pane displays marks the pairing unsaved; use Save comparison to retain that change. Existing conversation and research data are never deleted by saving a comparison.
 
 **Branch comparison** creates independent copies of both sides at their current states and saves a child comparison. Subsequent history, prompts, memory, or generations in the copied pair do not alter its parent comparison. Save any changed pairing and stop active turns before using this button.
 
@@ -78,6 +78,20 @@ The sidebar has **Conversations** and **Comparisons** tabs. Conversations lists 
 
 Open a conversation and click **Delete conversation** to move it and all its branches to **Trash**. Within a branch, **Delete branch** moves just that branch and its descendants. Stop any active generation in the affected branches first.
 
-Use **Trash → Restore** to recover the deleted conversation or branch. If a branch was deleted separately before its parent, restore the parent first, then restore that branch separately. Saved comparisons involving deleted branches are hidden until both sides are available again.
+Use **Trash → Restore** to recover the deleted conversation or branch. If a branch was deleted separately before its parent, restore the parent first, then restore that branch separately. Saved comparisons have independent copies, so deleting a source conversation does not remove its comparisons.
 
 Deletion removes conversations from the active library, not from disk. Messages, revisions, attempts, observations, and imported saves remain intact. Trash changes are recorded atomically, so a whole subtree is hidden or restored together. There is no permanent-delete action in this version.
+
+### Existing comparisons
+
+Legacy comparisons are converted once from live links to owned copies when listed/opened. Conversion preserves their current committed contents, original pairing history, and revision ancestry. Earlier generations were not tagged with their UI origin, so conversion does not try to reconstruct the original save boundary or remove externally added messages retroactively.
+
+### Delete messages
+
+Each message has **Delete message**. It removes that message from the current conversation or comparison pane, without making a new branch. Later messages and memories are retained. Future requests use the remaining history; prior attempts and immutable revisions are unchanged. Use **Inspect → Deleted messages → Restore message** to recover a deleted message, including its original identity and generation link. Stop generation before deleting or restoring messages.
+
+## Read Jev observations inline
+
+Turn on **Show Jev observations** above the conversation to show saved observations beneath messages, in either a single conversation or both comparison panes. This display preference is remembered locally and is separate from enabling new shadow requests in Character settings. Viewing or refreshing observations only reads saved records; it makes no model calls.
+
+Each observed turn shows Jev’s suggested speaker, ranked speaker probabilities, its separately reported confidence score, the external-research probability, and the actual selection with its selection method. These describe the context **before** the reply, not an assessment of the reply itself. Edited messages are labeled as referring to their original turn. Messages without an observation show that explicitly; missing scores are unavailable rather than zero. Pending results refresh briefly in the background; use **Refresh observations** to retry manually. Raw records remain under Inspect.

@@ -111,49 +111,76 @@ test('local HTTP API serves UI, rejects foreign origins, imports and exports evi
 });
 
 
-test('saved comparisons persist live pairings and fork both states independently',async()=>{
+test('comparison snapshots isolate both directions, settings, copies and comparison forks',async()=>{
   const s=store(),e=new Engine(s),comparisons=new Comparisons(e);
   let left=e.create('Left'),right=e.create('Right');
   left=e.message(left.id,left.head,'Left initial');right=e.message(right.id,right.head,'Right initial');
   const saved=comparisons.save({name:'Two viewpoints',left:left.id,right:right.id});
-  assert.equal(new Comparisons(new Engine(new Store(s.root))).get(saved.id).right,right.id);
+  assert.notEqual(saved.left,left.id);assert.notEqual(saved.right,right.id);
+  assert.equal(e.read(saved.left).comparison,saved.id);assert.equal(e.read(saved.left).parent,null);
   left=await e.turn(left.id,left.head,'Boris');right=await e.turn(right.id,right.head,'Elorin');
-  assert.equal(e.read(comparisons.get(saved.id).left).revision.state.messages.at(-1)?.speaker,'Boris');
+  assert.equal(e.read(saved.left).revision.state.messages.length,1);
+  assert.equal(e.read(saved.right).revision.state.messages.length,1);
+  let pane=e.read(saved.left);pane.revision.state.characters.Boris.memory='Inside comparison';
+  pane=e.commit(pane.id,pane.head,pane.revision.state,'Memory edit');pane=await e.turn(pane.id,pane.head,'Rook');
+  assert.equal(e.read(left.id).revision.state.characters.Boris.memory,'');
+  assert.equal(e.read(left.id).revision.state.messages.at(-1)?.speaker,'Boris');
+  assert.equal(new Comparisons(new Engine(new Store(s.root))).get(saved.id).left,pane.id);
   const fork=comparisons.fork(saved.id,'Alternative pair',saved.version);
   assert.equal(fork.parent,saved.id);assert.notEqual(fork.left,saved.left);assert.notEqual(fork.right,saved.right);
-  const l=e.read(fork.left),r=e.read(fork.right);
-  assert.deepEqual(l.revision.state,left.revision.state);assert.deepEqual(r.revision.state,right.revision.state);
-  const changed=l.revision.state;changed.characters.Boris.memory='Only the new left';e.commit(l.id,l.head,changed,'Memory edit');
-  await e.turn(r.id,r.head,'Rook');
-  assert.equal(e.read(saved.left).revision.state.characters.Boris.memory,'');
-  assert.equal(e.read(saved.right).revision.state.messages.length,2);
-  assert.equal(e.read(fork.right).revision.state.messages.length,3);
+  assert.deepEqual(e.read(fork.left).revision.state,pane.revision.state);
+  const changed=await e.turn(fork.left,e.read(fork.left).head,'Ilya');
+  assert.equal(e.read(saved.left).revision.state.messages.length,2);
+  assert.equal(changed.revision.state.messages.length,3);
+  // Importing another comparison's pane must copy it, never share ownership.
   const updated=comparisons.save({id:saved.id,expected:saved.version,name:'Updated pair',left:fork.left,right:saved.right});
-  assert.equal(updated.left,fork.left);assert.throws(()=>comparisons.save({id:saved.id,expected:saved.version,name:'Stale',left:saved.left,right:saved.right}),/changed/);
+  assert.notEqual(updated.left,fork.left);assert.equal(updated.right,saved.right);
+  assert.throws(()=>comparisons.save({id:saved.id,expected:saved.version,name:'Stale',left:saved.left,right:saved.right}),/changed/);
+  const localFork=e.fork(updated.left,e.read(updated.left).head,'Pane branch');
+  assert.equal(localFork.comparison,saved.id);
+  const resaved=comparisons.save({id:saved.id,expected:updated.version,name:updated.name,left:localFork.id,right:updated.right});
+  assert.equal(resaved.left,localFork.id);
+  const independent=comparisons.save({name:'Same inputs, new experiment',left:left.id,right:right.id});
+  assert.notEqual(independent.left,saved.left);
   assert.throws(()=>comparisons.save({name:'Invalid',left:saved.left,right:saved.left}),/different/);
 });
 
-test('comparison routes list, save, reopen and fork a pair without model calls',async()=>{
+test('legacy comparisons convert once, keep current content, and preserve original pairing records',()=>{
+  const s=store(),e=new Engine(s),c=new Comparisons(e);let left=e.create('Legacy left');const right=e.create('Legacy right');
+  const old={id:'legacy',version:'old-version',name:'Legacy comparison',left:left.id,right:right.id,parent:null,createdAt:'2026-09-22',updatedAt:'2026-09-22'};
+  s.put('comparisons',old.id,old);s.put('comparison-revisions',old.version,{...old,leftRevision:left.head,rightRevision:right.head});
+  left=e.message(left.id,left.head,'Keep existing content regardless of where it was added');
+  const converted=c.list()[0];assert.equal(converted.isolation,'owned-v1');
+  assert.deepEqual(e.read(converted.left).revision.state,left.revision.state);
+  assert.equal(s.get('comparison-revisions',old.version).left,left.id);
+  assert.equal(c.get(old.id).version,converted.version);assert.equal(s.list('branches').length,4);
+  e.message(left.id,left.head,'After conversion');assert.equal(e.read(converted.left).revision.state.messages.length,1);
+});
+
+test('comparison routes create isolated drafts, persist pane edits and survive source deletion',async()=>{
   const e=new Engine(store()),left=e.create('A'),right=e.create('B');
   const server=createApp(e).listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));
   const base=`http://127.0.0.1:${(server.address() as any).port}/api`;
   const post=async(url:string,body:any)=>{const r=await fetch(base+url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});assert.equal(r.status,200);return r.json()};
   try{
-    const saved=await post('/comparisons',{name:'API pair',left:left.id,right:right.id});
+    const draft=await post('/comparisons/draft',{left:left.id,right:right.id});
+    assert.equal((await (await fetch(base+'/bootstrap')).json()).comparisons.length,0);
+    const added=await post('/branches/'+draft.left+'/messages',{expected:e.read(draft.left).head,text:'Only inside draft'});
+    assert.equal(e.read(left.id).revision.state.messages.length,0);
+    const saved=await post('/comparisons',{id:draft.id,expected:draft.version,name:'API pair',left:draft.left,right:draft.right});
+    assert.equal(saved.left,draft.left);assert.equal(saved.draft,false);
     const bootstrap=await (await fetch(base+'/bootstrap')).json();assert.equal(bootstrap.comparisons[0].id,saved.id);
-    const opened=await (await fetch(base+'/comparisons/'+saved.id)).json();assert.equal(opened.left,left.id);
+    const opened=await (await fetch(base+'/comparisons/'+saved.id)).json();assert.equal(opened.left,saved.left);
     const fork=await post('/comparisons/'+saved.id+'/fork',{name:'Branch pair',expected:saved.version});
-    assert.equal(fork.parent,saved.id);assert.equal(e.read(fork.left).parent,left.id);assert.equal(e.read(fork.right).parent,right.id);
+    assert.equal(fork.parent,saved.id);assert.equal(e.read(fork.left).comparison,fork.id);
     assert.equal(e.store.list('attempts').length,0);
-    const entry=await post('/branches/'+left.id+'/trash',{expected:left.head});
+    const removed=await post('/branches/'+saved.left+'/messages/'+added.revision.state.messages[0].id+'/delete',{expected:added.head});
+    assert.equal(removed.revision.state.messages.length,0);assert.equal(e.read(fork.left).revision.state.messages.length,1);
+    await post('/branches/'+saved.left+'/messages/restore',{expected:removed.head,deletion:removed.head});
+    assert.equal(e.read(saved.left).revision.state.messages.length,1);
+    await post('/branches/'+left.id+'/trash',{expected:left.head});
     const hidden=await (await fetch(base+'/bootstrap')).json();
-    assert.deepEqual(hidden.branches.map((b:any)=>b.id).sort(),[right.id,fork.right].sort());
-    assert.equal(hidden.comparisons.length,0);assert.equal(hidden.trash[0].id,entry.id);
-    assert.equal((await fetch(base+'/comparisons/'+saved.id)).status,400);
-    assert.equal((await fetch(base+'/branches/'+left.id)).status,400);
-    await post('/trash/'+entry.id+'/restore',{});
-    const restored=await (await fetch(base+'/bootstrap')).json();
-    assert.equal(restored.comparisons.length,2);assert.equal(restored.trash.length,0);
+    assert.equal(hidden.comparisons.length,2);assert(!hidden.branches.some((b:any)=>b.id===left.id));
     assert.equal((await fetch(base+'/comparisons/'+saved.id)).status,200);
   }finally{await new Promise<void>(r=>server.close(()=>r()));}
 });
@@ -202,4 +229,48 @@ test('deleting refuses stale edits and running descendants without changing the 
   assert.equal(e.library().trash.length,0);
   resolve(response('Boris: Finished'));await pending;
   e.trash(root.id,root.head);assert.equal(e.library().branches.length,0);
+});
+
+
+test('message deletion changes only effective history and restoration preserves IDs and later messages',async()=>{
+  const s=store(),e=new Engine(s);let b=e.create('Delete messages');
+  b=e.message(b.id,b.head,'First');b=await e.turn(b.id,b.head,'Boris');b=e.message(b.id,b.head,'Later');
+  const before=structuredClone(b),message=b.revision.state.messages[1],attempts=s.attempts();
+  const sibling=e.fork(b.id,b.head,'Sibling');
+  b=e.deleteMessage(b.id,b.head,message.id);
+  assert.equal(b.id,before.id);assert.deepEqual(b.revision.state.messages.map(m=>m.text),['First','Later']);
+  assert.deepEqual(s.get('revisions',before.head).state,before.revision.state);
+  assert.deepEqual(s.attempts(),attempts);assert.equal(e.read(sibling.id).revision.state.messages.length,3);
+  const deletion=b.head;b=await e.turn(b.id,b.head,'Ilya');
+  const latest=s.attempts().find(a=>a.persona==='Ilya');assert(!JSON.stringify(latest.body).includes(message.text));
+  assert.throws(()=>e.restoreMessage(sibling.id,sibling.head,deletion),/does not belong/);
+  assert.throws(()=>e.restoreMessage(b.id,before.head,deletion),/changed/);
+  b=e.restoreMessage(b.id,b.head,deletion);
+  assert.deepEqual(b.revision.state.messages[1],message);assert.equal(b.revision.state.messages.length,4);
+  assert.throws(()=>e.restoreMessage(b.id,b.head,deletion),/already present/);
+  assert.throws(()=>e.deleteMessage(b.id,b.head,'missing'),/no longer exists/);
+  e.active.set(b.id,{controller:new AbortController(),turnId:'active'});
+  assert.throws(()=>e.deleteMessage(b.id,b.head,message.id),/Stop generation/);e.active.delete(b.id);
+});
+
+test('Jev readout keeps confidence distinct from choice probabilities and uses recorded turn selection',()=>{
+  const {render}=require('../web/jev-view.js');
+  const observation={turnId:'turn',outcome:{status:'completed',answers:{next_speaker:{choice:'Alexandra',confidence:.43,probabilities:{Boris:0,Alexandra:.51,Ilya:.49}},needs_research:{noul:0}}}};
+  const html=render({turnId:'turn',speaker:'Ilya',source:'generated'},[observation],[{id:'turn',chosen:'Ilya',method:'forced'}]);
+  assert.match(html,/Jev confidence <strong>43%/);assert.match(html,/>51%<\/strong>/);
+  assert.match(html,/Actually selected: <strong>Ilya<\/strong> · your pick/);
+  assert.match(html,/Before this reply/);assert.match(html,/External research needed<\/span><strong>0%/);
+  assert(html.indexOf('Alexandra speaker probability')<html.indexOf('Ilya speaker probability'));
+  assert.match(render({turnId:'turn',source:'edited'},[observation]),/observation belongs to the original turn/);
+  assert.match(render({turnId:'another'},[observation]),/No Jev observation recorded/);
+});
+
+test('Jev readout distinguishes missing scores, pending and failed observations and escapes provider strings',()=>{
+  const {render}=require('../web/jev-view.js'),message={turnId:'turn',speaker:'Boris'};
+  assert.match(render(message,[{turnId:'turn'}]),/Observation pending/);
+  assert.match(render(message,[{turnId:'turn',outcome:{status:'interrupted'}}]),/Observation interrupted/);
+  const failed=render(message,[{turnId:'turn',outcome:{status:'failed',error:'<script>bad</script>'}}]);
+  assert.match(failed,/Observation failed/);assert(!failed.includes('<script>'));
+  const missing=render(message,[{turnId:'turn',outcome:{status:'completed',answers:{next_speaker:{choice:'<b>x</b>',confidence:null,probabilities:{Boris:2}}}}}]);
+  assert.match(missing,/Jev confidence <strong>Unavailable/);assert.match(missing,/Speaker probabilities unavailable/);assert(!missing.includes('<b>x</b>'));
 });

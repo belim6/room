@@ -9,8 +9,9 @@ export interface Character { prompt: string; memory: string; provider: Provider;
 export interface Message { id: string; speaker: string; text: string; source: 'human' | 'generated' | 'imported' | 'edited'; turnId?: string; checkpoint?: string }
 export interface State { system: string; participants: PersonaName[]; characters: Record<PersonaName, Character>;
   messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string }
-export interface Revision { id: string; branch: string; parent: string | null; at: string; reason: string; state: State }
-export interface Branch { id: string; name: string; head: string; parent: string | null; fork: string | null; createdAt: string }
+export interface MessageChange { kind: 'delete-message' | 'restore-message'; message: Message; index: number }
+export interface Revision { id: string; branch: string; parent: string | null; at: string; reason: string; state: State; change?: MessageChange }
+export interface Branch { id: string; name: string; head: string; parent: string | null; fork: string | null; createdAt: string; comparison?: string }
 export interface TrashEntry { id: string; branch: string; name: string; branches: string[]; deletedAt: string; restoredAt?: string }
 const names = Object.keys(PERSONAS) as PersonaName[];
 export function initialState(): State {
@@ -70,19 +71,19 @@ export class Engine {
     }
     return this.read(entry.branch);
   }
-  create(name = 'Untitled room', state = initialState(), parent: string | null = null, fork: string | null = null) {
+  create(name = 'Untitled room', state = initialState(), parent: string | null = null, fork: string | null = null, comparison?: string) {
     validateState(state);
-    if (parent) this.available(parent);
-    const branch: Branch = { id: id(), name: name.slice(0, 120), head: '', parent, fork, createdAt: new Date().toISOString() };
-    const revision: Revision = { id: id(), branch: branch.id, parent: fork, at: new Date().toISOString(), reason: parent ? 'Branch created' : 'Room created', state: clone(state) };
+    if (parent) comparison = this.available(parent).comparison;
+    const branch: Branch = { id: id(), name: name.slice(0, 120), head: '', parent, fork, ...(comparison ? { comparison } : {}), createdAt: new Date().toISOString() };
+    const revision: Revision = { id: id(), branch: branch.id, parent: fork, at: new Date().toISOString(), reason: parent ? 'Branch created' : comparison ? 'Comparison snapshot created' : 'Room created', state: clone(state) };
     branch.head = revision.id; this.store.put('revisions', revision.id, revision); this.store.put('branches', branch.id, branch);
     return this.read(branch.id);
   }
-  commit(branchId: string, expected: string, state: State, reason: string) {
+  commit(branchId: string, expected: string, state: State, reason: string, change?: MessageChange) {
     validateState(state);
     const b = this.available(branchId);
     if (b.head !== expected) throw Error('This branch changed. Reload before saving your edit.');
-    const revision: Revision = { id: id(), branch: branchId, parent: b.head, at: new Date().toISOString(), reason, state: clone(state) };
+    const revision: Revision = { id: id(), branch: branchId, parent: b.head, at: new Date().toISOString(), reason, state: clone(state), ...(change ? { change: clone(change) } : {}) };
     this.store.put('revisions', revision.id, revision); b.head = revision.id; this.store.put('branches', b.id, b);
     return this.read(b.id);
   }
@@ -121,6 +122,30 @@ export class Engine {
     s.messages.push({ id: next, speaker: s.human, text: text.trim(), source: 'human' });
     const result = this.commit(branchId, expected, s, 'Human message');
     return result;
+  }
+  deleteMessage(branchId: string, expected: string, messageId: string) {
+    if (this.active.has(branchId)) throw Error('Stop generation before deleting a message.');
+    const b = this.read(branchId), state = clone(b.revision.state);
+    const index = state.messages.findIndex(m => m.id === messageId);
+    if (index < 0) throw Error('Message no longer exists');
+    const [message] = state.messages.splice(index,1);
+    return this.commit(branchId,expected,state,'Message deleted',{kind:'delete-message',message,index});
+  }
+  restoreMessage(branchId: string, expected: string, deletion: string) {
+    if (this.active.has(branchId)) throw Error('Stop generation before restoring a message.');
+    const b = this.read(branchId), state = clone(b.revision.state);
+    let cursor: string | null = b.head;
+    while (cursor && cursor !== deletion) cursor = this.store.get<Revision>('revisions',cursor).parent;
+    if (!cursor) throw Error('That deletion does not belong to this conversation');
+    const revision = this.store.get<Revision>('revisions',cursor), change = revision.change;
+    if (change?.kind !== 'delete-message' || !revision.parent) throw Error('Invalid message deletion');
+    if (state.messages.some(m => m.id === change.message.id)) throw Error('This message is already present');
+    const original = this.store.get<Revision>('revisions',revision.parent).state.messages;
+    const next = original.slice(change.index+1).find(m => state.messages.some(current => current.id === m.id));
+    const previous = original.slice(0,change.index).reverse().find(m => state.messages.some(current => current.id === m.id));
+    const index = next ? state.messages.findIndex(m => m.id === next.id) : previous ? state.messages.findIndex(m => m.id === previous.id)+1 : Math.min(change.index,state.messages.length);
+    state.messages.splice(index,0,clone(change.message));
+    return this.commit(branchId,expected,state,'Message restored',{kind:'restore-message',message:change.message,index});
   }
   retcon(branchId: string, expected: string, messageId: string, text: string, mode: string, memory: string) {
     if (!['keep','regenerate'].includes(mode) || !['restore','keep'].includes(memory)) throw Error('Choose retcon and memory modes');
