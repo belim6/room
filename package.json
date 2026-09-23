@@ -1,0 +1,33 @@
+{
+  "name": "discord-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node dist/server.js",
+    "build": "tsc",
+    "dev": "ts-node-dev src/server.ts",
+    "workbench": "node --import tsx src/workbench/server.ts",
+    "test:workbench": "node --import tsx --test tests/workbench.test.ts",
+    "discord": "node --import tsx src/discord.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@letta-ai/letta-client": "^0.1.145",
+    "discord.js": "^14.25.1",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "lodash": "^4.17.21"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.4",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.2"
+  }
+}

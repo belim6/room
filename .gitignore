@@ -1,0 +1,14 @@
+node_modules
+.env
+dist/
+.room-data/
+
+# Private transcripts, prompts, and retired code — kept locally, not versioned
+saves/
+saved/
+oldsaves/
+prompt-archive/
+_dead/
+
+.DS_Store
+.__probe
