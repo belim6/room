@@ -1,6 +1,6 @@
 # Branch changes and experiments — specification
 
-Status: v0.1 built (commit 5c00b94) · §6–§9 ready to build · Version 0.2 · 24 September 2026
+Status: v0.1 built (commit 5c00b94) · §6–§11 ready to build · Version 0.2 · 24 September 2026
 Companion to `PRODUCT_SPEC.md` (§4.4 branching, §4.8 experiments). Read `CLAUDE.md` first; its invariants apply to everything below.
 
 ## 1. Problem
