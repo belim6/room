@@ -12,7 +12,7 @@ Open http://127.0.0.1:4317. Requires Node 22 and the project's installed depende
 ## First conversation
 
 1. Create a room. New rooms use **local demo**: clearly labeled placeholder replies, no model calls.
-2. In Characters, choose a provider and exact model ID, then save. “Apply provider/model to all characters” applies these settings and temperature across the cast while preserving their different prompts and memories.
+2. In Characters, choose a provider and exact model ID, then save. “Apply provider/model/reasoning to all characters” applies these settings, temperature and the reasoning setting across the cast while preserving their different prompts and memories.
 3. For OpenGateway, the existing `.env` key and Kimi model are supported. For Together, add `TOGETHER_API_KEY=...` to `.env`, restart, and enter an available model ID. Credentials are never entered in the browser.
 4. Send your message, then Continue. Select a character or random selection; optionally request up to 20 turns. Stop cancels the active request and remaining turns. Aborting locally cannot guarantee the provider stops processing or charging.
 5. Inspect any reply to see its request, raw response, processing, and selection. All attempts also includes failures and rejected replies.
@@ -105,3 +105,19 @@ For experiments created independently (Exp2 was a manual copy of Exp1), use **Li
 A child experiment's page shows **Branched from <parent>** with the design difference: checkpoint, speaker, conditions added, removed or changed (as a settings diff of each condition's effective state), and the outcome rule. The question and prediction are not part of this diff.
 
 **Lineage** lists the whole family: ancestors, the experiment itself, and all descendants. Rows are grouped by identical effective design (speaker plus the state after the condition's patch), so replications line up. Each row shows n, outcome counts, tag counts, median and range of completion tokens for the measured reply, and the run window. Counts are never pooled across experiments.
+
+## Reasoning setting
+
+Each character has **Reasoning** in Characters: `Provider default` or `Off`. Off adds the provider's documented switch to the request, which is saved with the attempt before it is sent. On OpenGateway that switch is `thinking: {"type": "disabled"}`, verified on 24 September 2026 against `deepseek/deepseek-v4.1-flash-ultrafast`. Together has no verified switch yet, so Off is rejected for Together characters before anything is sent. It is accepted for local demo, where it changes nothing. Effort levels are not offered: on the only provider probed, they were accepted but made no measurable difference.
+
+Reasoning appears in the branch changes view like any other character field (`Boris reasoning changed`), and experiment conditions can set it with `characters.<name>.reasoning` in the JSON patch.
+
+## Reasoning length in experiment results
+
+The trials table has **Completion tokens** (for the measured reply; the provider's reasoning-token count is shown underneath when it reports one), **Reasoning chars** (length of the provider-returned reasoning) and **Total tokens** (all attempts for the trial). All three can be sorted. The completion-token min/max filter narrows the table, for example to check whether short runs always vote with the pile. Each condition's result card shows the median and range of completion tokens.
+
+## Favorites and Back
+
+Each reply has **☆ Favorite** and **Dislike**. Click again to clear. A mark belongs to the message itself, so it follows the reply into every branch that keeps it, and it appears as ★ or ✕ next to the outcome in experiment trial tables. Marks are append-only records (`reactions/`): clearing or switching adds a new record, and the latest one wins. They are research material and never enter model context.
+
+**← Back** (above the room title) returns to the previous conversation, saved comparison or experiment page, for example from a trial branch to its experiment. Browser back, mouse back buttons and swipe gestures do the same. Unsaved comparison drafts are not recorded as a step.

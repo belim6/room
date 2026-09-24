@@ -7,7 +7,7 @@ import type { PersonaName } from '../personas/personas';
 export type Provider = 'opengateway' | 'together' | 'demo';
 export interface GenerationInput {
   provider: Provider; model: string; persona: PersonaName;
-  messages: { role: string; content: string }[]; temperature: number;
+  messages: { role: string; content: string }[]; temperature: number; reasoning?: 'default' | 'off';
   branch?: string; revision?: string; turnId?: string;
   policy?: 'protected' | 'observe'; signal?: AbortSignal;
 }
@@ -16,14 +16,18 @@ export const ENDPOINTS = {
   together: 'https://api.together.ai/v1/chat/completions',
   demo: 'local:demo',
 };
+// Only switches probed against the live provider; an unverified parameter is never sent silently.
+const REASONING_OFF: Partial<Record<Provider, object>> = { opengateway: { thinking: { type: 'disabled' } }, demo: {} };
+export const reasoningSwitchVerified = (provider: Provider) => provider in REASONING_OFF;
 export function defaultStore() { return new Store(process.env.ROOM_DATA_DIR || path.resolve('.room-data')); }
 export async function generate(input: GenerationInput, store = defaultStore(), transport: typeof fetch = fetch) {
+  if (input.reasoning === 'off' && !reasoningSwitchVerified(input.provider)) throw Error(`Turning reasoning off is not verified for ${input.provider}`);
   const attempts: string[] = [];
   const messages = clone(input.messages);
   const group = input.turnId || id();
   for (let n = 0; n < (input.policy === 'observe' ? 1 : 2); n++) {
     const attemptId = id(); attempts.push(attemptId);
-    const body = { model: input.model, messages: clone(messages), temperature: input.temperature };
+    const body = { model: input.model, messages: clone(messages), temperature: input.temperature, ...(input.reasoning === 'off' ? REASONING_OFF[input.provider] : {}) };
     const request = { id: attemptId, at: new Date().toISOString(), turnId: group, branch: input.branch,
       revision: input.revision, persona: input.persona, provider: input.provider, policy: input.policy || 'protected',
       retryOf: n ? attempts[n - 1] : null, endpoint: ENDPOINTS[input.provider], body };

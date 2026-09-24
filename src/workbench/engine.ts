@@ -1,11 +1,11 @@
 import { Store, clone, id } from './store';
-import { generate, type Provider } from './generation';
+import { generate, reasoningSwitchVerified, type Provider } from './generation';
 import { PERSONAS, type PersonaName } from '../personas/personas';
 import { GLOBAL_SYSTEM } from '../modelRouter';
 import { buildSpeakerInput } from '../speakerTurn';
 import { shadowJev } from './jev';
 
-export interface Character { prompt: string; memory: string; provider: Provider; model: string; temperature: number }
+export interface Character { prompt: string; memory: string; provider: Provider; model: string; temperature: number; reasoning?: 'default' | 'off' }
 export interface Message { id: string; speaker: string; text: string; source: 'human' | 'generated' | 'imported' | 'edited'; turnId?: string; checkpoint?: string; editedFrom?: string[] }
 export interface State { system: string; participants: PersonaName[]; characters: Record<PersonaName, Character>;
   messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string }
@@ -25,7 +25,8 @@ export function validateState(s: State) {
   if (typeof s.shadow !== 'boolean' || !['protected','observe'].includes(s.policy)) throw Error('Invalid observation settings');
   for (const name of names) {
     const c = s.characters?.[name];
-    if (!c || typeof c.prompt !== 'string' || typeof c.memory !== 'string' || !['demo','together','opengateway'].includes(c.provider) || typeof c.model !== 'string' || !c.model.trim() || c.model.length > 200 || !Number.isFinite(c.temperature) || c.temperature < 0 || c.temperature > 2) throw Error(`Invalid character settings: ${name}`);
+    if (!c || typeof c.prompt !== 'string' || typeof c.memory !== 'string' || !['demo','together','opengateway'].includes(c.provider) || typeof c.model !== 'string' || !c.model.trim() || c.model.length > 200 || !Number.isFinite(c.temperature) || c.temperature < 0 || c.temperature > 2 || (c.reasoning !== undefined && !['default','off'].includes(c.reasoning))) throw Error(`Invalid character settings: ${name}`);
+    if (c.reasoning === 'off' && !reasoningSwitchVerified(c.provider)) throw Error(`${name}: turning reasoning off is not verified for ${c.provider}`);
   }
   if (!Array.isArray(s.messages) || s.messages.length > 10000 || s.messages.some(m => typeof m.id !== 'string' || typeof m.text !== 'string' || m.text.length > 100000 || typeof m.speaker !== 'string' || !m.speaker.trim() || m.speaker.length > 80)) throw Error('Invalid conversation');
 }
@@ -187,7 +188,7 @@ export class Engine {
       const system = `${c.prompt}\n\n${s.system}\n\n${c.memory ? `Your retained memory:\n${c.memory}\n\n` : ''}Your identity for this request is ${speaker}. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters.`;
       const transcript = s.messages.map(m => `${m.speaker}: ${m.text}`).join('\n');
       const user = buildSpeakerInput(speaker, transcript, s.participants).replace('Current participants: Dennis,', `Current participants: ${s.human},`);
-      const result = await generate({ provider: c.provider, model: c.model, temperature: c.temperature, persona: speaker,
+      const result = await generate({ provider: c.provider, model: c.model, temperature: c.temperature, reasoning: c.reasoning, persona: speaker,
         messages: [{ role: 'system', content: system }, { role: 'user', content: user }], branch: branchId, revision: b.head, turnId,
         policy: s.policy, signal: controller.signal }, this.store, this.transport);
       if (controller.signal.aborted || this.read(branchId).head !== b.head) {

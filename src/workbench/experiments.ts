@@ -19,7 +19,7 @@ export function applyPatch(base: State, patch: Patch): State {
       for(const [name,fields] of Object.entries(value)) {
         if(!Object.prototype.hasOwnProperty.call(next.characters,name) || !fields || typeof fields!=='object' || Array.isArray(fields))throw Error('Invalid character patch');
         for(const [field,v] of Object.entries(fields)) {
-          if(!['prompt','memory','provider','model','temperature'].includes(field))throw Error('Unknown character field');
+          if(!['prompt','memory','provider','model','temperature','reasoning'].includes(field))throw Error('Unknown character field');
           (next.characters as any)[name][field]=v;
         }
       }
@@ -244,10 +244,10 @@ export class Experiments {
       const revision=turn?.revision?this.store.get<Revision>('revisions',turn.revision):this.store.list<Revision>('revisions').filter(r=>r.branch===t.branch&&r.state.messages.some(m=>m.turnId===t.turnId&&m.source==='generated')).sort((a,b)=>a.at.localeCompare(b.at))[0];
       const message=revision?.state.messages.find(m=>m.turnId===t.turnId);
       const measured=[...evidence].filter(a=>a.turnId===t.turnId&&a.outcome?.status==='completed').sort((a,b)=>a.at.localeCompare(b.at)).at(-1),outcome=measured?.outcome;
-      const reply=message?.text||outcome?.text||'',extracted=extractOutcome(reply,e.outcome);
+      const reply=message?.text||outcome?.text||'',extracted=extractOutcome(reply,e.outcome),reasoning=reasoningOf(outcome);
       const manual=labels.filter(l=>l.trial===t.id).sort((a,b)=>b.sequence-a.sequence)[0]||null;
       const effectiveOutcome=manual?.outcome??extracted.value,tag=manual?manual.tag:(e.outcome?.highlight?.[effectiveOutcome||'']||null);
-      return {...t,reply,messageId:message?.id||null,extracted:extracted.value,extractionError:extracted.error,manual,effectiveOutcome,tag,reasoning:reasoningOf(outcome),completionTokens:outcome?.usage?.completion_tokens??null,measuredAt:measured?.at||null,latencyMs:evidence.length?evidence.reduce((n,a)=>n+(a.outcome?.latencyMs||0),0):null,tokens:evidence.some(a=>a.outcome?.usage?.total_tokens!=null)?evidence.reduce((n,a)=>n+(a.outcome?.usage?.total_tokens||0),0):null,attempts:evidence.map(a=>a.id)};
+      return {...t,reply,messageId:message?.id||null,extracted:extracted.value,extractionError:extracted.error,manual,effectiveOutcome,tag,reasoning,reasoningChars:reasoning?.length??null,completionTokens:outcome?.usage?.completion_tokens??null,reasoningTokens:outcome?.usage?.completion_tokens_details?.reasoning_tokens??null,measuredAt:measured?.at||null,latencyMs:evidence.length?evidence.reduce((n,a)=>n+(a.outcome?.latencyMs||0),0):null,tokens:evidence.some(a=>a.outcome?.usage?.total_tokens!=null)?evidence.reduce((n,a)=>n+(a.outcome?.usage?.total_tokens||0),0):null,attempts:evidence.map(a=>a.id)};
     });
   }
   detail(key:string) {

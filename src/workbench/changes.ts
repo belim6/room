@@ -24,7 +24,7 @@ export function stateChanges(from: State, to: State) {
     settings.push({field,...(character?{character}:{}),before,after,...(typeof before==='string' && typeof after==='string' && (before.includes('\n')||after.includes('\n'))?{diff:lineDiff(before,after)}:{})});
   }
   for(const key of ['system','human','participants','shadow','policy'] as const) field(key,from[key],to[key]);
-  for(const name of Object.keys(from.characters) as PersonaName[]) for(const key of ['prompt','memory','provider','model','temperature'] as const) field(key,from.characters[name][key],to.characters[name][key],name);
+  for(const name of Object.keys(from.characters) as PersonaName[]) {for(const key of ['prompt','memory','provider','model','temperature'] as const) field(key,from.characters[name][key],to.characters[name][key],name);field('reasoning',from.characters[name].reasoning||'default',to.characters[name].reasoning||'default',name);}
   const old = new Map(from.messages.map(m=>[m.id,m])), now = new Map(to.messages.map(m=>[m.id,m]));
   const original = (m: Message) => old.has(m.id)?m.id:m.editedFrom?.find(key=>old.has(key));
   const represented = new Set(to.messages.map(original).filter(Boolean));

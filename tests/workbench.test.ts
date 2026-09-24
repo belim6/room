@@ -408,3 +408,44 @@ test('branching copies the design into a blank-intent draft; links reject cycles
   assert.notEqual(lineage[1].conditions.find(c=>c.key==='B')!.design,lineage[0].conditions.find(c=>c.key==='B')!.design);
   assert(typeof aTest.medianTokens==='number'&&aTest.window);
 });
+import { validateState } from '../src/workbench/engine';
+test('reasoning off maps to the verified provider switch, is rejected unverified before dispatch, and shows as a change',async()=>{
+  const s=store();process.env.OPENGATEWAY_API_KEY='test-secret';let sent:any;
+  await generate({...input,provider:'opengateway',reasoning:'off'},s,async(_u,opts)=>{sent=JSON.parse(String(opts?.body));return response('Fine.');});
+  assert.deepEqual(sent.thinking,{type:'disabled'});assert.deepEqual(s.attempts()[0].body.thinking,{type:'disabled'},'switch is in the persisted request');
+  await generate({...input,provider:'opengateway'},s,async(_u,opts)=>{sent=JSON.parse(String(opts?.body));return response('Fine.');});assert(!('thinking' in sent));
+  const before=s.list('attempts').length;
+  await assert.rejects(generate({...input,reasoning:'off'},s,async()=>{throw Error('must not dispatch');}),/not verified for together/);
+  assert.equal(s.list('attempts').length,before);
+  await generate({...input,provider:'demo',reasoning:'off'},s);
+  const state=initialState();state.characters.Boris.reasoning='off';validateState(state);
+  state.characters.Boris.provider='together';assert.throws(()=>validateState(state),/not verified/);
+  assert.throws(()=>validateState({...initialState(),characters:{...initialState().characters,Boris:{...initialState().characters.Boris,reasoning:'low' as any}}}),/Invalid character/);
+  const from=initialState(),to=applyPatch(from,{characters:{Boris:{reasoning:'off'}}});
+  assert.deepEqual(stateChanges(from,to).settings.map(c=>[c.field,c.character,c.before,c.after]),[['reasoning','Boris','default','off']]);
+  const explicit=clone(from);explicit.characters.Boris.reasoning='default';assert.equal(stateChanges(from,explicit).settings.length,0);
+});
+test('trial results expose measured completion tokens, reasoning characters and provider reasoning tokens',async()=>{
+  const s=store();const e=new Engine(s,async()=>new Response(JSON.stringify({choices:[{message:{content:'I vote Elorin.',reasoning_content:'Think.'},finish_reason:'stop'}],usage:{completion_tokens:321,total_tokens:999,completion_tokens_details:{reasoning_tokens:300}}})));
+  const input=design(e);input.conditions.forEach(c=>(c.patch as any).characters={Boris:{provider:'together',model:'mock'}});
+  const x=new Experiments(e),exp=x.create(input);x.run(exp.id,1,exp.version);await x.active.get(exp.id)?.done;
+  const [t]=x.detail(exp.id).trials;assert.equal(t.completionTokens,321);assert.equal(t.reasoningChars,6);assert.equal(t.reasoningTokens,300);assert.equal(t.tokens,999);
+});
+test('reactions are append-only, latest per message wins, and never enter model context',async()=>{
+  const s=store();let prompt='';const e=new Engine(s,async(_u,opts)=>{prompt=String(opts?.body);return response('Noted.');}),app=createApp(e),server=app.listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));
+  const base=`http://127.0.0.1:${(server.address() as any).port}`;
+  async function api(url:string,body?:any){const r=await fetch(base+'/api'+url,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});return {status:r.status,value:await r.json() as any};}
+  try {
+    let b=e.create('Reactions');b=e.message(b.id,b.head,'Hello');const m=b.revision.state.messages[0];
+    assert.deepEqual((await api('/reactions',{branch:b.id,message:m.id,value:'favorite'})).value,{[m.id]:'favorite'});
+    assert.deepEqual((await api('/reactions',{branch:b.id,message:m.id,value:'dislike'})).value,{[m.id]:'dislike'});
+    assert.equal((await api('/reactions',{branch:b.id,message:'missing',value:'favorite'})).status,400);
+    assert.equal((await api('/reactions',{branch:b.id,message:m.id,value:'love'})).status,400);
+    assert.deepEqual((await api('/bootstrap')).value.reactions,{[m.id]:'dislike'});
+    assert.deepEqual((await api('/reactions',{branch:b.id,message:m.id,value:null})).value,{});
+    assert.deepEqual(s.list('reactions').sort((a,b)=>a.sequence-b.sequence).map(r=>r.value),['favorite','dislike',null]);
+    const c=e.read(b.id);c.revision.state.characters.Boris.provider='together';c.revision.state.characters.Boris.model='mock';
+    const next=e.commit(b.id,c.head,c.revision.state,'Use mock');process.env.TOGETHER_API_KEY='k';await e.turn(next.id,next.head,'Boris');
+    assert(!/favorite|dislike/i.test(prompt));
+  } finally { server.close(); }
+});

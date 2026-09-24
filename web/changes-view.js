@@ -1,13 +1,13 @@
 /* Derived views only. No diff or research annotation is sent to a model. */
 const RoomChanges=(()=>{
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const titles={system:'Shared instructions',prompt:'Personality instructions',memory:'Retained memory',participants:'Participants',human:'Human name',shadow:'Jev shadow',policy:'Identity checks'};
-  function groups(settings){const result=[];for(const s of settings){const prior=['model','provider'].includes(s.field)&&result.find(r=>r.field===s.field&&r.before===s.before&&r.after===s.after);if(prior)prior.characters.push(s.character);else result.push({...s,characters:s.character?[s.character]:[]});}return result;}
+  const titles={system:'Shared instructions',prompt:'Personality instructions',memory:'Retained memory',participants:'Participants',human:'Human name',shadow:'Jev shadow',policy:'Identity checks',reasoning:'Reasoning'};
+  function groups(settings){const result=[];for(const s of settings){const prior=['model','provider','reasoning'].includes(s.field)&&result.find(r=>r.field===s.field&&r.before===s.before&&r.after===s.after);if(prior)prior.characters.push(s.character);else result.push({...s,characters:s.character?[s.character]:[]});}return result;}
   function badges(changes){
     if(!changes)return [];
     const result=groups(changes.settings).map(s=>{
       if(s.field==='system'){const add=s.diff?.filter(l=>l.op==='add').length||0,del=s.diff?.filter(l=>l.op==='del').length||0;return s.diff?`rules ${del?'−'+del:''}${add?' +'+add:''} line${Math.max(add,del)===1?'':'s'}`:'rules edited';}
-      return `${s.characters.length===1?s.characters[0]+' ':''}${s.field} ${['model','provider'].includes(s.field)?'changed':'edited'}${s.characters.length>1?' ×'+s.characters.length:''}`;
+      return `${s.characters.length===1?s.characters[0]+' ':''}${s.field} ${['model','provider','reasoning'].includes(s.field)?'changed':'edited'}${s.characters.length>1?' ×'+s.characters.length:''}`;
     });
     const c=changes.conversation,total=Object.values(c.appended).reduce((a,b)=>a+b,0);
     if(total)result.push(`+${total} message${total===1?'':'s'}`);

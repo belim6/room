@@ -55,6 +55,15 @@ async function refresh(){
   if(current)localStorage.setItem('room-branch',current);else localStorage.removeItem('room-branch');
   render();
 }
+// Views go into browser history so Back (button, mouse, gesture) returns to the previous one.
+let restoringView=false;
+function viewOf(){return experimentPage?{kind:'experiment',id:experimentPage.experiment.id}:comparison?(comparison.id&&!comparison.draft?{kind:'comparison',id:comparison.id}:null):current?{kind:'branch',id:current}:null;}
+function trackView(){
+  const v=viewOf(),s=history.state;
+  if(v&&!restoringView&&!(s?.kind===v.kind&&s?.id===v.id)){if(s)history.pushState({...v,depth:(s.depth||0)+1},'');else history.replaceState({...v,depth:0},'');}
+  $('#back').disabled=!history.state?.depth;
+}
+addEventListener('popstate',ev=>{const v=ev.state;if(!v)return;restoringView=true;action(async()=>{try{if(v.kind==='experiment')await openExperiment(v.id);else if(v.kind==='comparison')await openComparison(await api('/comparisons/'+v.id));else await choose(v.id);}finally{restoringView=false;$('#back').disabled=!history.state?.depth;}})();});
 async function choose(id){leaveExperiment();paneChanges=null;rememberInputs();comparison=null;localStorage.removeItem('room-comparison');current=id;selected=null;category='conversations';await refresh();}
 async function openComparison(value){
   leaveExperiment();paneChanges=null;
@@ -110,7 +119,8 @@ async function refreshJevObservations(version,round,manual){
   $('#jev-refresh-status').textContent=failed?'Could not refresh. Try Refresh observations.':'';
   if(!failed&&round<5)jevTimer=setTimeout(()=>refreshJevObservations(version,round+1,false),1200);
 }
-function messagesHtml(state,key){return state.messages.map(m=>`<article class="message ${m.source==='human'?'human':''}"><div class="avatar">${esc(m.speaker[0])}</div><div><div class="message-head"><strong>${esc(m.speaker)}</strong><span class="badge">${esc(m.source)}</span></div><p>${esc(m.text)}</p><div class="message-actions"><button data-inspect="${m.id}" data-owner="${key}">Inspect</button><button data-fork="${m.id}" data-owner="${key}">Branch here</button><button data-retcon="${m.id}" data-owner="${key}">Retcon</button><button data-note="${m.id}" data-owner="${key}">Observe</button><button data-delete-message="${m.id}" data-owner="${key}">Delete message</button></div><div data-jev-message="${m.id}" data-owner="${key}" hidden></div></div></article>`).join('')||'<div class="empty"><h2>What should we get into?</h2><p>Add a thought, or let a character begin.</p></div>';}
+function messagesHtml(state,key){return state.messages.map(m=>`<article class="message ${m.source==='human'?'human':''}"><div class="avatar">${esc(m.speaker[0])}</div><div><div class="message-head"><strong>${esc(m.speaker)}</strong><span class="badge">${esc(m.source)}</span></div><p>${esc(m.text)}</p><div class="message-actions"><button data-inspect="${m.id}" data-owner="${key}">Inspect</button><button data-fork="${m.id}" data-owner="${key}">Branch here</button><button data-retcon="${m.id}" data-owner="${key}">Retcon</button><button data-note="${m.id}" data-owner="${key}">Observe</button>${m.source==='human'?'':reactionButtons(m.id,key)}<button data-delete-message="${m.id}" data-owner="${key}">Delete message</button></div><div data-jev-message="${m.id}" data-owner="${key}" hidden></div></div></article>`).join('')||'<div class="empty"><h2>What should we get into?</h2><p>Add a thought, or let a character begin.</p></div>';}
+function reactionButtons(message,key){const r=boot.reactions?.[message];return `<button data-react="favorite" data-message="${message}" data-owner="${key}" class="${r==='favorite'?'reacted':''}" aria-pressed="${r==='favorite'}">${r==='favorite'?'★ Favorite':'☆ Favorite'}</button><button data-react="dislike" data-message="${message}" data-owner="${key}" class="${r==='dislike'?'reacted':''}" aria-pressed="${r==='dislike'}">${r==='dislike'?'✕ Disliked':'Dislike'}</button>`;}
 function controlsHtml(key){
   const s=records.get(key).branch.revision.state,d=drafts.get(key)||{},busy=isBusy(key),run=runs.get(key);
   return `<div class="turn-controls"><label>Next voice <select data-speaker><option value="">Random participant</option>${s.participants.map(p=>`<option ${p===d.speaker?'selected':''}>${p}</option>`).join('')}</select></label><label>Turns <input data-count type="number" value="${esc(d.count||1)}" min="1" max="20"></label><button data-generate="${key}" class="primary" ${busy?'disabled':''}>Continue ↗</button><button data-stop="${key}" ${busy?'':'hidden'}>Stop</button><span class="muted">${run?esc(run.stopping?'Stopping…':`Generating ${run.index} of ${run.count}…`):busy?'Generating…':''}</span></div><form data-compose="${key}"><textarea data-text aria-label="Your message" rows="2" placeholder="Say something to this conversation…">${esc(d.text||'')}</textarea><button class="primary" type="submit" ${busy?'disabled':''}>Send</button></form>`;
@@ -119,14 +129,15 @@ function changesBadge(key){const c=records.get(key)?.changes;if(!c?.fork)return 
 function render(){
   clearTimeout(jevTimer);++jevPollVersion;
   rememberInputs();renderLibrary();$('#connection').textContent=`OpenGateway ${boot.keys.opengateway?'● ready':'○ no key'} · Together ${boot.keys.together?'● ready':'○ no key'}`;
-  if(experimentPage){renderExperiment();return;}
+  trackView();
+  if(experimentPage){$('#title-changes').hidden=true;renderExperiment();return;}
   document.querySelector('.workspace').classList.remove('experiment-mode');$('#experiment-page').hidden=true;
   $('#diff-panes').hidden=!comparison;
   document.querySelector('.workspace').classList.toggle('comparing',!!comparison);
   $('#messages').hidden=!!comparison;$('#comparison').hidden=!comparison;document.querySelector('main > footer').hidden=!!comparison||!data;
   for(const key of ['fork','history','compare','export','delete'])$('#'+key).disabled=!data;
   for(const key of ['fork','history','export','delete'])$('#'+key).hidden=!!comparison;
-  $('#family-nav').hidden=!!comparison||!data;
+  $('#family-nav').hidden=$('#title-changes').hidden=!!comparison||!data;
   $('#save-comparison').hidden=!comparison;$('#fork-comparison').hidden=!comparison?.id||!!comparison?.draft;
   $('#fork-comparison').disabled=!!comparison?.dirty;
   $('#save-comparison').textContent=comparison?.dirty?'Save comparison *':'Save comparison';
@@ -149,7 +160,7 @@ function render(){
   }else{
     const b=data.branch,s=b.revision.state,root=rootOf(b.id);
     $('#title').textContent=b.name;$('#subtitle').textContent=`${s.participants.length} participants · ${s.messages.length} messages${b.parent?' · Branch of '+root.name:''}`;
-    $('#family-nav').innerHTML=branchNavHtml(current)+changesBadge(current);
+    $('#family-nav').innerHTML=branchNavHtml(current);$('#title-changes').innerHTML=changesBadge(current);
     $('#messages').innerHTML=messagesHtml(s,current);
     const footer=document.querySelector('main > footer');footer.dataset.controls=current;footer.innerHTML=controlsHtml(current)+'<div class="footnote">Sending adds your message. Continue gives a character the floor.</div>';
   }
@@ -158,6 +169,7 @@ function render(){
 function bindControls(){
   document.querySelectorAll('[data-changes]').forEach(b=>b.onclick=()=>{paneChanges=null;focusPane(b.dataset.changes,'changes');});
   document.querySelectorAll('[data-inspect]').forEach(b=>b.onclick=()=>focusPane(b.dataset.owner,'inspect',b.dataset.inspect));
+  document.querySelectorAll('[data-react]').forEach(b=>b.onclick=action(async()=>{const on=boot.reactions?.[b.dataset.message]===b.dataset.react;boot.reactions=await api('/reactions',{branch:b.dataset.owner,message:b.dataset.message,value:on?null:b.dataset.react});const scroll=[...document.querySelectorAll('.messages,.pane-messages')].map(el=>el.scrollTop);render();document.querySelectorAll('.messages,.pane-messages').forEach((el,i)=>el.scrollTop=scroll[i]??el.scrollTop);}));
   document.querySelectorAll('[data-note]').forEach(b=>b.onclick=()=>focusPane(b.dataset.owner,'notes',b.dataset.note));
   document.querySelectorAll('[data-fork]').forEach(b=>b.onclick=action(()=>forkAt(b.dataset.owner,b.dataset.fork)));
   document.querySelectorAll('[data-delete-message]').forEach(b=>b.onclick=action(()=>deleteMessage(b.dataset.owner,b.dataset.deleteMessage)));
@@ -191,7 +203,7 @@ function renderPanel(force = true) {
   panel.dataset.key=panelKey;
   if(tab==='characters') {
     const c=s.characters[character];
-    panel.innerHTML=`<h2>The cast</h2><div class="checks">${Object.keys(s.characters).map(p=>`<label><input type="checkbox" name="participant" value="${p}" ${s.participants.includes(p)?'checked':''}> ${p}</label>`).join('')}</div><div class="divider"></div><label for="character">Character</label><select id="character">${Object.keys(s.characters).map(p=>`<option ${p===character?'selected':''}>${p}</option>`).join('')}</select><label for="prompt">Personality instructions</label><textarea id="prompt" rows="9">${esc(c.prompt)}</textarea><label for="memory">Retained memory · edited by you</label><textarea id="memory" rows="3">${esc(c.memory)}</textarea><label for="provider">Provider</label><select id="provider">${['demo','opengateway','together'].map(p=>`<option value="${p}" ${p===c.provider?'selected':''}>${p==='demo'?'Local demo (no API calls)':p==='together'?'Together':'OpenGateway'}</option>`).join('')}</select><label for="model">Model ID</label><input id="model" value="${esc(c.model)}" placeholder="Exact provider model identifier"><label for="temperature">Temperature</label><input id="temperature" type="number" min="0" max="2" step="0.1" value="${c.temperature}"><button id="apply-all" class="wide">Apply provider/model to all characters</button><div class="divider"></div><h2>Shared context</h2><label for="system">Room instructions</label><textarea id="system" rows="6">${esc(s.system)}</textarea><label for="human">Your name in the room</label><input id="human" value="${esc(s.human)}"><label for="policy">Identity checks</label><select id="policy"><option value="protected" ${s.policy==='protected'?'selected':''}>Protect: reject wrong speaker labels</option><option value="observe" ${s.policy==='observe'?'selected':''}>Observe: show reply and flag issues</option></select><label><input id="shadow" type="checkbox" ${s.shadow?'checked':''} ${!boot.keys.jev?'disabled':''}> Jev shadow observations</label><p class="muted">${boot.keys.jev?'One extra API request per turn; may incur provider charges. Jev observes but never selects or adds context.':'Add TYPESAFE_API_KEY to .env to enable optional shadow calls.'}</p><button id="save-settings" class="primary wide">Save settings</button><p class="muted">Edits apply only to this branch. Earlier versions stay inspectable.</p>`;
+    panel.innerHTML=`<h2>The cast</h2><div class="checks">${Object.keys(s.characters).map(p=>`<label><input type="checkbox" name="participant" value="${p}" ${s.participants.includes(p)?'checked':''}> ${p}</label>`).join('')}</div><div class="divider"></div><label for="character">Character</label><select id="character">${Object.keys(s.characters).map(p=>`<option ${p===character?'selected':''}>${p}</option>`).join('')}</select><label for="prompt">Personality instructions</label><textarea id="prompt" rows="9">${esc(c.prompt)}</textarea><label for="memory">Retained memory · edited by you</label><textarea id="memory" rows="3">${esc(c.memory)}</textarea><label for="provider">Provider</label><select id="provider">${['demo','opengateway','together'].map(p=>`<option value="${p}" ${p===c.provider?'selected':''}>${p==='demo'?'Local demo (no API calls)':p==='together'?'Together':'OpenGateway'}</option>`).join('')}</select><label for="model">Model ID</label><input id="model" value="${esc(c.model)}" placeholder="Exact provider model identifier"><label for="temperature">Temperature</label><input id="temperature" type="number" min="0" max="2" step="0.1" value="${c.temperature}"><label for="reasoning">Reasoning</label><select id="reasoning"><option value="default">Provider default</option><option value="off" ${c.reasoning==='off'?'selected':''}>Off</option></select><p class="muted">Off sends the provider's documented switch (OpenGateway: thinking disabled). Not available for Together until a switch is verified.</p><button id="apply-all" class="wide">Apply provider/model/reasoning to all characters</button><div class="divider"></div><h2>Shared context</h2><label for="system">Room instructions</label><textarea id="system" rows="6">${esc(s.system)}</textarea><label for="human">Your name in the room</label><input id="human" value="${esc(s.human)}"><label for="policy">Identity checks</label><select id="policy"><option value="protected" ${s.policy==='protected'?'selected':''}>Protect: reject wrong speaker labels</option><option value="observe" ${s.policy==='observe'?'selected':''}>Observe: show reply and flag issues</option></select><label><input id="shadow" type="checkbox" ${s.shadow?'checked':''} ${!boot.keys.jev?'disabled':''}> Jev shadow observations</label><p class="muted">${boot.keys.jev?'One extra API request per turn; may incur provider charges. Jev observes but never selects or adds context.':'Add TYPESAFE_API_KEY to .env to enable optional shadow calls.'}</p><button id="save-settings" class="primary wide">Save settings</button><p class="muted">Edits apply only to this branch. Earlier versions stay inspectable.</p>`;
     $('#character').onchange=action(async e=>{await saveSettings(false);character=e.target.value;renderPanel();});
     $('#provider').onchange=()=>{const p=$('#provider').value;$('#model').value=p==='demo'?'local-demo':p==='opengateway'?'moonshotai/kimi-k3-ultrafast':'';};
     $('#save-settings').onclick=action(()=>saveSettings(false));
@@ -217,8 +229,8 @@ function renderPanel(force = true) {
 async function saveSettings(all) {
   const s=structuredClone(data.branch.revision.state);
   s.participants=[...document.querySelectorAll('[name=participant]:checked')].map(x=>x.value);
-  s.characters[character]={prompt:$('#prompt').value,memory:$('#memory').value,provider:$('#provider').value,model:$('#model').value,temperature:Number($('#temperature').value)};
-  if(all) for(const c of Object.values(s.characters)) { c.provider=$('#provider').value;c.model=$('#model').value;c.temperature=Number($('#temperature').value); }
+  s.characters[character]={prompt:$('#prompt').value,memory:$('#memory').value,provider:$('#provider').value,model:$('#model').value,temperature:Number($('#temperature').value),...($('#reasoning').value==='off'?{reasoning:'off'}:{})};
+  if(all) for(const c of Object.values(s.characters)) { c.provider=$('#provider').value;c.model=$('#model').value;c.temperature=Number($('#temperature').value);if($('#reasoning').value==='off')c.reasoning='off';else delete c.reasoning; }
   s.system=$('#system').value;s.human=$('#human').value;s.shadow=$('#shadow').checked;s.policy=$('#policy').value;
   await api('/branches/'+current+'/settings',{...s,expected:data.branch.head});$('#panel').dataset.key='';await refresh();
 }
@@ -300,3 +312,4 @@ $('#refresh-jev').onclick=()=>{clearTimeout(jevTimer);void refreshJevObservation
 for(const name of ['conversations','comparisons','experiments','trash'])$('#show-'+name).onclick=()=>{category=name;renderLibrary();};
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;renderPanel();});
 action(async()=>{const savedExperiment=localStorage.getItem('room-experiment');if(savedExperiment){try{experimentPage=await api('/experiments/'+savedExperiment);category='experiments';}catch{localStorage.removeItem('room-experiment');}}const saved=localStorage.getItem('room-comparison');if(saved){try{comparison=await api('/comparisons/'+saved);current=comparison.left;}catch{localStorage.removeItem('room-comparison');}}await refresh();})();
+$('#back').onclick=()=>history.back();

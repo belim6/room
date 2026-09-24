@@ -51,12 +51,27 @@ export function createApp(engine = new Engine(defaultStore())) {
   };
   app.get('/api/bootstrap', route((_req,res) => {
     const saved = comparisons.list(), library = engine.library();
-    res.json({ ...library, comparisons: saved, experiments: experiments.list(),
+    res.json({ ...library, comparisons: saved, experiments: experiments.list(), reactions: reactions(),
       keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY },
       active: [...engine.active.keys()] });
   }));
   app.get('/api/branches/:id/changes', route((req,res) => res.json(changes(req.params.id))));
   app.post('/api/changes', route((req,res) => res.json(stateChanges(engine.read(req.body.left).revision.state,engine.read(req.body.right).revision.state))));
+  // Append-only research marks; the latest per message wins. Never part of model context.
+  function reactions() {
+    const latest: Record<string, any> = {};
+    for (const r of store.list('reactions').sort((a,b)=>a.sequence-b.sequence)) latest[r.message] = r;
+    return Object.fromEntries(Object.entries(latest).filter(([,r])=>r.value).map(([k,r])=>[k,r.value]));
+  }
+  app.post('/api/reactions', route((req,res) => {
+    const { branch, message, value } = req.body;
+    if (![null,'favorite','dislike'].includes(value)) throw Error('Invalid reaction');
+    const m = engine.read(branch).revision.state.messages.find(m=>m.id===message);
+    if (!m) throw Error('That message is not in this conversation');
+    const previous = store.list('reactions').filter(r=>r.message===message);
+    store.add('reactions', { id: id(), message, branch, turnId: m.turnId ?? null, value, at: new Date().toISOString(), sequence: previous.length + 1 });
+    res.json(reactions());
+  }));
   app.get('/api/experiments', route((_req,res) => res.json(experiments.list())));
   app.post('/api/experiments', route((req,res) => res.json(experiments.create(req.body))));
   app.get('/api/experiments/:id', route((req,res) => res.json(experiments.detail(req.params.id))));
