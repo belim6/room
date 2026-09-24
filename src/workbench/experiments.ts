@@ -50,7 +50,16 @@ export class Experiments {
     const result=lock ? [original,...versions].find(e=>e.version===lock.version)! : versions[0]||original;
     return {...result,...(lock?{lockedAt:lock.at,retrospective:lock.retrospective}: {})};
   }
-  list(){return this.store.list<Experiment>('experiments').map(e=>this.get(e.id));}
+  list(){return this.store.list<Experiment>('experiments').map(e=>({...this.get(e.id),familyParent:this.parentOf(e.id)}));}
+  // Trial branches never join the sampled conversation's family: tagged at run time, or attached retrospectively.
+  trialBranches(){return new Set([...this.store.list('branches').filter(b=>b.trial).map(b=>b.id),...this.store.list<Trial>('experiment-trials').map(t=>t.branch)]);}
+  workspaceOf(key:string){return this.store.list('experiment-workspaces').find(w=>w.experiment===key)||null;}
+  // One isolated copy of the checkpoint per experiment, made on its first run. Run metadata, not design.
+  private workspace(e:Experiment) {
+    const existing=this.workspaceOf(e.id);if(existing)return existing;
+    const b=this.engine.create(`${e.name} · workspace`,this.store.get<Revision>('revisions',e.base.revision).state,null,e.base.revision,undefined,{experiment:e.id,workspace:true});
+    const value={id:e.id,experiment:e.id,branch:b.id,revision:b.head,at:now()};this.store.put('experiment-workspaces',e.id,value);return value;
+  }
   // Branched drafts start with blank intent; it must be written before the first run.
   private validate(input: any, intent=true) {
     for(const key of intent?['name','question','prediction']:['name'])if(typeof input[key]!=='string'||!input[key].trim()||input[key].length>(key==='name'?120:20000))throw Error(`Write an experiment ${key}`);
@@ -158,7 +167,7 @@ export class Experiments {
     if(!condition)throw Error('Unknown condition');
     if(this.active.has(key))throw Error('Stop the batch before attaching trials');
     const b=this.engine.read(input.branch);
-    if(b.fork!==e.base.revision)throw Error('The trial must start at this experiment’s frozen checkpoint');
+    if(b.fork!==e.base.revision&&b.fork!==this.workspaceOf(key)?.revision)throw Error('The trial must start at this experiment’s frozen checkpoint');
     const messages=b.revision.state.messages;
     const reply=input.turnId?messages.find(m=>m.turnId===input.turnId&&m.source==='generated'): [...messages].reverse().find(m=>m.source==='generated'&&m.speaker===e.speaker);
     if(!reply?.turnId||reply.speaker!==e.speaker)throw Error('Choose an original generated reply by the measured speaker');
@@ -179,13 +188,13 @@ export class Experiments {
     const e=this.get(key);if(expected!==e.version)throw Error('Experiment changed; review it before running');
     // Validate before spending; deleted bases must be restored explicitly.
     this.validate(e);this.lock(e);
-    const base=this.store.get<Revision>('revisions',e.base.revision).state,batch=id(),trials:Trial[]=[];
+    const base=this.store.get<Revision>('revisions',e.base.revision).state,batch=id(),trials:Trial[]=[],workspace=this.workspace(e);
     const old=this.trials(key);
     for(const c of e.conditions) {
       const start=Math.max(0,...old.filter(t=>t.condition===c.key).map(t=>t.index));
       for(let n=1;n<=perCondition;n++) {
         const trialId=id(),index=start+n;
-        let branch=this.engine.create(`${e.name} · ${c.key} · trial ${index}`,base,e.base.branch,e.base.revision,undefined,{experiment:key,trial:trialId});
+        let branch=this.engine.create(`${e.name} · ${c.key} · trial ${index}`,base,workspace.branch,workspace.revision,undefined,{experiment:key,trial:trialId});
         branch=this.engine.commit(branch.id,branch.head,applyPatch(base,c.patch),`Experiment condition ${c.key}`);
         const t:Trial={id:trialId,experiment:key,condition:c.key,index,branch:branch.id,turnId:id(),at:now(),status:'queued',batch};
         this.store.put('experiment-trials',t.id,t);trials.push(t);

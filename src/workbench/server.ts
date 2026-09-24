@@ -45,13 +45,15 @@ export function createApp(engine = new Engine(defaultStore())) {
     const jevResults = new Map(store.list('jev-results').map(r => [r.id,r]));
     return { branch: b, revisions, changes: changes(branch), attempts: store.attempts().filter(relevant).map(a=>({...a,reasoning:reasoningOf(a.outcome)})), selections: store.list('selections').filter(relevant),
       turns: store.list('turns').filter(r => r.branch === branch),
+      reactions: (() => { const messages = new Set(revisions.flatMap(r => r.state.messages.map(m => m.id))); return store.list('reactions').filter(r => messages.has(r.message)).sort((a,b)=>a.message.localeCompare(b.message)||a.sequence-b.sequence); })(),
       imports: store.list('imports').filter(relevant),
       observations: store.list('observations').filter(r => r.branch === branch), edits: store.list('edits').filter(r => r.branch === branch),
       jev: store.list('jev-requests').filter(relevant).map(r => ({ ...r, outcome: jevResults.get(r.id) || null })) };
   };
   app.get('/api/bootstrap', route((_req,res) => {
     const saved = comparisons.list(), library = engine.library();
-    res.json({ ...library, comparisons: saved, experiments: experiments.list(), reactions: reactions(),
+    const trials = experiments.trialBranches();
+    res.json({ ...library, branches: library.branches.map(b => trials.has(b.id) ? { ...b, isTrial: true } : b), comparisons: saved, experiments: experiments.list(), reactions: reactions(),
       keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY },
       active: [...engine.active.keys()] });
   }));
@@ -63,6 +65,19 @@ export function createApp(engine = new Engine(defaultStore())) {
     for (const r of store.list('reactions').sort((a,b)=>a.sequence-b.sequence)) latest[r.message] = r;
     return Object.fromEntries(Object.entries(latest).filter(([,r])=>r.value).map(([k,r])=>[k,r.value]));
   }
+  // Marked replies with their text as first recorded, for the Favorites/Dislikes library and export.
+  function marked(value: string) {
+    const current = reactions(), wanted = Object.entries(current).filter(([,v])=>v===value).map(([k])=>k);
+    const found = new Map<string, { message: any; revision: Revision }>();
+    for (const rev of store.list<Revision>('revisions').sort((a,b)=>a.at.localeCompare(b.at))) for (const m of rev.state.messages) if (wanted.includes(m.id) && !found.has(m.id)) found.set(m.id, { message: m, revision: rev });
+    const history = store.list('reactions'), branches = new Map(store.list('branches').map(b=>[b.id,b]));
+    return wanted.map(key => {
+      const records = history.filter(r=>r.message===key).sort((a,b)=>a.sequence-b.sequence), last = records.at(-1), f = found.get(key);
+      return { message: key, value, at: last.at, branch: last.branch, branchName: branches.get(last.branch)?.name ?? null, speaker: f?.message.speaker ?? null, text: f?.message.text ?? null, source: f?.message.source ?? null, turnId: f?.message.turnId ?? last.turnId, history: records };
+    }).sort((a,b)=>b.at.localeCompare(a.at));
+  }
+  app.get('/api/reactions/:value', route((req,res) => { if (!['favorite','dislike'].includes(req.params.value)) throw Error('Invalid reaction'); res.json(marked(req.params.value)); }));
+  app.get('/api/reactions/:value/export', route((req,res) => { if (!['favorite','dislike'].includes(req.params.value)) throw Error('Invalid reaction'); res.attachment(`room-${req.params.value}s.json`).json({ format: 'room-reactions-v1', value: req.params.value, exportedAt: new Date().toISOString(), items: marked(req.params.value).map(m => ({ ...m, attempts: store.attempts().filter(a => a.turnId && a.turnId === m.turnId).map(a=>({...a,reasoning:reasoningOf(a.outcome)})) })) }); }));
   app.post('/api/reactions', route((req,res) => {
     const { branch, message, value } = req.body;
     if (![null,'favorite','dislike'].includes(value)) throw Error('Invalid reaction');

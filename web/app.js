@@ -14,10 +14,13 @@ function dialog(title,html,label='Save'){
 }
 function details(label,obj){return `<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`;}
 function rootOf(key){let b=boot.branches.find(b=>b.id===key);const visited=new Set();while(b?.parent&&!visited.has(b.id)){visited.add(b.id);const p=boot.branches.find(p=>p.id===b.parent);if(!p)break;b=p;}return b;}
+// Experiment trials stay out of conversation families unless asked for; the open branch always counts.
+let showTrials=localStorage.getItem('room-show-trials')==='true';
+const inFamily=(b,key)=>showTrials||!b.isTrial||b.id===key;
 function familyMembers(key){
   const root=rootOf(key),other=comparison?(comparison.left===key?comparison.right:comparison.left):null;
   if(!root)return [];
-  return boot.branches.filter(b=>b.id!==other&&rootOf(b.id)?.id===root.id).sort((a,b)=>{
+  return boot.branches.filter(b=>b.id!==other&&inFamily(b,key)&&rootOf(b.id)?.id===root.id).sort((a,b)=>{
     if(a.id===root.id)return -1;if(b.id===root.id)return 1;
     return a.createdAt.localeCompare(b.createdAt)||a.id.localeCompare(b.id);
   });
@@ -25,6 +28,26 @@ function familyMembers(key){
 function branchNavHtml(key){
   const members=familyMembers(key),index=members.findIndex(b=>b.id===key),previous=members[index-1],next=members[index+1];
   return `<div class="branch-nav" role="group" aria-label="Branch navigation"><button data-branch-step="-1" data-owner="${key}" aria-label="Previous branch" title="${esc(previous?'Previous: '+previous.name:'First branch')}" ${previous?'':'disabled'}>←</button><button data-family="${key}" title="Choose from the original conversation and its branches">Branches · ${index+1}/${members.length}</button><button data-branch-step="1" data-owner="${key}" aria-label="Next branch" title="${esc(next?'Next: '+next.name:'Last branch')}" ${next?'':'disabled'}>→</button></div>`;
+}
+// Experiments and saved comparisons: the sidebar lists roots; the header navigator moves through a family.
+const families={
+  experiment:{items:()=>boot.experiments||[],parent:e=>e.familyParent,current:()=>experimentPage?.experiment.id,open:id=>openExperiment(id),label:'experiments'},
+  comparison:{items:()=>boot.comparisons||[],parent:c=>c.parent,current:()=>comparison?.id,open:async id=>openComparison(await api('/comparisons/'+id)),label:'comparisons'},
+};
+const familyTree=(kind,key)=>RoomFamilies.tree(families[kind].items(),families[kind].parent,key);
+const familyRoots=kind=>RoomFamilies.roots(families[kind].items(),families[kind].parent);
+function familyNavHtml(kind){
+  const key=families[kind].current(),tree=familyTree(kind,key),index=tree.findIndex(t=>t.item.id===key);if(index<0)return '';
+  const previous=tree[index-1]?.item,next=tree[index+1]?.item;
+  return `<div class="branch-nav" role="group" aria-label="Family navigation"><button data-family-step="-1" data-kind="${kind}" aria-label="Previous in family" title="${esc(previous?'Previous: '+previous.name:'First in family')}" ${previous?'':'disabled'}>←</button><button data-family-pick="${kind}" title="Choose from this family">Family · ${index+1}/${tree.length}</button><button data-family-step="1" data-kind="${kind}" aria-label="Next in family" title="${esc(next?'Next: '+next.name:'Last in family')}" ${next?'':'disabled'}>→</button></div>`;
+}
+function bindFamilyNav(){
+  document.querySelectorAll('[data-family-step]').forEach(b=>b.onclick=action(async()=>{const kind=b.dataset.kind,key=families[kind].current(),tree=familyTree(kind,key),target=tree[tree.findIndex(t=>t.item.id===key)+Number(b.dataset.familyStep)];if(target)await families[kind].open(target.item.id);}));
+  document.querySelectorAll('[data-family-pick]').forEach(b=>b.onclick=action(async()=>{
+    const kind=b.dataset.familyPick,key=families[kind].current(),tree=familyTree(kind,key);
+    const f=await dialog('Family of '+tree[0].item.name,`<label>Open<select name="member">${tree.map(t=>`<option value="${t.item.id}" ${t.item.id===key?'selected':''}>${'\u00a0\u00a0\u00a0'.repeat(t.depth)}${t.depth?'↳ ':''}${esc(t.item.name)}</option>`).join('')}</select></label>`,'Open');
+    if(f&&f.get('member')!==key)await families[kind].open(f.get('member'));
+  }));
 }
 async function stepBranch(key,direction){
   if(branchNavigationPending)return;
@@ -76,20 +99,34 @@ async function replacePane(oldId,next){
   if(comparison){if(comparison.left===oldId)comparison.left=next.id;else if(comparison.right===oldId)comparison.right=next.id;comparison.dirty=true;current=next.id;selected=null;await refresh();}
   else await choose(next.id);
 }
+// Marked replies are fetched on demand and cached until a mark changes or the tab is reopened.
+const marked={stale:true,value:null,items:[]};
+function markedLibrary(value){
+  const paint=()=>{
+    const live=new Set(boot.branches.map(b=>b.id)),label=value==='favorite'?'favorites':'dislikes';
+    $('#branches').innerHTML=`<a class="file-button" href="/api/reactions/${value}/export" download>Export ${label} (JSON)</a>`+(marked.items.map(m=>`<button data-marked="${m.message}" data-marked-branch="${m.branch}" ${live.has(m.branch)?'':'disabled'}><strong>${esc(m.speaker||'Unknown')}</strong> ${esc((m.text||'Message text not found').slice(0,110))}${(m.text||'').length>110?'…':''}<small>${esc(m.branchName||'Unknown branch')}${live.has(m.branch)?'':' · in Trash'} · ${esc(new Date(m.at).toLocaleString())}</small></button>`).join('')||`<p class="muted">No ${label} yet. Use ${value==='favorite'?'☆ Favorite':'Dislike'} under a reply.</p>`);
+    document.querySelectorAll('[data-marked]').forEach(b=>b.onclick=action(async()=>{const key=b.dataset.marked;await choose(b.dataset.markedBranch);category=value==='favorite'?'favorites':'dislikes';renderLibrary();focusPane(current,'inspect',key);document.querySelector(`[data-inspect="${key}"]`)?.closest('.message')?.scrollIntoView({block:'center'});}));
+  };
+  if(!marked.stale&&marked.value===value)return paint();
+  marked.stale=false;marked.value=value;
+  api('/reactions/'+value).then(items=>{marked.items=items;if(category===(value==='favorite'?'favorites':'dislikes'))paint();}).catch(error);
+}
 function renderLibrary(){
-  for(const name of ['conversations','comparisons','experiments','trash'])$('#show-'+name).classList.toggle('selected',category===name);
-  $('#library-label').textContent=category==='conversations'?'CONVERSATIONS':category==='trash'?'TRASH':category==='experiments'?'EXPERIMENTS':'SAVED COMPARISONS';localStorage.setItem('room-library',category);
+  for(const name of ['conversations','comparisons','experiments','trash','favorites','dislikes'])$('#show-'+name).classList.toggle('selected',category===name);
+  $('#library-label').textContent=category==='favorites'?'FAVORITE REPLIES':category==='dislikes'?'DISLIKED REPLIES':category==='conversations'?'CONVERSATIONS':category==='trash'?'TRASH':category==='experiments'?'EXPERIMENTS':'SAVED COMPARISONS';localStorage.setItem('room-library',category);
   $('#new-experiment').hidden=category!=='experiments';
   if(category==='experiments'){experimentLibrary();}
+  else if(category==='favorites'||category==='dislikes'){markedLibrary(category==='favorites'?'favorite':'dislike');}
   else if(category==='conversations'){
     const root=rootOf(current);
-    $('#branches').innerHTML=boot.branches.filter(b=>!b.parent&&!b.comparison).map(b=>`<button data-branch="${b.id}" class="${!comparison&&root?.id===b.id?'active':''}">${esc(b.name)}<small>${boot.branches.filter(x=>x.id!==b.id&&rootOf(x.id)?.id===b.id).length} branches</small></button>`).join('')||'<p class="muted">No conversations yet.</p>';
+    $('#branches').innerHTML=boot.branches.filter(b=>!b.parent&&!b.comparison&&!b.workspace).map(b=>`<button data-branch="${b.id}" class="${!comparison&&root?.id===b.id?'active':''}">${esc(b.name)}<small>${boot.branches.filter(x=>x.id!==b.id&&inFamily(x,null)&&rootOf(x.id)?.id===b.id).length} branches</small></button>`).join('')||'<p class="muted">No conversations yet.</p>';
     document.querySelectorAll('[data-branch]').forEach(b=>b.onclick=action(()=>choose(b.dataset.branch)));
   }else if(category==='trash'){
     $('#branches').innerHTML=(boot.trash||[]).map(t=>`<div class="trash-item"><strong>${esc(t.name)}</strong><small>${t.branches.length-1} included branches · ${esc(new Date(t.deletedAt).toLocaleDateString())}</small><button data-restore="${t.id}" ${t.canRestore?'':'disabled'}>Restore</button>${t.canRestore?'':'<small>Restore its parent conversation first.</small>'}</div>`).join('')||'<p class="muted">Trash is empty.</p>';
     document.querySelectorAll('[data-restore]').forEach(b=>b.onclick=action(async()=>{const restored=await api('/trash/'+b.dataset.restore+'/restore',{});await choose(restored.id);}));
   }else{
-    $('#branches').innerHTML=(boot.comparisons||[]).map(c=>`<button data-comparison="${c.id}" class="${comparison?.id===c.id?'active':''}">${esc(c.name)}<small>${c.parent?'↳ Comparison branch':'Saved comparison'}</small></button>`).join('')||'<p class="muted">Open two conversations with Compare, then save the comparison.</p>';
+    const open=comparison?.id?familyTree('comparison',comparison.id)[0]?.item.id:null;
+    $('#branches').innerHTML=familyRoots('comparison').map(c=>{const n=familyTree('comparison',c.id).length-1;return `<button data-comparison="${c.id}" class="${open===c.id?'active':''}">${esc(c.name)}<small>Saved comparison${n?` · ${n} branch${n===1?'':'es'}`:''}</small></button>`;}).join('')||'<p class="muted">Open two conversations with Compare, then save the comparison.</p>';
     document.querySelectorAll('[data-comparison]').forEach(b=>b.onclick=action(async()=>openComparison(await api('/comparisons/'+b.dataset.comparison))));
   }
 }
@@ -130,14 +167,14 @@ function render(){
   clearTimeout(jevTimer);++jevPollVersion;
   rememberInputs();renderLibrary();$('#connection').textContent=`OpenGateway ${boot.keys.opengateway?'● ready':'○ no key'} · Together ${boot.keys.together?'● ready':'○ no key'}`;
   trackView();
-  if(experimentPage){$('#title-changes').hidden=true;renderExperiment();return;}
+  if(experimentPage){$('#title-changes').hidden=true;$('#family-nav').hidden=false;$('#family-nav').innerHTML=familyNavHtml('experiment');bindFamilyNav();renderExperiment();return;}
   document.querySelector('.workspace').classList.remove('experiment-mode');$('#experiment-page').hidden=true;
   $('#diff-panes').hidden=!comparison;
   document.querySelector('.workspace').classList.toggle('comparing',!!comparison);
   $('#messages').hidden=!!comparison;$('#comparison').hidden=!comparison;document.querySelector('main > footer').hidden=!!comparison||!data;
   for(const key of ['fork','history','compare','export','delete'])$('#'+key).disabled=!data;
   for(const key of ['fork','history','export','delete'])$('#'+key).hidden=!!comparison;
-  $('#family-nav').hidden=$('#title-changes').hidden=!!comparison||!data;
+  $('#title-changes').hidden=!!comparison||!data;$('#family-nav').hidden=comparison?!(comparison.id&&!comparison.draft):!data;
   $('#save-comparison').hidden=!comparison;$('#fork-comparison').hidden=!comparison?.id||!!comparison?.draft;
   $('#fork-comparison').disabled=!!comparison?.dirty;
   $('#save-comparison').textContent=comparison?.dirty?'Save comparison *':'Save comparison';
@@ -150,6 +187,7 @@ function render(){
   }
   $('#delete').textContent=data.branch.parent?'Delete branch':'Delete conversation';
   if(comparison){
+    $('#family-nav').innerHTML=familyNavHtml('comparison');bindFamilyNav();
     $('#title').textContent=comparison.name||'Compare conversations';$('#subtitle').textContent='Independent conversation copies · changes stay in this comparison';
     const positions=new Map([...document.querySelectorAll('[data-pane]')].map(p=>[p.dataset.pane,p.querySelector('.pane-messages').scrollTop]));
     $('#comparison').innerHTML=[comparison.left,comparison.right].map((key,index)=>{
@@ -169,7 +207,7 @@ function render(){
 function bindControls(){
   document.querySelectorAll('[data-changes]').forEach(b=>b.onclick=()=>{paneChanges=null;focusPane(b.dataset.changes,'changes');});
   document.querySelectorAll('[data-inspect]').forEach(b=>b.onclick=()=>focusPane(b.dataset.owner,'inspect',b.dataset.inspect));
-  document.querySelectorAll('[data-react]').forEach(b=>b.onclick=action(async()=>{const on=boot.reactions?.[b.dataset.message]===b.dataset.react;boot.reactions=await api('/reactions',{branch:b.dataset.owner,message:b.dataset.message,value:on?null:b.dataset.react});const scroll=[...document.querySelectorAll('.messages,.pane-messages')].map(el=>el.scrollTop);render();document.querySelectorAll('.messages,.pane-messages').forEach((el,i)=>el.scrollTop=scroll[i]??el.scrollTop);}));
+  document.querySelectorAll('[data-react]').forEach(b=>b.onclick=action(async()=>{const on=boot.reactions?.[b.dataset.message]===b.dataset.react;boot.reactions=await api('/reactions',{branch:b.dataset.owner,message:b.dataset.message,value:on?null:b.dataset.react});marked.stale=true;const scroll=[...document.querySelectorAll('.messages,.pane-messages')].map(el=>el.scrollTop);render();document.querySelectorAll('.messages,.pane-messages').forEach((el,i)=>el.scrollTop=scroll[i]??el.scrollTop);}));
   document.querySelectorAll('[data-note]').forEach(b=>b.onclick=()=>focusPane(b.dataset.owner,'notes',b.dataset.note));
   document.querySelectorAll('[data-fork]').forEach(b=>b.onclick=action(()=>forkAt(b.dataset.owner,b.dataset.fork)));
   document.querySelectorAll('[data-delete-message]').forEach(b=>b.onclick=action(()=>deleteMessage(b.dataset.owner,b.dataset.deleteMessage)));
@@ -267,8 +305,10 @@ async function editHistory(key){
 async function showFamily(key){
   const root=rootOf(key),members=familyMembers(key);
   const summaries=await Promise.all(members.map(b=>api('/branches/'+b.id+'/changes')));
-  const f=await dialog('Branches of '+root.name,`<label>Conversation or branch<select name="branch">${members.map((b,i)=>`<option value="${b.id}" ${b.id===key?'selected':''}>${esc(b.name)}${b.id===root.id?' · original':''}${summaries[i].fork?' · '+RoomChanges.badges(summaries[i].changes).slice(0,3).map(esc).join(' · '):''}</option>`).join('')}</select></label>`,'Open');
-  if(!f)return;const target=f.get('branch');
+  const trials=boot.branches.filter(b=>b.isTrial&&rootOf(b.id)?.id===root.id).length;
+  const opened=dialog('Branches of '+root.name,`${trials?`<label><input type="checkbox" id="show-trials" ${showTrials?'checked':''} style="width:auto;display:inline"> Show experiment trials (${trials})</label>`:''}<label>Conversation or branch<select name="branch">${members.map((b,i)=>`<option value="${b.id}" ${b.id===key?'selected':''}>${esc(b.name)}${b.id===root.id?' · original':''}${summaries[i].fork?' · '+RoomChanges.badges(summaries[i].changes).slice(0,3).map(esc).join(' · '):''}</option>`).join('')}</select></label>`,'Open');
+  $('#show-trials')?.addEventListener('change',ev=>{showTrials=ev.target.checked;localStorage.setItem('room-show-trials',showTrials);$('#dialog').close('cancel');render();showFamily(key).catch(error);});
+  const f=await opened;if(!f)return;const target=f.get('branch');
   if(comparison){if((comparison.left===target||comparison.right===target)&&target!==key)throw Error('That branch is already in the other pane');await replacePane(key,{id:target});}else await choose(target);
 }
 $('#new-experiment').onclick=action(()=>editExperimentDesign());
@@ -309,7 +349,7 @@ $('#fork-comparison').onclick=action(async()=>{
 $('#show-jev').checked=showJev;
 $('#show-jev').onchange=()=>{showJev=$('#show-jev').checked;localStorage.setItem('room-show-jev',String(showJev));$('#jev-refresh-status').textContent='';paintJev();scheduleJevPoll();};
 $('#refresh-jev').onclick=()=>{clearTimeout(jevTimer);void refreshJevObservations(++jevPollVersion,0,true);};
-for(const name of ['conversations','comparisons','experiments','trash'])$('#show-'+name).onclick=()=>{category=name;renderLibrary();};
+for(const name of ['conversations','comparisons','experiments','trash','favorites','dislikes'])$('#show-'+name).onclick=()=>{category=name;marked.stale=true;renderLibrary();};
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;renderPanel();});
 action(async()=>{const savedExperiment=localStorage.getItem('room-experiment');if(savedExperiment){try{experimentPage=await api('/experiments/'+savedExperiment);category='experiments';}catch{localStorage.removeItem('room-experiment');}}const saved=localStorage.getItem('room-comparison');if(saved){try{comparison=await api('/comparisons/'+saved);current=comparison.left;}catch{localStorage.removeItem('room-comparison');}}await refresh();})();
 $('#back').onclick=()=>history.back();

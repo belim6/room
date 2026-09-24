@@ -5,7 +5,8 @@ async function openExperiment(key){
   experimentPage=await api('/experiments/'+key);category='experiments';localStorage.setItem('room-experiment',key);render();
 }
 function experimentLibrary(){
-  $('#branches').innerHTML=(boot.experiments||[]).map(e=>`<button data-experiment="${e.id}" class="${experimentPage?.experiment.id===e.id?'active':''}">${esc(e.name)}<small>${e.retrospective?'Retrospective':e.lockedAt?'Pre-registered':'Draft'} · ${e.conditions.length} conditions${e.parent?' · branched':''}</small></button>`).join('')||'<p class="muted">Start from a conversation checkpoint, vary one thing, then compare repeated trials.</p>';
+  const open=experimentPage?familyTree('experiment',experimentPage.experiment.id)[0]?.item.id:null;
+  $('#branches').innerHTML=familyRoots('experiment').map(e=>{const n=familyTree('experiment',e.id).length-1;return `<button data-experiment="${e.id}" class="${open===e.id?'active':''}">${esc(e.name)}<small>${e.retrospective?'Retrospective':e.lockedAt?'Pre-registered':'Draft'} · ${e.conditions.length} conditions${n?` · ${n} branch${n===1?'':'es'}`:''}</small></button>`;}).join('')||'<p class="muted">Start from a conversation checkpoint, vary one thing, then compare repeated trials.</p>';
   document.querySelectorAll('[data-experiment]').forEach(b=>b.onclick=action(()=>openExperiment(b.dataset.experiment)));
 }
 function renderExperiment(){
@@ -54,7 +55,7 @@ function renderExperiment(){
   for(const kind of ['open','inspect'])page.querySelectorAll(`[data-${kind}-trial]`).forEach(b=>b.onclick=action(async()=>{const t=d.trials.find(t=>t.id===b.dataset[kind+'Trial']);await choose(t.branch);if(kind==='inspect')focusPane(t.branch,'inspect',t.messageId);}));
   clearTimeout(experimentTimer);if(d.active)experimentTimer=setTimeout(()=>{reloadExperiment(e.id).catch(error);},1200);
 }
-async function reloadExperiment(key){const d=await api('/experiments/'+key);if(experimentPage?.experiment.id!==key)return;experimentPage=d;boot.experiments=await api('/experiments');renderLibrary();renderExperiment();}
+async function reloadExperiment(key){const d=await api('/experiments/'+key);if(experimentPage?.experiment.id!==key)return;experimentPage=d;boot.experiments=await api('/experiments');render();}
 async function editExperimentDesign(existing=null){
   if(!boot.branches.length)throw Error('Create a conversation to use as the starting point first');
   const selectedBranch=existing?.base.branch||(current&&!boot.branches.find(b=>b.id===current)?.comparison?current:null)||boot.branches.find(b=>!b.comparison)?.id;
@@ -97,7 +98,7 @@ function experimentLineage(d){
 }
 // Originals first, each followed by its branches, so trial branches don't bury the conversations.
 function baseOptions(selected){
-  const branches=boot.branches.filter(b=>!b.comparison),byName=(a,b)=>a.name.localeCompare(b.name);
+  const branches=boot.branches.filter(b=>!b.comparison&&!b.workspace&&!b.isTrial),byName=(a,b)=>a.name.localeCompare(b.name);
   return branches.filter(b=>!b.parent).sort(byName).map(o=>`<optgroup label="${esc(o.name)}"><option value="${o.id}" ${o.id===selected?'selected':''}>${esc(o.name)}</option>${branches.filter(b=>b.parent&&rootOf(b.id).id===o.id).sort(byName).map(b=>`<option value="${b.id}" ${b.id===selected?'selected':''}>\u00a0\u00a0\u00a0${esc(b.name)}</option>`).join('')}</optgroup>`).join('');
 }
 function tokenSummary(trials){

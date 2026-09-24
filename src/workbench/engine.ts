@@ -11,7 +11,7 @@ export interface State { system: string; participants: PersonaName[]; characters
   messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string }
 export interface MessageChange { kind: 'delete-message' | 'restore-message'; message: Message; index: number }
 export interface Revision { id: string; branch: string; parent: string | null; at: string; reason: string; state: State; change?: MessageChange }
-export interface Branch { id: string; name: string; head: string; parent: string | null; fork: string | null; createdAt: string; comparison?: string; experiment?: string; trial?: string }
+export interface Branch { id: string; name: string; head: string; parent: string | null; fork: string | null; createdAt: string; comparison?: string; experiment?: string; trial?: string; workspace?: boolean }
 export interface TrashEntry { id: string; branch: string; name: string; branches: string[]; deletedAt: string; restoredAt?: string }
 const names = Object.keys(PERSONAS) as PersonaName[];
 export function initialState(): State {
@@ -72,11 +72,11 @@ export class Engine {
     }
     return this.read(entry.branch);
   }
-  create(name = 'Untitled room', state = initialState(), parent: string | null = null, fork: string | null = null, comparison?: string, experiment?: { experiment: string; trial: string }) {
+  create(name = 'Untitled room', state = initialState(), parent: string | null = null, fork: string | null = null, comparison?: string, experiment?: { experiment: string; trial?: string; workspace?: boolean }) {
     validateState(state);
     if (parent) comparison = this.available(parent).comparison;
     const branch: Branch = { id: id(), name: name.slice(0, 120), head: '', parent, fork, ...(comparison ? { comparison } : {}), ...experiment, createdAt: new Date().toISOString() };
-    const revision: Revision = { id: id(), branch: branch.id, parent: fork, at: new Date().toISOString(), reason: parent ? 'Branch created' : comparison ? 'Comparison snapshot created' : 'Room created', state: clone(state) };
+    const revision: Revision = { id: id(), branch: branch.id, parent: fork, at: new Date().toISOString(), reason: parent ? 'Branch created' : experiment?.workspace ? 'Experiment workspace created' : comparison ? 'Comparison snapshot created' : 'Room created', state: clone(state) };
     branch.head = revision.id; this.store.put('revisions', revision.id, revision); this.store.put('branches', branch.id, branch);
     return this.read(branch.id);
   }

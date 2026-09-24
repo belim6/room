@@ -120,4 +120,16 @@ The trials table has **Completion tokens** (for the measured reply; the provider
 
 Each reply has **☆ Favorite** and **Dislike**. Click again to clear. A mark belongs to the message itself, so it follows the reply into every branch that keeps it, and it appears as ★ or ✕ next to the outcome in experiment trial tables. Marks are append-only records (`reactions/`): clearing or switching adds a new record, and the latest one wins. They are research material and never enter model context.
 
+The sidebar's **★ Favorites** and **✕ Dislikes** tabs list every marked reply, newest first, with speaker, opening text, branch and time. Clicking one opens its branch, scrolls to the reply and shows it in Inspect. Replies whose branch is in Trash are listed but disabled. **Export favorites/dislikes (JSON)** downloads each marked reply with its text, full mark history and generation attempts (request, raw response, provider reasoning). A branch's JSON export also includes the mark history for its messages.
+
 **← Back** (above the room title) returns to the previous conversation, saved comparison or experiment page, for example from a trial branch to its experiment. Browser back, mouse back buttons and swipe gestures do the same. Unsaved comparison drafts are not recorded as a step.
+
+## Experiment workspaces
+
+Running an experiment no longer adds branches to the conversation it samples from. On its first run, an experiment gets one isolated copy of its checkpoint, `<experiment name> · workspace` (parent none, forked from the original checkpoint revision, tagged `workspace`), and every trial branches from that copy. The workspace is recorded in `experiment-workspaces/<experiment id>.json`. That is a separate record rather than a field on the lock, because experiments locked by retrospective attachment already have a lock. The design still points at the original conversation and checkpoint, so the design diff and lineage are unaffected. A branched experiment gets its own workspace. Workspaces and trials never appear in the Conversations list.
+
+Trials from before this change (Exp1–Exp3) keep their original parent, because branch records are evidence. Conversation views instead skip any branch that is an experiment trial, whether it was tagged at run time or attached retrospectively: the sidebar count, the Branches picker and its ←/→ steps. The picker has **Show experiment trials (N)** to put them back. All trials stay reachable from their experiment pages.
+
+## Experiment and comparison families
+
+The Experiments and Comparisons sidebars list only roots: experiments with no parent or link, and comparisons that weren't forked from another. Each shows `· N branches` for all its descendants. Once one is open, the header shows **← Family i/n →** and a picker listing the family as an indented tree (root first, children under their parents, by creation time). The sidebar keeps the root highlighted while you move around the family. The lineage table on experiment pages is unchanged; the navigator is for moving between experiments, and the table is for comparing their results.

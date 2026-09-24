@@ -369,7 +369,7 @@ test('changes and experiment HTTP workflow exposes original null, diffs, lock an
     const detail=(await api('/experiments/'+exp.id)).value;assert.equal(detail.trials.length,4);assert(detail.trials.every((t:any)=>t.status==='completed'));
     assert.equal((await api('/experiments/'+exp.id+'/edit',{...input,expected:exp.version})).status,400);
     const trial=detail.trials.find((t:any)=>t.condition==='B'),diff=(await api('/branches/'+trial.branch+'/changes')).value;
-    assert.equal(diff.fork.revision,input.base.revision);assert(diff.changes.settings.some((s:any)=>s.field==='system'));
+    assert.equal(diff.fork.revision,app.locals.experiments.workspaceOf(exp.id).revision);assert(diff.changes.settings.some((s:any)=>s.field==='system'));
     await api('/experiments/'+exp.id+'/labels',{trial:trial.id,outcome:'Test',tag:'manual'});
     assert.equal((await api('/experiments/'+exp.id)).value.trials.find((t:any)=>t.id===trial.id).effectiveOutcome,'Test');
   } finally{await new Promise<void>((resolve,reject)=>server.close(err=>err?reject(err):resolve()));}
@@ -444,8 +444,46 @@ test('reactions are append-only, latest per message wins, and never enter model 
     assert.deepEqual((await api('/bootstrap')).value.reactions,{[m.id]:'dislike'});
     assert.deepEqual((await api('/reactions',{branch:b.id,message:m.id,value:null})).value,{});
     assert.deepEqual(s.list('reactions').sort((a,b)=>a.sequence-b.sequence).map(r=>r.value),['favorite','dislike',null]);
+    await api('/reactions',{branch:b.id,message:m.id,value:'favorite'});
+    const favorites=(await api('/reactions/favorite')).value;assert.equal(favorites.length,1);assert.equal(favorites[0].text,'Hello');assert.equal(favorites[0].branchName,'Reactions');assert.equal(favorites[0].history.length,4);
+    assert.deepEqual((await api('/reactions/dislike')).value,[]);assert.equal((await api('/reactions/love')).status,400);
+    const exported=await (await fetch(base+'/api/reactions/favorite/export')).json() as any;assert.equal(exported.format,'room-reactions-v1');assert.equal(exported.items[0].message,m.id);
+    assert.equal((await api('/branches/'+b.id)).value.reactions.length,4,'branch export carries the full mark history');
     const c=e.read(b.id);c.revision.state.characters.Boris.provider='together';c.revision.state.characters.Boris.model='mock';
     const next=e.commit(b.id,c.head,c.revision.state,'Use mock');process.env.TOGETHER_API_KEY='k';await e.turn(next.id,next.head,'Boris');
     assert(!/favorite|dislike/i.test(prompt));
   } finally { server.close(); }
+});
+test('experiments run in their own workspace, created once; tagged and attached trials are flagged out of families',async()=>{
+  const s=store();const e=new Engine(s,async()=>response('I vote Elorin.'));
+  const input=design(e);input.conditions.forEach(c=>(c.patch as any).characters={Boris:{provider:'together',model:'mock'}});
+  const x=new Experiments(e),exp=x.create(input);
+  x.run(exp.id,2,exp.version);await x.active.get(exp.id)?.done;
+  const ws=x.workspaceOf(exp.id)!,wb=e.read(ws.branch);
+  assert.equal(wb.parent,null);assert.equal(wb.fork,input.base.revision);assert.equal(wb.workspace,true);assert.equal(wb.experiment,exp.id);
+  const trials=x.trials(exp.id);assert.equal(trials.length,4);assert(trials.every(t=>e.read(t.branch).parent===ws.branch&&e.read(t.branch).fork===ws.revision));
+  assert(!s.list('branches').some(b=>b.parent===input.base.branch),'no branches on the sampled conversation');
+  x.run(exp.id,1,exp.version);await x.active.get(exp.id)?.done;assert.equal(s.list('experiment-workspaces').length,1,'workspace is created on first run only');
+  assert.equal(x.trials(exp.id).filter(t=>e.read(t.branch).parent===ws.branch).length,6);
+  // A retrospectively attached trial has no tag but is still a trial.
+  let manual=e.create('Manual trial',s.get('revisions',input.base.revision).state,input.base.branch,input.base.revision);
+  manual=e.commit(manual.id,manual.head,applyPatch(s.get('revisions',input.base.revision).state,input.conditions[0].patch),'Condition');
+  manual=await e.turn(manual.id,manual.head,'Boris');x.attach(exp.id,{condition:'A',branch:manual.id});
+  const flagged=x.trialBranches();assert(flagged.has(manual.id));assert(trials.every(t=>flagged.has(t.branch)));assert(!flagged.has(ws.branch));assert(!flagged.has(input.base.branch));
+  const app=createApp(e),server=app.listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));
+  try {
+    const boot=await (await fetch(`http://127.0.0.1:${(server.address() as any).port}/api/bootstrap`)).json() as any;
+    assert.equal(boot.branches.find((b:any)=>b.id===manual.id).isTrial,true);assert(!boot.branches.find((b:any)=>b.id===input.base.branch).isTrial);
+  } finally { server.close(); }
+});
+test('experiment and comparison families list roots and order members as a tree by creation time',()=>{
+  const F=require('../web/families.js');
+  const items=[{id:'c',p:'b',createdAt:'3'},{id:'a',p:null,createdAt:'1'},{id:'b',p:'a',createdAt:'2'},{id:'d',p:'a',createdAt:'4'},{id:'z',p:null,createdAt:'0'},{id:'orphan',p:'gone',createdAt:'5'}];
+  const parent=(i:any)=>i.p;
+  assert.deepEqual(F.roots(items,parent).map((i:any)=>i.id),['a','z','orphan']);
+  assert.deepEqual(F.tree(items,parent,'c').map((t:any)=>[t.item.id,t.depth]),[['a',0],['b',1],['c',2],['d',1]]);
+  assert.deepEqual(F.tree(items,parent,'z').map((t:any)=>t.item.id),['z']);
+  const s=store(),e=new Engine(s),x=new Experiments(e),input=design(e),one=x.create(input),two=x.branch(one.id,{name:'Two'}),three=x.create({...input,name:'Three'});x.link(three.id,{parent:two.id});
+  const list=x.list();assert.deepEqual(F.roots(list,(i:any)=>i.familyParent).map((i:any)=>i.name),['Test']);
+  assert.deepEqual(F.tree(list,(i:any)=>i.familyParent,three.id).map((t:any)=>t.item.name),['Test','Two','Three']);
 });
