@@ -3,6 +3,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 let boot, data, current=localStorage.getItem('room-branch'), tab='characters', character='Boris', selected=null;
 let comparison=null, category=localStorage.getItem('room-library')||'conversations', refreshVersion=0;
 let showJev=localStorage.getItem('room-show-jev')==='true',jevTimer,jevPollVersion=0;
+let branchNavigationPending=false;
 const records=new Map(), runs=new Map(), drafts=new Map();
 async function api(url,body) {const r=await fetch('/api'+url,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const value=await r.json();if(!r.ok)throw Error(value.error||'Request failed');return value;}
 function error(e){$('#error').textContent=e.message||String(e);$('#error').hidden=false;}
@@ -13,6 +14,26 @@ function dialog(title,html,label='Save'){
 }
 function details(label,obj){return `<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`;}
 function rootOf(key){let b=boot.branches.find(b=>b.id===key);const visited=new Set();while(b?.parent&&!visited.has(b.id)){visited.add(b.id);const p=boot.branches.find(p=>p.id===b.parent);if(!p)break;b=p;}return b;}
+function familyMembers(key){
+  const root=rootOf(key),other=comparison?(comparison.left===key?comparison.right:comparison.left):null;
+  if(!root)return [];
+  return boot.branches.filter(b=>b.id!==other&&rootOf(b.id)?.id===root.id).sort((a,b)=>{
+    if(a.id===root.id)return -1;if(b.id===root.id)return 1;
+    return a.createdAt.localeCompare(b.createdAt)||a.id.localeCompare(b.id);
+  });
+}
+function branchNavHtml(key){
+  const members=familyMembers(key),index=members.findIndex(b=>b.id===key),previous=members[index-1],next=members[index+1];
+  return `<div class="branch-nav" role="group" aria-label="Branch navigation"><button data-branch-step="-1" data-owner="${key}" aria-label="Previous branch" title="${esc(previous?'Previous: '+previous.name:'First branch')}" ${previous?'':'disabled'}>←</button><button data-family="${key}" title="Choose from the original conversation and its branches">Branches · ${index+1}/${members.length}</button><button data-branch-step="1" data-owner="${key}" aria-label="Next branch" title="${esc(next?'Next: '+next.name:'Last branch')}" ${next?'':'disabled'}>→</button></div>`;
+}
+async function stepBranch(key,direction){
+  if(branchNavigationPending)return;
+  const members=familyMembers(key),index=members.findIndex(b=>b.id===key),target=members[index+direction];
+  if(index<0||!target)return;
+  branchNavigationPending=true;
+  try{if(comparison)await replacePane(key,target);else await choose(target.id);}
+  finally{branchNavigationPending=false;}
+}
 function isBusy(key){return runs.has(key)||boot?.active.includes(key);}
 function rememberInputs(){
   document.querySelectorAll('[data-controls]').forEach(el=>{
@@ -96,8 +117,9 @@ function render(){
   rememberInputs();renderLibrary();$('#connection').textContent=`OpenGateway ${boot.keys.opengateway?'● ready':'○ no key'} · Together ${boot.keys.together?'● ready':'○ no key'}`;
   document.querySelector('.workspace').classList.toggle('comparing',!!comparison);
   $('#messages').hidden=!!comparison;$('#comparison').hidden=!comparison;document.querySelector('main > footer').hidden=!!comparison||!data;
-  for(const key of ['family','fork','history','compare','export','delete'])$('#'+key).disabled=!data;
-  for(const key of ['family','fork','history','export','delete'])$('#'+key).hidden=!!comparison;
+  for(const key of ['fork','history','compare','export','delete'])$('#'+key).disabled=!data;
+  for(const key of ['fork','history','export','delete'])$('#'+key).hidden=!!comparison;
+  $('#family-nav').hidden=!!comparison||!data;
   $('#save-comparison').hidden=!comparison;$('#fork-comparison').hidden=!comparison?.id||!!comparison?.draft;
   $('#fork-comparison').disabled=!!comparison?.dirty;
   $('#save-comparison').textContent=comparison?.dirty?'Save comparison *':'Save comparison';
@@ -114,13 +136,13 @@ function render(){
     const positions=new Map([...document.querySelectorAll('[data-pane]')].map(p=>[p.dataset.pane,p.querySelector('.pane-messages').scrollTop]));
     $('#comparison').innerHTML=[comparison.left,comparison.right].map((key,index)=>{
       const b=records.get(key).branch;
-      return `<section class="comparison-pane ${key===current?'focused':''}" data-pane="${key}" aria-label="${index?'Right':'Left'} conversation"><div class="pane-header"><div class="eyebrow">${index?'RIGHT':'LEFT'} CONVERSATION</div><h2>${esc(b.name)}</h2><div class="pane-actions"><button data-settings="${key}">Characters & settings</button><button data-pane-fork="${key}">Branch</button><button data-history="${key}">Edit history</button><button data-family="${key}">Branches</button></div></div><div class="pane-messages">${messagesHtml(b.revision.state,key)}</div><div class="pane-footer" data-controls="${key}">${controlsHtml(key)}</div></section>`;
+      return `<section class="comparison-pane ${key===current?'focused':''}" data-pane="${key}" aria-label="${index?'Right':'Left'} conversation"><div class="pane-header"><div class="eyebrow">${index?'RIGHT':'LEFT'} CONVERSATION</div><h2>${esc(b.name)}</h2><div class="pane-actions"><button data-settings="${key}">Characters & settings</button><button data-pane-fork="${key}">Branch</button><button data-history="${key}">Edit history</button>${branchNavHtml(key)}</div></div><div class="pane-messages">${messagesHtml(b.revision.state,key)}</div><div class="pane-footer" data-controls="${key}">${controlsHtml(key)}</div></section>`;
     }).join('');
     document.querySelectorAll('[data-pane]').forEach(p=>{if(positions.has(p.dataset.pane))p.querySelector('.pane-messages').scrollTop=positions.get(p.dataset.pane);});
   }else{
     const b=data.branch,s=b.revision.state,root=rootOf(b.id);
     $('#title').textContent=b.name;$('#subtitle').textContent=`${s.participants.length} participants · ${s.messages.length} messages${b.parent?' · Branch of '+root.name:''}`;
-    $('#family').textContent=`Branches (${boot.branches.filter(x=>x.id!==root.id&&rootOf(x.id)?.id===root.id).length})`;
+    $('#family-nav').innerHTML=branchNavHtml(current);
     $('#messages').innerHTML=messagesHtml(s,current);
     const footer=document.querySelector('main > footer');footer.dataset.controls=current;footer.innerHTML=controlsHtml(current)+'<div class="footnote">Sending adds your message. Continue gives a character the floor.</div>';
   }
@@ -135,6 +157,7 @@ function bindControls(){
   document.querySelectorAll('[data-settings]').forEach(b=>b.onclick=()=>focusPane(b.dataset.settings,'characters'));
   document.querySelectorAll('[data-pane-fork]').forEach(b=>b.onclick=action(()=>forkAt(b.dataset.paneFork)));
   document.querySelectorAll('[data-history]').forEach(b=>b.onclick=action(()=>editHistory(b.dataset.history)));
+  document.querySelectorAll('[data-branch-step]').forEach(b=>b.onclick=action(()=>stepBranch(b.dataset.owner,Number(b.dataset.branchStep))));
   document.querySelectorAll('[data-family]').forEach(b=>b.onclick=action(()=>showFamily(b.dataset.family)));
   document.querySelectorAll('[data-generate]').forEach(b=>b.onclick=action(()=>runTurns(b.dataset.generate)));
   document.querySelectorAll('[data-stop]').forEach(b=>b.onclick=action(async()=>{const run=runs.get(b.dataset.stop);if(run)run.stopping=true;await api('/branches/'+b.dataset.stop+'/stop',{});await refresh();}));
@@ -220,13 +243,13 @@ async function editHistory(key){
   const b=await api('/branches/'+key+'/history',{expected:source.head,messages,memory:f.get('memory')});await replacePane(key,b);
 }
 async function showFamily(key){
-  const root=rootOf(key),members=boot.branches.filter(b=>rootOf(b.id)?.id===root.id);
+  const root=rootOf(key),members=familyMembers(key);
   const f=await dialog('Branches of '+root.name,`<label>Conversation or branch<select name="branch">${members.map(b=>`<option value="${b.id}" ${b.id===key?'selected':''}>${esc(b.name)}${b.id===root.id?' · original':''}</option>`).join('')}</select></label>`,'Open');
   if(!f)return;const target=f.get('branch');
   if(comparison){if((comparison.left===target||comparison.right===target)&&target!==key)throw Error('That branch is already in the other pane');await replacePane(key,{id:target});}else await choose(target);
 }
 $('#new').onclick=action(async()=>{const f=await dialog('Start a room','<label>Name<input name="name" value="A new conversation" required></label>','Create room');if(f){const b=await api('/branches',{name:f.get('name')});await choose(b.id);}});
-$('#fork').onclick=action(()=>forkAt(current));$('#history').onclick=action(()=>editHistory(current));$('#family').onclick=action(()=>showFamily(current));
+$('#fork').onclick=action(()=>forkAt(current));$('#history').onclick=action(()=>editHistory(current));
 $('#delete').onclick=action(async()=>{
   const source=data.branch,subtree=new Set([source.id]);
   let size;do{size=subtree.size;for(const b of boot.branches)if(subtree.has(b.parent))subtree.add(b.id);}while(size!==subtree.size);

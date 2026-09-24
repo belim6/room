@@ -66,7 +66,7 @@ This is the first usable conversation/research loop, not all four releases in PR
 
 ## Independent comparisons and branch library
 
-The sidebar has **Conversations** and **Comparisons** tabs. Conversations lists originals only. Open an original and use **Branches** to choose any descendant, including retcons; nested branches stay associated with their original conversation.
+The sidebar has **Conversations** and **Comparisons** tabs. Conversations lists originals only. Open an original and use **Branches** to choose any descendant, including retcons; nested branches stay associated with their original conversation. The **← / →** arrows beside Branches move through that family directly: original first, then branches by creation time. The counter shows your position, and arrows disable at either end. In comparisons, each pane has its own arrows; changing one side leaves the other side alone and marks the pairing unsaved. Use Save comparison to keep the new pairing.
 
 **Compare** creates independent snapshots of the selected conversations and opens them in two panes. Copies include history, prompts, memories, participants, and provider settings. Even before saving, changes in either pane do not affect its source conversation. Each has its own message composer, speaker selection, turn count, Continue/Stop, Branch, Edit history, and Characters & settings controls. Inspect and notebook actions target the clicked pane. Both sides can generate concurrently; stopping one side does not stop the other. Editing history or branching replaces only that pane with the newly created branch.
 
