@@ -1,6 +1,6 @@
 # Branch changes and experiments — specification
 
-Status: v0.1 built (commit 5c00b94) · §6–§11 ready to build · Version 0.2 · 24 September 2026
+Status: v0.1 built (commit 5c00b94) · §6–§11 built · §12–§14 ready to build · Version 0.3 · 24 September 2026
 Companion to `PRODUCT_SPEC.md` (§4.4 branching, §4.8 experiments). Read `CLAUDE.md` first; its invariants apply to everything below.
 
 ## 1. Problem
@@ -298,3 +298,44 @@ A locked experiment never changes. To vary it, branch it.
 4. §8 branching and linking, then the lineage view.
 
 Update `WORKBENCH.md` after steps 2 and 4. The first experiment planned on top of this: branch Exp2 → Exp3, with C = control rules plus `Alexandra.reasoning: 'off'`, 20 trials per condition.
+
+---
+
+# Version 0.3 additions
+
+Background (24 Sep): after Exp1–Exp3, Werewolf · game 2 has **138 direct branches, 135 of them experiment trials**. The only branches Deniz made himself (the three private night branches) are lost in the crowd. Separately, the Experiments and Comparisons sidebars list every experiment and comparison flat, including branched experiments and forked comparisons. Conversations already avoid this: the sidebar shows originals, and branches are reached through the top navigator.
+
+## 12. Experiments run in their own workspace
+
+An experiment must not add branches to the conversation it samples from.
+
+- **Workspace copy.** When an experiment first runs (at lock), create one isolated copy of its base checkpoint, the same way `comparisons.ts` creates owned copies:
+  - `engine.create('<experiment name> · workspace', <base revision state>, null, base.revision, undefined, { experiment: <id>, workspace: true })`, with parent `null` and fork = the original base revision, so provenance is kept.
+  - Store `workspace: { branch, revision }` on the experiment's lock record. This is run metadata, not design, so it doesn't break the pre-registration freeze.
+- **Trials fork from the workspace revision,** not from the original base. A trial branch's parent is the workspace branch.
+- **The design stays tied to the original.** `base` keeps pointing at the original branch and revision. That's what the question is about, and what the design diff and lineage compare.
+- **Branched experiments get their own workspace.** There's no sharing, even with an identical base: copies are cheap, and sharing would couple experiment records.
+- **Hide workspaces and trials from the conversation list.** Treat them like comparison copies: never listed as conversations, reachable only from their experiment page.
+- **Existing trials (Exp1–Exp3, 135 branches):** don't rewrite their `parent`, since branch records are evidence. Instead, every conversation-family view excludes branches that are experiment trials: the Branches picker, its count, prev/next navigation, and the "N branches" subtitle in the sidebar. A branch is a trial if it carries an `experiment` tag, or appears as `branch` in any `experiment-trials` record (Exp1's trials were attached retrospectively and have no tag). The trials stay reachable from their experiment page, and via direct links.
+- **An optional toggle** in the Branches picker, "Show experiment trials (N)", off by default, for the rare case of wanting them in the tree.
+
+## 13. Sidebar shows roots; families go through the top navigator
+
+Apply the conversations pattern to experiments and comparisons.
+
+- **Experiments sidebar:** list only experiments without an effective parent (`parent`, or the latest `experiment-links` record). The subtitle is as now, plus `· N branches` counting all descendants. Exp2 is linked to Exp1 and Exp3 is branched from Exp2, so today the sidebar shows **Exp1 only**, with "2 branches".
+- **Comparisons sidebar:** list only comparisons with `parent: null`, with the same `· N branches` count.
+- **Top navigator:** once a root is open, the header shows the same family navigator conversations use (← · Family i/n · →), plus a picker dialog listing the family as an indented tree: root first, then children under their parents, sorted by creation time. Opening any member keeps the root highlighted in the sidebar.
+- **Experiment page:** keeps its lineage table (§8). The navigator is for moving between experiments; the lineage table is for comparing their results.
+
+## 14. Acceptance for v0.3
+
+- **No new branches on the original:** run a new 2 × 2 demo experiment. The original conversation's branch count doesn't change. A workspace branch exists with parent `null`, fork = the base revision, and the `workspace` tag. All 4 trial branches have the workspace as parent.
+- **Existing trials hidden:** Werewolf · game 2 shows **3 branches** (the night branches) in the sidebar and in the Branches picker. With the toggle on, it shows 138. The experiment pages still list and open all 135 trials.
+- **Sidebar roots:**
+  - The Experiments sidebar lists Exp1 only. Its navigator reaches Exp2 and Exp3, with the tree shown as Exp1 › Exp2 › Exp3.
+  - The Comparisons sidebar lists only root comparisons. A forked comparison is reachable through its root's navigator.
+- **Unchanged behavior:** the design diff, lineage and results of Exp1–Exp3 are unchanged.
+- **Tests:** trial filtering (both the tagged and the attached-only case), workspace creation on first run only, family ordering, and roots-only listing for both kinds.
+
+Update `WORKBENCH.md` after §12 and §13.
