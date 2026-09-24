@@ -15,7 +15,7 @@ export class Comparisons {
   }
   private copy(branch: string, owner: string) {
     const source = this.engine.read(branch);
-    return this.engine.create(source.name,source.revision.state,null,source.head,owner);
+    return this.engine.create(source.name + ' · compare copy',source.revision.state,null,source.head,owner);
   }
   get(key: string) {
     const comparison = this.engine.store.get<Comparison>('comparisons',key);

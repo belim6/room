@@ -83,7 +83,7 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
     } catch (error: any) {
       const rejected = error instanceof WrongSpeakerError;
       store.put('outcomes', attemptId, { id: attemptId, status: input.signal?.aborted ? 'canceled' : rejected ? 'rejected' : 'failed',
-        httpStatus: status, raw, error: error.message || String(error), validation, transformations,
+        httpStatus: status, raw, code: error.name === 'TimeoutError' ? 'timeout' : null, error: error.message || String(error), validation, transformations,
         usage: parsed?.usage ?? null, finishReason: parsed?.choices?.[0]?.finish_reason ?? null,
         latencyMs: Date.now() - start, at: new Date().toISOString() });
       if (!rejected || n === 1) throw error;
@@ -91,4 +91,9 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
     }
   }
   throw Error('No valid reply');
+}
+
+// Display only: provider-returned reasoning is evidence, never character context.
+export function reasoningOf(outcome: { raw?: string | null } | null | undefined): string | null {
+  try { const value = JSON.parse(outcome?.raw || '{}').choices?.[0]?.message?.reasoning_content; return typeof value === 'string' && value.trim() ? value : null; } catch { return null; }
 }

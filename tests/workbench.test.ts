@@ -274,3 +274,110 @@ test('Jev readout distinguishes missing scores, pending and failed observations 
   const missing=render(message,[{turnId:'turn',outcome:{status:'completed',answers:{next_speaker:{choice:'<b>x</b>',confidence:null,probabilities:{Boris:2}}}}}]);
   assert.match(missing,/Jev confidence <strong>Unavailable/);assert.match(missing,/Speaker probabilities unavailable/);assert(!missing.includes('<b>x</b>'));
 });
+
+import { lineDiff, stateChanges } from '../src/workbench/changes';
+import { initialState } from '../src/workbench/engine';
+import { Experiments, applyPatch, extractOutcome } from '../src/workbench/experiments';
+import { reasoningOf } from '../src/workbench/generation';
+test('line diff reconstructs both inputs for insert, delete, replace and large fallback',()=>{
+  for(const [a,b] of [['a\nc','a\nb\nc'],['a\nb\nc','a\nc'],['a\nb','a\nc'],['','new'],['old',''],['x\n'.repeat(2001),'replacement']]){
+    const d=lineDiff(a,b);assert.equal(d.filter(l=>l.op!=='add').map(l=>l.text).join('\n'),a);assert.equal(d.filter(l=>l.op!=='del').map(l=>l.text).join('\n'),b);
+  }
+  assert.deepEqual(lineDiff('a\nb','a\nc').map(l=>l.op),['same','del','add']);
+});
+test('state changes cover all fields, provenance, additions, removals and order',()=>{
+  const from=initialState();from.messages=[{id:'one',speaker:'Boris',text:'Old',source:'human'},{id:'two',speaker:'Ilya',text:'Keep',source:'generated'},{id:'three',speaker:'Ilya',text:'Remove',source:'generated'}];
+  const to=applyPatch(from,{system:'New\nrules',human:'Deniz',participants:['Boris'],shadow:true,policy:'observe',characters:{Boris:{prompt:'New\npersona',memory:'M',provider:'together',model:'other',temperature:1}}});
+  to.messages=[{...from.messages[1]},{id:'insert',speaker:'Boris',text:'Inserted',source:'edited'},{...from.messages[0],id:'edited',source:'edited',editedFrom:['one'],text:'New'},{id:'append',speaker:'Boris',text:'Reply',source:'generated'}];
+  const diff=stateChanges(from,to);assert.equal(diff.settings.length,10);assert(diff.settings.find(s=>s.field==='system')?.diff);
+  assert.deepEqual(diff.conversation,{appended:{generated:1},edited:['edited'],removed:['three'],inserted:['insert'],reordered:true});
+  const legacy=structuredClone(from);legacy.messages[0]={...legacy.messages[0],id:'unknown',source:'edited'};
+  assert.deepEqual(stateChanges(from,legacy).conversation.edited,[],'Do not invent legacy edit provenance');
+});
+test('retcons retain edit ancestry across repeated changes',()=>{
+  const e=new Engine(store());let b=e.create();b=e.message(b.id,b.head,'Original');
+  const original=b.revision.state.messages[0].id,one=e.retcon(b.id,b.head,original,'Edit one','keep','keep');
+  const two=e.retcon(one.id,one.head,one.revision.state.messages[0].id,'Edit two','keep','keep');
+  assert.deepEqual(stateChanges(b.revision.state,two.revision.state).conversation.edited,[two.revision.state.messages[0].id]);
+  assert.deepEqual(stateChanges(b.revision.state,two.revision.state).conversation.removed,[]);
+});
+function design(e:Engine){const b=e.create('Experiment base');return {name:'Test',question:'Does the instruction change the reply?',prediction:'The variant names a different person.',base:{branch:b.id,revision:b.head},speaker:'Boris',conditions:[{key:'A',label:'Control',control:true,patch:{}},{key:'B',label:'Variant',patch:{system:'Different rules'}}],outcome:{pattern:'I vote\\s+\\**([A-Za-z]+)',flags:'gi',highlight:{Elorin:'wolf'}}};}
+test('patches are isolated and validate fields; extraction is bounded and last match wins',()=>{
+  const base=initialState(),next=applyPatch(base,{characters:{Boris:{memory:'New memory',temperature:1}},system:'Variant'});
+  assert.equal(base.characters.Boris.memory,'');assert.equal(next.characters.Boris.prompt,base.characters.Boris.prompt);
+  assert.throws(()=>applyPatch(base,{messages:[]} as any),/Only settings/);assert.throws(()=>applyPatch(base,{characters:{Wrong:{model:'bad'}}} as any),/Invalid character/);
+  assert.equal(extractOutcome('I vote Jonas. Actually, I vote **Elorin**.',{pattern:'I vote\\s+\\**([A-Za-z]+)',flags:'gi'}).value,'Elorin');
+  assert.equal(extractOutcome('No vote',{pattern:'I vote (\\w+)'}).value,null);
+  assert(extractOutcome('a'.repeat(10000)+'!',{pattern:'(a+)+$'}).error);
+});
+test('provider reasoning extraction ignores absent, malformed and non-string content',()=>{
+  assert.equal(reasoningOf({raw:JSON.stringify({choices:[{message:{reasoning_content:'Recorded rationale'}}]})}),'Recorded rationale');
+  for(const raw of ['{}','broken',JSON.stringify({choices:[{message:{reasoning_content:{private:'no'}}}]})])assert.equal(reasoningOf({raw}),null);
+  assert.equal(reasoningOf(null),null);
+});
+test('experiments freeze design, persist intent before dispatch, force independent turns and resume numbering',async()=>{
+  const s=store();let planned=0;
+  const e=new Engine(s,async()=>{planned=s.list('experiment-trials').length;assert(planned>=4);return response('I vote Elorin.');});
+  const input=design(e);input.conditions.forEach(c=>(c.patch as any).characters={Boris:{provider:'together',model:'mock'}});
+  const x=new Experiments(e),draft=x.create(input),edited=x.edit(draft.id,{...input,prediction:'Revised before running',expected:draft.version});
+  assert.throws(()=>x.edit(draft.id,{...input,expected:draft.version}),/changed/);
+  assert.equal(s.get('experiments',draft.id).prediction,input.prediction,'initial design is immutable');
+  x.run(draft.id,2,edited.version);assert(x.get(draft.id).lockedAt);await x.active.get(draft.id)?.done;
+  assert.throws(()=>x.edit(draft.id,{...input,expected:edited.version}),/locked/);
+  let rows=x.detail(draft.id).trials;assert.equal(rows.length,4);assert(rows.every(t=>t.status==='completed'&&t.effectiveOutcome==='Elorin'));
+  assert(s.list('selections').every(r=>r.method==='forced'&&r.run.id===draft.id));
+  x.run(draft.id,1,edited.version);await x.active.get(draft.id)?.done;rows=x.detail(draft.id).trials;
+  assert.deepEqual(rows.filter(t=>t.condition==='A').map(t=>t.index),[1,2,3]);assert.equal(planned,6);
+  const first=rows[0];x.label(draft.id,first.id,{outcome:'Jonas',tag:'villager',note:'Manual interpretation'});
+  const labeled=x.detail(draft.id).trials.find(t=>t.id===first.id)!;assert.equal(labeled.extracted,'Elorin');assert.equal(labeled.effectiveOutcome,'Jonas');
+  const b=e.read(first.branch);e.message(b.id,b.head,'Later conversation');assert.equal(x.detail(draft.id).trials.find(t=>t.id===first.id)!.reply,'I vote Elorin.');
+});
+test('attaching validates measured input, is retrospective, makes no calls, and preserves original trial evidence',async()=>{
+  const e=new Engine(store()),input=design(e),x=new Experiments(e),exp=x.create(input);
+  let b=e.fork(input.base.branch,input.base.revision,'Existing trial');b=await e.turn(b.id,b.head,'Boris');const attempts=e.store.attempts().length;
+  const t=x.attach(exp.id,{condition:'A',branch:b.id});assert(x.get(exp.id).retrospective);assert.equal(e.store.attempts().length,attempts);
+  assert.throws(()=>x.attach(exp.id,{condition:'A',branch:b.id}),/already attached/);
+  assert.throws(()=>x.attach(exp.id,{condition:'B',branch:b.id}),/does not match/);
+  assert.equal(x.detail(exp.id).trials[0].turnId,t.turnId);e.deleteMessage(b.id,b.head,b.revision.state.messages[0].id);
+  assert(x.detail(exp.id).trials[0].reply.includes('Demo'));
+});
+test('experiment timeouts retry twice with durable attempts; non-timeout failures do not retry',async()=>{
+  for(const timeout of [true,false]){
+    let calls=0;const e=new Engine(store(),async()=>{calls++;throw timeout?new DOMException('Timed out','TimeoutError'):Error('Offline');});
+    const input=design(e);input.conditions=input.conditions.slice(0,1);input.conditions[0].patch={characters:{Boris:{provider:'together',model:'mock'}}} as any;
+    const x=new Experiments(e),exp=x.create(input);x.run(exp.id,1,exp.version);await x.active.get(exp.id)?.done;
+    assert.equal(calls,timeout?3:1);assert.equal(e.store.attempts().length,calls);assert.equal(x.trials(exp.id)[0].status,'failed');
+    assert.equal(x.detail(exp.id).trials[0].attempts.length,calls);
+  }
+});
+test('Stop preserves completed trials and cancels in-flight and queued trials; recovery never dispatches',async()=>{
+  let calls=0,started!:()=>void;const waiting=new Promise<void>(resolve=>started=resolve);
+  const e=new Engine(store(),async(_url,options)=>{if(++calls===1)return response('I vote Jonas.');started();return new Promise((_resolve,reject)=>{options?.signal?.addEventListener('abort',()=>reject(new DOMException('Canceled','AbortError')),{once:true});});});
+  const input=design(e);input.conditions=input.conditions.slice(0,1);input.conditions[0].patch={characters:{Boris:{provider:'together',model:'mock'}}} as any;
+  const x=new Experiments(e),exp=x.create(input);x.run(exp.id,3,exp.version);const done=x.active.get(exp.id)!.done;await waiting;x.stop(exp.id);await done;
+  assert.deepEqual(x.trials(exp.id).map(t=>t.status),['completed','canceled','canceled']);assert.equal(calls,2);
+  const old=x.trials(exp.id)[0];e.store.put('experiment-trials','interrupted',{...old,id:'interrupted',turnId:'never-dispatched',status:'queued',index:4});
+  new Experiments(e).recover();assert.equal(calls,2);assert.equal(x.trials(exp.id).find(t=>t.id==='interrupted')?.status,'canceled');
+});
+test('changes and experiment HTTP workflow exposes original null, diffs, lock and labels',async()=>{
+  const e=new Engine(store()),app=createApp(e),server=app.listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));
+  const base=`http://127.0.0.1:${(server.address() as any).port}`;
+  async function api(url:string,body?:any){const r=await fetch(base+'/api'+url,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});return {status:r.status,value:await r.json() as any};}
+  try {
+    const input=design(e);assert.equal((await api('/branches/'+input.base.branch+'/changes')).value.fork,null);
+    const exp=(await api('/experiments',input)).value;await api('/experiments/'+exp.id+'/run',{perCondition:2,expected:exp.version});await app.locals.experiments.active.get(exp.id)?.done;
+    const detail=(await api('/experiments/'+exp.id)).value;assert.equal(detail.trials.length,4);assert(detail.trials.every((t:any)=>t.status==='completed'));
+    assert.equal((await api('/experiments/'+exp.id+'/edit',{...input,expected:exp.version})).status,400);
+    const trial=detail.trials.find((t:any)=>t.condition==='B'),diff=(await api('/branches/'+trial.branch+'/changes')).value;
+    assert.equal(diff.fork.revision,input.base.revision);assert(diff.changes.settings.some((s:any)=>s.field==='system'));
+    await api('/experiments/'+exp.id+'/labels',{trial:trial.id,outcome:'Test',tag:'manual'});
+    assert.equal((await api('/experiments/'+exp.id)).value.trials.find((t:any)=>t.id===trial.id).effectiveOutcome,'Test');
+  } finally{await new Promise<void>((resolve,reject)=>server.close(err=>err?reject(err):resolve()));}
+});
+test('change renderer escapes text, collapses unchanged lines, groups models and limits summaries in UI',()=>{
+  const view=require('../web/changes-view.js');const a=initialState(),b=structuredClone(a);
+  for(const c of Object.values(b.characters))c.model='new-model';b.system='unsafe <script>\nnew line';
+  const changes=stateChanges(a,b),html=view.render(changes);assert(html.includes('(8 characters)'));assert(!html.includes('<script>'));assert(html.includes('&lt;script&gt;'));
+  assert(view.diff(lineDiff('a\nb\nc\nd\ne','a\nb\nc\nd\nf')).includes('4 unchanged lines'));
+  assert(view.badges(changes).includes('model changed ×8'));
+});

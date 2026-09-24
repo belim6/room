@@ -6,12 +6,12 @@ import { buildSpeakerInput } from '../speakerTurn';
 import { shadowJev } from './jev';
 
 export interface Character { prompt: string; memory: string; provider: Provider; model: string; temperature: number }
-export interface Message { id: string; speaker: string; text: string; source: 'human' | 'generated' | 'imported' | 'edited'; turnId?: string; checkpoint?: string }
+export interface Message { id: string; speaker: string; text: string; source: 'human' | 'generated' | 'imported' | 'edited'; turnId?: string; checkpoint?: string; editedFrom?: string[] }
 export interface State { system: string; participants: PersonaName[]; characters: Record<PersonaName, Character>;
   messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string }
 export interface MessageChange { kind: 'delete-message' | 'restore-message'; message: Message; index: number }
 export interface Revision { id: string; branch: string; parent: string | null; at: string; reason: string; state: State; change?: MessageChange }
-export interface Branch { id: string; name: string; head: string; parent: string | null; fork: string | null; createdAt: string; comparison?: string }
+export interface Branch { id: string; name: string; head: string; parent: string | null; fork: string | null; createdAt: string; comparison?: string; experiment?: string; trial?: string }
 export interface TrashEntry { id: string; branch: string; name: string; branches: string[]; deletedAt: string; restoredAt?: string }
 const names = Object.keys(PERSONAS) as PersonaName[];
 export function initialState(): State {
@@ -71,10 +71,10 @@ export class Engine {
     }
     return this.read(entry.branch);
   }
-  create(name = 'Untitled room', state = initialState(), parent: string | null = null, fork: string | null = null, comparison?: string) {
+  create(name = 'Untitled room', state = initialState(), parent: string | null = null, fork: string | null = null, comparison?: string, experiment?: { experiment: string; trial: string }) {
     validateState(state);
     if (parent) comparison = this.available(parent).comparison;
-    const branch: Branch = { id: id(), name: name.slice(0, 120), head: '', parent, fork, ...(comparison ? { comparison } : {}), createdAt: new Date().toISOString() };
+    const branch: Branch = { id: id(), name: name.slice(0, 120), head: '', parent, fork, ...(comparison ? { comparison } : {}), ...experiment, createdAt: new Date().toISOString() };
     const revision: Revision = { id: id(), branch: branch.id, parent: fork, at: new Date().toISOString(), reason: parent ? 'Branch created' : comparison ? 'Comparison snapshot created' : 'Room created', state: clone(state) };
     branch.head = revision.id; this.store.put('revisions', revision.id, revision); this.store.put('branches', branch.id, branch);
     return this.read(branch.id);
@@ -157,14 +157,14 @@ export class Engine {
     let s = clone(mode === 'regenerate' ? historical.state : b.revision.state);
     for (const n of names) s.characters[n].memory = (memory === 'restore' ? historical : b.revision).state.characters[n].memory;
     if (mode === 'regenerate') s.messages = s.messages.slice(0, index + 1);
-    if (text.trim()) s.messages[index] = { ...s.messages[index], id: id(), text, source: 'edited' };
+    if (text.trim()) s.messages[index] = { ...s.messages[index], id: id(), text, source: 'edited', editedFrom: [s.messages[index].id, ...(s.messages[index].editedFrom || [])] };
     else s.messages.splice(index, 1);
     const fork = this.create(`${b.name} · retcon`, s, b.id, b.head);
     this.store.add('edits', { branch: fork.id, sourceRevision: b.head, messageId, text, mode, memory, at: new Date().toISOString() });
     return fork;
   }
   cancel(branch: string) { this.active.get(branch)?.controller.abort(); }
-  async turn(branchId: string, expected: string, forced?: PersonaName, run?: { id: string; index: number; count: number }) {
+  async turn(branchId: string, expected: string, forced?: PersonaName, run?: { id: string; index: number; count: number }, experiment?: { turnId: string }) {
     if (this.active.has(branchId)) throw Error('A turn is already running in this branch');
     const b = this.read(branchId);
     if (b.head !== expected) throw Error('Branch changed; reload before generating');
@@ -174,11 +174,11 @@ export class Engine {
     const eligible = s.participants.filter(p => p !== last);
     const pool = eligible.length ? eligible : s.participants;
     const speaker = forced || pool[Math.floor(Math.random() * pool.length)];
-    const turnId = id(); const controller = new AbortController();
+    const turnId = experiment?.turnId || id(); const controller = new AbortController();
     this.active.set(branchId, { controller, turnId });
     this.store.put('selections', turnId, { id: turnId, branch: branchId, revision: b.head,
       at: new Date().toISOString(), // One operator pick repeated across a multi-turn run is a single decision: only its first turn is 'forced'.
-      method: forced ? (run && run.index > 1 ? 'locked' : 'forced') : 'random', run: run ?? null,
+      method: forced ? (!experiment && run && run.index > 1 ? 'locked' : 'forced') : 'random', run: run ?? null,
       eligible: forced ? s.participants : pool, chosen: speaker });
     // Shadow captures this revision but never delays or influences generation.
     if (s.shadow) void shadowJev(this.store, s, branchId, b.head, turnId, this.transport).catch(error => console.error('Jev persistence error:', error.message));

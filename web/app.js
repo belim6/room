@@ -3,7 +3,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 let boot, data, current=localStorage.getItem('room-branch'), tab='characters', character='Boris', selected=null;
 let comparison=null, category=localStorage.getItem('room-library')||'conversations', refreshVersion=0;
 let showJev=localStorage.getItem('room-show-jev')==='true',jevTimer,jevPollVersion=0;
-let branchNavigationPending=false;
+let branchNavigationPending=false, paneChanges=null;
 const records=new Map(), runs=new Map(), drafts=new Map();
 async function api(url,body) {const r=await fetch('/api'+url,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const value=await r.json();if(!r.ok)throw Error(value.error||'Request failed');return value;}
 function error(e){$('#error').textContent=e.message||String(e);$('#error').hidden=false;}
@@ -55,8 +55,9 @@ async function refresh(){
   if(current)localStorage.setItem('room-branch',current);else localStorage.removeItem('room-branch');
   render();
 }
-async function choose(id){rememberInputs();comparison=null;localStorage.removeItem('room-comparison');current=id;selected=null;category='conversations';await refresh();}
+async function choose(id){leaveExperiment();paneChanges=null;rememberInputs();comparison=null;localStorage.removeItem('room-comparison');current=id;selected=null;category='conversations';await refresh();}
 async function openComparison(value){
+  leaveExperiment();paneChanges=null;
   rememberInputs();comparison=value;current=value.left;selected=null;category='comparisons';
   if(value.id)localStorage.setItem('room-comparison',value.id);else localStorage.removeItem('room-comparison');
   await refresh();
@@ -67,9 +68,11 @@ async function replacePane(oldId,next){
   else await choose(next.id);
 }
 function renderLibrary(){
-  for(const name of ['conversations','comparisons','trash'])$('#show-'+name).classList.toggle('selected',category===name);
-  $('#library-label').textContent=category==='conversations'?'CONVERSATIONS':category==='trash'?'TRASH':'SAVED COMPARISONS';localStorage.setItem('room-library',category);
-  if(category==='conversations'){
+  for(const name of ['conversations','comparisons','experiments','trash'])$('#show-'+name).classList.toggle('selected',category===name);
+  $('#library-label').textContent=category==='conversations'?'CONVERSATIONS':category==='trash'?'TRASH':category==='experiments'?'EXPERIMENTS':'SAVED COMPARISONS';localStorage.setItem('room-library',category);
+  $('#new-experiment').hidden=category!=='experiments';
+  if(category==='experiments'){experimentLibrary();}
+  else if(category==='conversations'){
     const root=rootOf(current);
     $('#branches').innerHTML=boot.branches.filter(b=>!b.parent&&!b.comparison).map(b=>`<button data-branch="${b.id}" class="${!comparison&&root?.id===b.id?'active':''}">${esc(b.name)}<small>${boot.branches.filter(x=>x.id!==b.id&&rootOf(x.id)?.id===b.id).length} branches</small></button>`).join('')||'<p class="muted">No conversations yet.</p>';
     document.querySelectorAll('[data-branch]').forEach(b=>b.onclick=action(()=>choose(b.dataset.branch)));
@@ -112,9 +115,13 @@ function controlsHtml(key){
   const s=records.get(key).branch.revision.state,d=drafts.get(key)||{},busy=isBusy(key),run=runs.get(key);
   return `<div class="turn-controls"><label>Next voice <select data-speaker><option value="">Random participant</option>${s.participants.map(p=>`<option ${p===d.speaker?'selected':''}>${p}</option>`).join('')}</select></label><label>Turns <input data-count type="number" value="${esc(d.count||1)}" min="1" max="20"></label><button data-generate="${key}" class="primary" ${busy?'disabled':''}>Continue ↗</button><button data-stop="${key}" ${busy?'':'hidden'}>Stop</button><span class="muted">${run?esc(run.stopping?'Stopping…':`Generating ${run.index} of ${run.count}…`):busy?'Generating…':''}</span></div><form data-compose="${key}"><textarea data-text aria-label="Your message" rows="2" placeholder="Say something to this conversation…">${esc(d.text||'')}</textarea><button class="primary" type="submit" ${busy?'disabled':''}>Send</button></form>`;
 }
+function changesBadge(key){const c=records.get(key)?.changes;if(!c?.fork)return '';const all=RoomChanges.badges(c.changes);return `<button class="changes-badge" data-changes="${key}" title="View changes since fork">${esc(all.slice(0,3).join(' · ')||'No changes since fork')}${all.length>3?' · +'+(all.length-3)+' more':''}</button>`;}
 function render(){
   clearTimeout(jevTimer);++jevPollVersion;
   rememberInputs();renderLibrary();$('#connection').textContent=`OpenGateway ${boot.keys.opengateway?'● ready':'○ no key'} · Together ${boot.keys.together?'● ready':'○ no key'}`;
+  if(experimentPage){renderExperiment();return;}
+  document.querySelector('.workspace').classList.remove('experiment-mode');$('#experiment-page').hidden=true;
+  $('#diff-panes').hidden=!comparison;
   document.querySelector('.workspace').classList.toggle('comparing',!!comparison);
   $('#messages').hidden=!!comparison;$('#comparison').hidden=!comparison;document.querySelector('main > footer').hidden=!!comparison||!data;
   for(const key of ['fork','history','compare','export','delete'])$('#'+key).disabled=!data;
@@ -136,19 +143,20 @@ function render(){
     const positions=new Map([...document.querySelectorAll('[data-pane]')].map(p=>[p.dataset.pane,p.querySelector('.pane-messages').scrollTop]));
     $('#comparison').innerHTML=[comparison.left,comparison.right].map((key,index)=>{
       const b=records.get(key).branch;
-      return `<section class="comparison-pane ${key===current?'focused':''}" data-pane="${key}" aria-label="${index?'Right':'Left'} conversation"><div class="pane-header"><div class="eyebrow">${index?'RIGHT':'LEFT'} CONVERSATION</div><h2>${esc(b.name)}</h2><div class="pane-actions"><button data-settings="${key}">Characters & settings</button><button data-pane-fork="${key}">Branch</button><button data-history="${key}">Edit history</button>${branchNavHtml(key)}</div></div><div class="pane-messages">${messagesHtml(b.revision.state,key)}</div><div class="pane-footer" data-controls="${key}">${controlsHtml(key)}</div></section>`;
+      return `<section class="comparison-pane ${key===current?'focused':''}" data-pane="${key}" aria-label="${index?'Right':'Left'} conversation"><div class="pane-header"><div class="eyebrow">${index?'RIGHT':'LEFT'} CONVERSATION</div><h2>${esc(b.name)}</h2><div class="pane-actions"><button data-settings="${key}">Characters & settings</button><button data-pane-fork="${key}">Branch</button><button data-history="${key}">Edit history</button>${branchNavHtml(key)}${changesBadge(key)}</div></div><div class="pane-messages">${messagesHtml(b.revision.state,key)}</div><div class="pane-footer" data-controls="${key}">${controlsHtml(key)}</div></section>`;
     }).join('');
     document.querySelectorAll('[data-pane]').forEach(p=>{if(positions.has(p.dataset.pane))p.querySelector('.pane-messages').scrollTop=positions.get(p.dataset.pane);});
   }else{
     const b=data.branch,s=b.revision.state,root=rootOf(b.id);
     $('#title').textContent=b.name;$('#subtitle').textContent=`${s.participants.length} participants · ${s.messages.length} messages${b.parent?' · Branch of '+root.name:''}`;
-    $('#family-nav').innerHTML=branchNavHtml(current);
+    $('#family-nav').innerHTML=branchNavHtml(current)+changesBadge(current);
     $('#messages').innerHTML=messagesHtml(s,current);
     const footer=document.querySelector('main > footer');footer.dataset.controls=current;footer.innerHTML=controlsHtml(current)+'<div class="footnote">Sending adds your message. Continue gives a character the floor.</div>';
   }
   bindControls();renderPanel(false);paintJev();scheduleJevPoll();
 }
 function bindControls(){
+  document.querySelectorAll('[data-changes]').forEach(b=>b.onclick=()=>{paneChanges=null;focusPane(b.dataset.changes,'changes');});
   document.querySelectorAll('[data-inspect]').forEach(b=>b.onclick=()=>focusPane(b.dataset.owner,'inspect',b.dataset.inspect));
   document.querySelectorAll('[data-note]').forEach(b=>b.onclick=()=>focusPane(b.dataset.owner,'notes',b.dataset.note));
   document.querySelectorAll('[data-fork]').forEach(b=>b.onclick=action(()=>forkAt(b.dataset.owner,b.dataset.fork)));
@@ -188,6 +196,8 @@ function renderPanel(force = true) {
     $('#provider').onchange=()=>{const p=$('#provider').value;$('#model').value=p==='demo'?'local-demo':p==='opengateway'?'moonshotai/kimi-k3-ultrafast':'';};
     $('#save-settings').onclick=action(()=>saveSettings(false));
     $('#apply-all').onclick=action(()=>saveSettings(true));
+  } else if(tab==='changes') {
+    panel.innerHTML=`<h2>${paneChanges?'Left → right pane':'Changes since fork'}</h2>${RoomChanges.render(paneChanges||data.changes?.changes)}${data.changes?.fork&&!paneChanges?'<p class="muted">Derived from the stored fork revision. New edits track their original message IDs. Legacy edits without provenance may appear as removals and additions.</p>':''}`;
   } else if(tab==='inspect') {
     const message=s.messages.find(m=>m.id===selected);
     const attempts=message ? data.attempts.filter(a=>a.turnId===message.turnId && message.turnId) : data.attempts;
@@ -195,7 +205,7 @@ function renderPanel(force = true) {
     const removedHtml=[...deleted.values()].map(r=>`<details><summary>${esc(r.change.message.speaker)} · deleted message</summary><p>${esc(r.change.message.text)}</p><button data-restore-message="${r.id}">Restore message</button></details>`).join('');
     const selections=message ? data.selections.filter(r=>r.id===message.turnId) : data.selections;
     const jev=message ? data.jev.filter(r=>r.turnId===message.turnId) : data.jev;
-    panel.innerHTML=`<h2>${message?'Behind this message':'Turn records'}</h2><p class="muted">${message?esc(message.speaker)+' · '+esc(message.source):'Every attempt survives, including failures and rejected replies.'}</p><button id="all-attempts">All attempts</button> <button id="refresh-evidence">Refresh</button>${message?.source==='imported'?'<p class="notice">Historical prompts, selection methods and raw responses were not saved. Current defaults do not reconstruct them.</p>':''}${message?.source==='edited'?'<p class="notice">This text was retconned. Any linked generation describes the original text, not the edit.</p>':''}${selections.map(r=>details('Selection · '+r.method+' → '+r.chosen,r)).join('')}${[...attempts].reverse().map(a=>`<details open><summary>${esc(a.persona)} · ${esc(a.provider)} · ${esc(a.outcome?.status||'pending')}<br><span class="muted">${esc(a.body.model)}</span></summary>${details('Exact dispatched request', {endpoint:a.endpoint,body:a.body,revision:a.revision,retryOf:a.retryOf})}${details('Raw response & processing',a.outcome||{status:'pending'})}</details>`).join('')}${jev.map(j=>details('Jev shadow · '+(j.outcome?.status||'pending'),j)).join('')}${!attempts.length?'<p class="muted">No generation attempt for this selection.</p>':''}${removedHtml?'<div class="divider"></div><h2>Deleted messages</h2>'+removedHtml:''}<div class="divider"></div><h2>State history</h2>${data.revisions.slice(0,30).map(r=>details(r.reason+' · '+new Date(r.at).toLocaleTimeString(),r)).join('')}`;
+    panel.innerHTML=`<h2>${message?'Behind this message':'Turn records'}</h2><p class="muted">${message?esc(message.speaker)+' · '+esc(message.source):'Every attempt survives, including failures and rejected replies.'}</p><button id="all-attempts">All attempts</button> <button id="refresh-evidence">Refresh</button>${message?.source==='imported'?'<p class="notice">Historical prompts, selection methods and raw responses were not saved. Current defaults do not reconstruct them.</p>':''}${message?.source==='edited'?'<p class="notice">This text was retconned. Any linked generation describes the original text, not the edit.</p>':''}${selections.map(r=>details('Selection · '+r.method+' → '+r.chosen,r)).join('')}${[...attempts].reverse().map(a=>`<details open><summary>${esc(a.persona)} · ${esc(a.provider)} · ${esc(a.outcome?.status||'pending')}<br><span class="muted">${esc(a.body.model)}</span></summary>${details('Exact dispatched request', {endpoint:a.endpoint,body:a.body,revision:a.revision,retryOf:a.retryOf})}${a.reasoning?`<details><summary>Reasoning (as returned by provider)</summary><p class="provider-reasoning">${esc(a.reasoning)}</p></details>`:''}${details('Raw response & processing',a.outcome||{status:'pending'})}</details>`).join('')}${jev.map(j=>details('Jev shadow · '+(j.outcome?.status||'pending'),j)).join('')}${!attempts.length?'<p class="muted">No generation attempt for this selection.</p>':''}${removedHtml?'<div class="divider"></div><h2>Deleted messages</h2>'+removedHtml:''}<div class="divider"></div><h2>State history</h2>${data.revisions.slice(0,30).map(r=>details(r.reason+' · '+new Date(r.at).toLocaleTimeString(),r)).join('')}`;
     document.querySelectorAll('[data-restore-message]').forEach(b=>b.onclick=action(async()=>{if(isBusy(current))throw Error('Stop generation before restoring a message.');await api('/branches/'+current+'/messages/restore',{expected:data.branch.head,deletion:b.dataset.restoreMessage});await refresh();}));
     $('#all-attempts').onclick=()=>{selected=null;renderPanel();};$('#refresh-evidence').onclick=action(refresh);
   } else {
@@ -244,10 +254,13 @@ async function editHistory(key){
 }
 async function showFamily(key){
   const root=rootOf(key),members=familyMembers(key);
-  const f=await dialog('Branches of '+root.name,`<label>Conversation or branch<select name="branch">${members.map(b=>`<option value="${b.id}" ${b.id===key?'selected':''}>${esc(b.name)}${b.id===root.id?' · original':''}</option>`).join('')}</select></label>`,'Open');
+  const summaries=await Promise.all(members.map(b=>api('/branches/'+b.id+'/changes')));
+  const f=await dialog('Branches of '+root.name,`<label>Conversation or branch<select name="branch">${members.map((b,i)=>`<option value="${b.id}" ${b.id===key?'selected':''}>${esc(b.name)}${b.id===root.id?' · original':''}${summaries[i].fork?' · '+RoomChanges.badges(summaries[i].changes).slice(0,3).map(esc).join(' · '):''}</option>`).join('')}</select></label>`,'Open');
   if(!f)return;const target=f.get('branch');
   if(comparison){if((comparison.left===target||comparison.right===target)&&target!==key)throw Error('That branch is already in the other pane');await replacePane(key,{id:target});}else await choose(target);
 }
+$('#new-experiment').onclick=action(()=>editExperimentDesign());
+$('#diff-panes').onclick=action(async()=>{paneChanges=await api('/changes',{left:comparison.left,right:comparison.right});tab='changes';renderPanel();});
 $('#new').onclick=action(async()=>{const f=await dialog('Start a room','<label>Name<input name="name" value="A new conversation" required></label>','Create room');if(f){const b=await api('/branches',{name:f.get('name')});await choose(b.id);}});
 $('#fork').onclick=action(()=>forkAt(current));$('#history').onclick=action(()=>editHistory(current));
 $('#delete').onclick=action(async()=>{
@@ -284,6 +297,6 @@ $('#fork-comparison').onclick=action(async()=>{
 $('#show-jev').checked=showJev;
 $('#show-jev').onchange=()=>{showJev=$('#show-jev').checked;localStorage.setItem('room-show-jev',String(showJev));$('#jev-refresh-status').textContent='';paintJev();scheduleJevPoll();};
 $('#refresh-jev').onclick=()=>{clearTimeout(jevTimer);void refreshJevObservations(++jevPollVersion,0,true);};
-for(const name of ['conversations','comparisons','trash'])$('#show-'+name).onclick=()=>{category=name;renderLibrary();};
+for(const name of ['conversations','comparisons','experiments','trash'])$('#show-'+name).onclick=()=>{category=name;renderLibrary();};
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;renderPanel();});
-action(async()=>{const saved=localStorage.getItem('room-comparison');if(saved){try{comparison=await api('/comparisons/'+saved);current=comparison.left;}catch{localStorage.removeItem('room-comparison');}}await refresh();})();
+action(async()=>{const savedExperiment=localStorage.getItem('room-experiment');if(savedExperiment){try{experimentPage=await api('/experiments/'+savedExperiment);category='experiments';}catch{localStorage.removeItem('room-experiment');}}const saved=localStorage.getItem('room-comparison');if(saved){try{comparison=await api('/comparisons/'+saved);current=comparison.left;}catch{localStorage.removeItem('room-comparison');}}await refresh();})();

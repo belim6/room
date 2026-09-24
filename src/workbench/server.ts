@@ -3,9 +3,11 @@ import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
 import { Engine, initialState, type Revision } from './engine';
-import { defaultStore } from './generation';
+import { defaultStore, reasoningOf } from './generation';
 import { id } from './store';
 import { Comparisons } from './comparisons';
+import { Experiments } from './experiments';
+import { stateChanges } from './changes';
 
 function runInfo(run: any) {
   if (run == null) return undefined;
@@ -31,6 +33,9 @@ export function createApp(engine = new Engine(defaultStore())) {
   const route = (fn: (req: any, res: any) => any) => (req: any, res: any, next: any) => Promise.resolve().then(() => fn(req,res)).catch(next);
   const store = engine.store;
   const comparisons = new Comparisons(engine);
+  const experiments = new Experiments(engine);
+  app.locals.experiments = experiments;
+  const changes = (key: string) => { const b=engine.read(key); const fork=b.fork?store.get<Revision>('revisions',b.fork):null; return {fork:fork?{branch:fork.branch,revision:fork.id}:null,changes:fork?stateChanges(fork.state,b.revision.state):null}; };
   const evidence = (branch: string) => {
     const b = engine.read(branch);
     const revisions: Revision[] = []; let cursor: string | null = b.head;
@@ -38,7 +43,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     const ids = new Set(revisions.map(r => r.id));
     const relevant = (r: any) => r.branch === branch || ids.has(r.revision);
     const jevResults = new Map(store.list('jev-results').map(r => [r.id,r]));
-    return { branch: b, revisions, attempts: store.attempts().filter(relevant), selections: store.list('selections').filter(relevant),
+    return { branch: b, revisions, changes: changes(branch), attempts: store.attempts().filter(relevant).map(a=>({...a,reasoning:reasoningOf(a.outcome)})), selections: store.list('selections').filter(relevant),
       turns: store.list('turns').filter(r => r.branch === branch),
       imports: store.list('imports').filter(relevant),
       observations: store.list('observations').filter(r => r.branch === branch), edits: store.list('edits').filter(r => r.branch === branch),
@@ -46,9 +51,25 @@ export function createApp(engine = new Engine(defaultStore())) {
   };
   app.get('/api/bootstrap', route((_req,res) => {
     const saved = comparisons.list(), library = engine.library();
-    res.json({ ...library, comparisons: saved,
+    res.json({ ...library, comparisons: saved, experiments: experiments.list(),
       keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY },
       active: [...engine.active.keys()] });
+  }));
+  app.get('/api/branches/:id/changes', route((req,res) => res.json(changes(req.params.id))));
+  app.post('/api/changes', route((req,res) => res.json(stateChanges(engine.read(req.body.left).revision.state,engine.read(req.body.right).revision.state))));
+  app.get('/api/experiments', route((_req,res) => res.json(experiments.list())));
+  app.post('/api/experiments', route((req,res) => res.json(experiments.create(req.body))));
+  app.get('/api/experiments/:id', route((req,res) => res.json(experiments.detail(req.params.id))));
+  app.post('/api/experiments/:id/edit', route((req,res) => res.json(experiments.edit(req.params.id,req.body))));
+  app.post('/api/experiments/:id/attach', route((req,res) => res.json(experiments.attach(req.params.id,req.body))));
+  app.post('/api/experiments/:id/run', route((req,res) => res.json(experiments.run(req.params.id,req.body.perCondition,req.body.expected))));
+  app.post('/api/experiments/:id/stop', route((req,res) => res.json(experiments.stop(req.params.id))));
+  app.post('/api/experiments/:id/labels', route((req,res) => res.json(experiments.label(req.params.id,req.body.trial,req.body))));
+  app.post('/api/experiments/:id/observations', route((req,res) => {
+    experiments.get(req.params.id);
+    if(typeof req.body.text!=='string'||!req.body.text.trim())throw Error('Write an observation first');
+    const value={id:id(),experiment:req.params.id,at:new Date().toISOString(),text:req.body.text.slice(0,20000)};
+    store.add('observations',value);res.json(value);
   }));
   app.post('/api/branches/:id/trash', route((req,res) => res.json(engine.trash(req.params.id,req.body.expected))));
   app.post('/api/trash/:id/restore', route((req,res) => res.json(engine.restore(req.params.id))));
@@ -80,7 +101,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     state.messages = req.body.messages.map((m: any) => {
       const old = originals.get(m.id);
       if (old && old.text === m.text && old.speaker === m.speaker) return old;
-      return { id: id(), speaker: m.speaker, text: m.text, source: 'edited' };
+      return { id: id(), speaker: m.speaker, text: m.text, source: 'edited', ...(old ? {editedFrom:[old.id,...(old.editedFrom||[])],turnId:old.turnId} : {}) };
     });
     if (req.body.memory === 'clear') for (const c of Object.values(state.characters)) c.memory = '';
     const result = engine.create(b.name + ' · history retcon', state, b.id, b.head);
@@ -124,12 +145,14 @@ export function createApp(engine = new Engine(defaultStore())) {
 if (require.main === module) {
   const store = defaultStore();
   const port = Number(process.env.ROOM_PORT || 4317);
-  const server = createApp(new Engine(store)).listen(port, '127.0.0.1', () => {
+  const app = createApp(new Engine(store));
+  const server = app.listen(port, '127.0.0.1', () => {
     // Only recover browser requests after successfully acquiring the listening port.
     // Discord uses the same attempt store but owns its own in-flight requests.
     for (const attempt of store.attempts()) if (attempt.branch && !attempt.outcome) store.put('outcomes', attempt.id, { id: attempt.id, status: 'interrupted', error: 'Process ended before an outcome was recorded' });
     const done = new Set(store.list('jev-results').map(r => r.id));
     for (const r of store.list('jev-requests')) if (!done.has(r.id)) store.put('jev-results',r.id,{ id:r.id,status:'interrupted',error:'Process ended before a result was recorded' });
+    app.locals.experiments.recover();
     console.log(`Room workbench: http://127.0.0.1:${port}`);
   });
   server.on('error', err => { console.error(err.message); process.exitCode = 1; });
