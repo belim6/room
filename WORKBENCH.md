@@ -95,3 +95,13 @@ Each message has **Delete message**. It removes that message from the current co
 Turn on **Show Jev observations** above the conversation to show saved observations beneath messages, in either a single conversation or both comparison panes. This display preference is remembered locally and is separate from enabling new shadow requests in Character settings. Viewing or refreshing observations only reads saved records; it makes no model calls.
 
 Each observed turn shows Jev’s suggested speaker, ranked speaker probabilities, its separately reported confidence score, the external-research probability, and the actual selection with its selection method. These describe the context **before** the reply, not an assessment of the reply itself. Edited messages are labeled as referring to their original turn. Messages without an observation show that explicitly; missing scores are unavailable rather than zero. Pending results refresh briefly in the background; use **Refresh observations** to retry manually. Raw records remain under Inspect.
+
+## Branch and link experiments
+
+A pre-registered experiment never changes. To vary one, open it and click **Branch experiment**. This creates a new draft that copies the checkpoint, measured speaker, conditions and outcome rule. The question and prediction start blank, so they are written fresh, and **Run** stays disabled until both are filled in via Edit design. The parent is untouched, and branching makes no model calls.
+
+For experiments created independently (Exp2 was a manual copy of Exp1), use **Link parent** to record where one came from. A link is a separate append-only record, so it is allowed on locked experiments. A later link replaces an earlier one, and links that would form a cycle are rejected. Branched experiments keep the parent they were branched from and cannot be relinked.
+
+A child experiment's page shows **Branched from <parent>** with the design difference: checkpoint, speaker, conditions added, removed or changed (as a settings diff of each condition's effective state), and the outcome rule. The question and prediction are not part of this diff.
+
+**Lineage** lists the whole family: ancestors, the experiment itself, and all descendants. Rows are grouped by identical effective design (speaker plus the state after the condition's patch), so replications line up. Each row shows n, outcome counts, tag counts, median and range of completion tokens for the measured reply, and the run window. Counts are never pooled across experiments.
