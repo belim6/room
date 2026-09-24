@@ -1,6 +1,6 @@
 # Branch changes and experiments — specification
 
-Status: Ready to build · Version 0.1 · 24 September 2026
+Status: v0.1 built (commit 5c00b94) · §6–§9 ready to build · Version 0.2 · 24 September 2026
 Companion to `PRODUCT_SPEC.md` (§4.4 branching, §4.8 experiments). Read `CLAUDE.md` first; its invariants apply to everything below.
 
 ## 1. Problem
@@ -211,3 +211,90 @@ The page for the backfilled experiment must show:
 6. Run/stop/resume from the UI.
 
 Update `WORKBENCH.md` after steps 2, 5 and 6.
+
+---
+
+# Version 0.2 additions
+
+Background: Exp2 (a 20-trial replication of Exp1 A vs C) found no wolf votes in either condition, against 2/5 in Exp1's C. The dispatched requests were byte-identical; what differed was provider-side. The model generated about half as many completion tokens (median 815 vs 1,413 in C). Pooled over 50 trials, every run under 900 completion tokens voted with the pile, and both wolf votes came from runs over 1,300. Two consequences follow:
+
+- Reasoning length must be visible per trial.
+- It must be controllable where the provider allows.
+
+Probing OpenGateway (`deepseek/deepseek-v4.1-flash-ultrafast`, 24 Sep 2026):
+
+- `reasoning_effort` and `reasoning.effort` are accepted but have no measurable effect. Low and high gave the same token counts over 4 repeats each, and an invalid value is accepted silently.
+- `thinking: {"type": "disabled"}` works: it returns no `reasoning_content`.
+
+## 6. Fixes from the v0.1 test run
+
+1. **Base-context excerpt.** It starts mid-word ("Elorin: ed isn't a bad read…"). Show the last one or two whole messages before the fork point, truncated at the end, never the start.
+2. **Sidebar refresh.** The Experiments sidebar doesn't refresh after an experiment is created; it only appears after a reload. Refresh the list and open the new experiment.
+3. **Condition-key validation.** The input's `pattern="[A-Za-z0-9_-]+"` is invalid under the browser's `v`-flag compilation (a console error, and validation is silently skipped). Use `[A-Za-z0-9_\-]+`.
+4. **Base-conversation dropdown.** It lists branches in ID order. Group by original conversation (originals first, their branches indented beneath), sort by name within each group, and preselect the conversation currently open.
+5. **Change badge.** It wraps into four lines inside the button column. Put it on its own line under the room title instead.
+6. **Clipped buttons.** The "Branches" navigation button is clipped at the right edge at ~1024px width. The header actions must wrap rather than overflow.
+
+## 7. Per-character reasoning setting
+
+- `Character` gains an optional `reasoning: 'default' | 'off'`. Absent means `default`. It is validated in `validateState`.
+- In `generate`, when `reasoning === 'off'`, the provider mapping adds the provider's documented switch to the request body:
+  - **`opengateway`:** `thinking: { type: 'disabled' }` (verified above).
+  - **`together`:** reject `off` with a validation error until a switch is verified against Together's API. Never send an unverified parameter silently.
+  - **`demo`:** accepted, and it changes nothing.
+- The parameter is part of `body`, so it is persisted in the attempt before dispatch, like every other request field.
+- Don't offer effort levels. None had a measurable effect on the only provider tested. Add them later only per provider, after a probe shows they change token counts.
+- **UI:** a "Reasoning" select in character settings (`Provider default` / `Off`). The "apply provider/model to all characters" action carries it too.
+- **Changes view:** `reasoning` is a character field like `temperature` (`Boris · reasoning: default → off`).
+- **Experiments:** allowed in condition patches (`characters.<name>.reasoning`).
+
+## 8. Branching experiments
+
+A locked experiment never changes. To vary it, branch it.
+
+- **Record.**
+  - `Experiment` gains `parent?: string`, the ID of the experiment it was branched from.
+  - `POST /api/experiments/:id/branch { name }` creates a new **draft**. It copies `base`, `speaker`, `conditions` and `outcome`, sets `parent`, and leaves `question` and `prediction` empty so they are written fresh. The parent is untouched.
+  - The draft is then edited normally and locks on its first run, as usual.
+- **Linking existing experiments.** Lineage is metadata, not design. For experiments that were created independently (Exp2 was a manual branch of Exp1), `POST /api/experiments/:id/link { parent }` writes an append-only `experiment-links` record. It is allowed on locked experiments, because it doesn't change the frozen design. The effective parent is `parent`, or failing that the latest link. Reject cycles.
+- **Design diff.** The child's page shows "Branched from <parent>" with a diff of the designs:
+  - `base` changed (with both checkpoints' last messages).
+  - `speaker` changed.
+  - Conditions added, removed, or with changed patches (reuse `stateChanges`/`lineDiff` on the effective condition states).
+  - Outcome rule changed.
+- **Lineage view.** On any experiment page, show the family, parent above and children below, as a compact table:
+  - Name, locked date, trials per condition.
+  - Each condition's outcome counts and tag counts (e.g. `wolf 2/5`).
+  - The median completion tokens per condition.
+  - A link to each experiment.
+  - Conditions with identical effective state across experiments share a row label, so replications line up.
+- **No automatic pooling.** Never merge counts across experiments, even when designs are identical. Exp1/Exp2 showed the provider can drift between runs with no change on our side. Show each experiment's run window (first and last trial time) next to its counts.
+
+## 9. Reasoning length in results
+
+- **Trials table:** add columns for completion tokens (`usage.completion_tokens`) and reasoning characters (length of `reasoningOf(outcome)`). Include `usage.completion_tokens_details.reasoning_tokens` when the provider supplies it.
+- **Results summary:** per condition, show the median and range of completion tokens beside the outcome counts.
+- **Filter:** add a filter/sort on completion tokens, so a pattern like "short runs always join the pile" is visible without scripts.
+
+## 10. Acceptance for v0.2
+
+- The six fixes in §6 are visible in the UI. The console is clean on the experiment form.
+- **Reasoning off:**
+  - A character with `reasoning: 'off'` on OpenGateway produces a dispatched body containing `"thinking":{"type":"disabled"}`, verified with a mocked transport. Tests never make live calls.
+  - With `together` it fails validation before dispatch.
+  - The changes view and condition cards show it.
+- **Branching:**
+  - Branching Exp2 yields a draft whose conditions equal Exp2's, with `parent` set and an empty prediction.
+  - Changing C's patch to `characters.Alexandra.reasoning: 'off'` shows exactly that in the design diff.
+  - Exp2's page is unchanged.
+- **Linking:** linking Exp2 to Exp1 (`POST /api/experiments/<Exp2>/link { parent: <Exp1> }`) makes Exp2 show "Branched from Exp1". Its design diff shows condition `B_no_brevity` removed and nothing else. The lineage view lists Exp1 (5/cond) and Exp2 (20/cond) with separate counts, run windows and median tokens.
+- Tests cover patch copying on branch, cycle rejection on link, the reasoning validation per provider, and the request-body mapping.
+
+## 11. Build order for v0.2
+
+1. §6 fixes.
+2. §7 reasoning setting (engine, generation, validation, UI, tests).
+3. §9 reasoning-length columns.
+4. §8 branching and linking, then the lineage view.
+
+Update `WORKBENCH.md` after steps 2 and 4. The first experiment planned on top of this: branch Exp2 → Exp3, with C = control rules plus `Alexandra.reasoning: 'off'`, 20 trials per condition.
