@@ -8,6 +8,10 @@ import { Store, clone } from '../src/workbench/store';
 import { Engine } from '../src/workbench/engine';
 import { generate } from '../src/workbench/generation';
 import { createApp } from '../src/workbench/server';
+// New rooms default to a paid provider: any non-loopback request in tests is a bug.
+// Engines built without a transport get this mock in place of the removed local demo.
+const loopback=globalThis.fetch;process.env.OPENGATEWAY_API_KEY='test-key';
+globalThis.fetch=((url:any,opts?:any)=>/^http:\/\/127\.0\.0\.1[:/]/.test(String(url))?loopback(url,opts):String(url).startsWith('https://apis.opengateway.ai/')?Promise.resolve(new Response(JSON.stringify({choices:[{message:{content:'Mock reply.'},finish_reason:'stop'}]}))):Promise.reject(Error('Live network call in tests: '+url))) as typeof fetch;
 const roots: string[] = [];
 function store() { const dir = fs.mkdtempSync(path.join(os.tmpdir(),'room-tests-')); roots.push(dir); return new Store(dir); }
 const response = (text: string) => new Response(JSON.stringify({ choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { total_tokens: 42 } }));
@@ -86,7 +90,7 @@ test('late result after editing is detached; canceled result never enters histor
 test('shadow call does not block generation or contaminate model context',async()=>{
   const s=store();let resolveJev:(r:Response)=>void=()=>{};
   process.env.TYPESAFE_API_KEY='test-jev';
-  const e=new Engine(s,(url)=>{assert(String(url).includes('typesafe'));return new Promise(r=>{resolveJev=r});});
+  const e=new Engine(s,(url)=>String(url).includes('typesafe')?new Promise(r=>{resolveJev=r}):Promise.resolve(response('Hello.')));
   let b=e.create();const state=b.revision.state;state.shadow=true;b=e.commit(b.id,b.head,state,'Shadow on');
   const done=await e.turn(b.id,b.head,'Boris');assert.equal(done.revision.state.messages.length,1);
   assert.equal(s.list('jev-results').length,0);assert.equal(s.list('jev-requests').length,1);
@@ -339,7 +343,7 @@ test('attaching validates measured input, is retrospective, makes no calls, and 
   assert.throws(()=>x.attach(exp.id,{condition:'A',branch:b.id}),/already attached/);
   assert.throws(()=>x.attach(exp.id,{condition:'B',branch:b.id}),/does not match/);
   assert.equal(x.detail(exp.id).trials[0].turnId,t.turnId);e.deleteMessage(b.id,b.head,b.revision.state.messages[0].id);
-  assert(x.detail(exp.id).trials[0].reply.includes('Demo'));
+  assert(x.detail(exp.id).trials[0].reply.includes('Mock reply'));
 });
 test('experiment timeouts retry twice with durable attempts; non-timeout failures do not retry',async()=>{
   for(const timeout of [true,false]){
@@ -417,7 +421,6 @@ test('reasoning off maps to the verified provider switch, is rejected unverified
   const before=s.list('attempts').length;
   await assert.rejects(generate({...input,reasoning:'off'},s,async()=>{throw Error('must not dispatch');}),/not verified for together/);
   assert.equal(s.list('attempts').length,before);
-  await generate({...input,provider:'demo',reasoning:'off'},s);
   const state=initialState();state.characters.Boris.reasoning='off';validateState(state);
   state.characters.Boris.provider='together';assert.throws(()=>validateState(state),/not verified/);
   assert.throws(()=>validateState({...initialState(),characters:{...initialState().characters,Boris:{...initialState().characters.Boris,reasoning:'low' as any}}}),/Invalid character/);
@@ -486,4 +489,34 @@ test('experiment and comparison families list roots and order members as a tree 
   const s=store(),e=new Engine(s),x=new Experiments(e),input=design(e),one=x.create(input),two=x.branch(one.id,{name:'Two'}),three=x.create({...input,name:'Three'});x.link(three.id,{parent:two.id});
   const list=x.list();assert.deepEqual(F.roots(list,(i:any)=>i.familyParent).map((i:any)=>i.name),['Test']);
   assert.deepEqual(F.tree(list,(i:any)=>i.familyParent,three.id).map((t:any)=>t.item.name),['Test','Two','Three']);
+});
+test('new rooms default to OpenGateway DeepSeek; demo generates only with ROOM_DEMO=1 and stays editable otherwise',async()=>{
+  const s=store(),e=new Engine(s,async()=>{throw Error('must not dispatch');}),state=initialState();
+  assert(Object.values(state.characters).every(c=>c.provider==='opengateway'&&c.model==='deepseek/deepseek-v4.1-flash-ultrafast'));
+  const legacy=clone(state);legacy.characters.Boris.provider='demo' as any;let b=e.create('Legacy',legacy);
+  b=e.commit(b.id,b.head,{...b.revision.state,system:'Edited'},'Still editable');
+  await assert.rejects(e.turn(b.id,b.head,'Boris'),/ROOM_DEMO=1/);assert.equal(s.list('attempts').length,0);
+  process.env.ROOM_DEMO='1';try{b=await e.turn(b.id,b.head,'Boris');}finally{delete process.env.ROOM_DEMO;}
+  assert(b.revision.state.messages.at(-1)!.text.startsWith('[Demo · Boris]'),'scratch instances keep a free local provider');
+});
+test('back-and-forth alternates two participants after the opening pick and records the rule',async()=>{
+  const s=store(),e=new Engine(s,async()=>response('Fine.'));let b=e.create('Duo');
+  b=e.commit(b.id,b.head,{...b.revision.state,participants:['Boris','Ilya']},'Two');
+  const run={id:'r',count:4,mode:'alternate' as const};
+  for(let index=1;index<=4;index++)b=await e.turn(b.id,b.head,index===1?'Ilya':undefined,{...run,index});
+  assert.deepEqual(b.revision.state.messages.map(m=>m.speaker),['Ilya','Boris','Ilya','Boris']);
+  const picks=s.list('selections').sort((a,b)=>a.run.index-b.run.index);
+  assert.deepEqual(picks.map(p=>p.method),['forced','random','random','random']);assert(picks.slice(1).every(p=>p.eligible.length===1&&p.run.mode==='alternate'));
+  await assert.rejects(e.turn(b.id,b.head,'Boris',{...run,index:2}),/Back-and-forth/);
+  const trio=e.commit(b.id,b.head,{...b.revision.state,participants:['Boris','Ilya','Rook']},'Three');
+  await assert.rejects(e.turn(trio.id,trio.head,undefined,{...run,index:1}),/exactly two/);
+});
+import { buildSpeakerInput } from '../src/speakerTurn';
+test('the human joins the prompt roster only after speaking; once present the prompt is unchanged',async()=>{
+  const s=store();let user='';const e=new Engine(s,async(_u,opts)=>{user=JSON.parse(String(opts?.body)).messages[1].content;return response('Fine.');});
+  let b=e.create('Quiet human');b=e.commit(b.id,b.head,{...b.revision.state,participants:['Boris','Ilya'],human:'Deniz'},'Two');
+  b=await e.turn(b.id,b.head,'Boris');assert(user.includes('Current participants: Boris, Ilya.'));assert(!user.includes('Deniz'));
+  b=e.message(b.id,b.head,'Hi both');b=await e.turn(b.id,b.head,'Ilya');
+  const transcript=b.revision.state.messages.slice(0,-1).map(m=>`${m.speaker}: ${m.text}`).join('\n');
+  assert.equal(user,buildSpeakerInput('Ilya',transcript,['Boris','Ilya']).replace('Current participants: Dennis,','Current participants: Deniz,'),'byte-identical to the previous roster once the human has spoken');
 });

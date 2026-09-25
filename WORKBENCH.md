@@ -11,7 +11,7 @@ Open http://127.0.0.1:4317. Requires Node 22 and the project's installed depende
 
 ## First conversation
 
-1. Create a room. New rooms use **local demo**: clearly labeled placeholder replies, no model calls.
+1. Create a room. New rooms use **OpenGateway** with `deepseek/deepseek-v4.1-flash-ultrafast` for every character, so Continue makes a real, paid request. **Local demo** (placeholder replies, no model calls) is only offered on instances started with `ROOM_DEMO=1`, meant for throwaway test instances. Elsewhere, rooms saved with demo characters stay readable and editable, and their Characters panel says to pick a provider; a demo character cannot generate there until switched.
 2. In Characters, choose a provider and exact model ID, then save. “Apply provider/model/reasoning to all characters” applies these settings, temperature and the reasoning setting across the cast while preserving their different prompts and memories.
 3. For OpenGateway, the existing `.env` key and Kimi model are supported. For Together, add `TOGETHER_API_KEY=...` to `.env`, restart, and enter an available model ID. Credentials are never entered in the browser.
 4. Send your message, then Continue. Select a character or random selection; optionally request up to 20 turns. Stop cancels the active request and remaining turns. Aborting locally cannot guarantee the provider stops processing or charging.
@@ -108,7 +108,7 @@ A child experiment's page shows **Branched from <parent>** with the design diffe
 
 ## Reasoning setting
 
-Each character has **Reasoning** in Characters: `Provider default` or `Off`. Off adds the provider's documented switch to the request, which is saved with the attempt before it is sent. On OpenGateway that switch is `thinking: {"type": "disabled"}`, verified on 24 September 2026 against `deepseek/deepseek-v4.1-flash-ultrafast`. Together has no verified switch yet, so Off is rejected for Together characters before anything is sent. It is accepted for local demo, where it changes nothing. Effort levels are not offered: on the only provider probed, they were accepted but made no measurable difference.
+Each character has **Reasoning** in Characters: `Provider default` or `Off`. Off adds the provider's documented switch to the request, which is saved with the attempt before it is sent. On OpenGateway that switch is `thinking: {"type": "disabled"}`, verified on 24 September 2026 against `deepseek/deepseek-v4.1-flash-ultrafast`. Together has no verified switch yet, so Off is rejected for Together characters before anything is sent. Effort levels are not offered: on the only provider probed, they were accepted but made no measurable difference.
 
 Reasoning appears in the branch changes view like any other character field (`Boris reasoning changed`), and experiment conditions can set it with `characters.<name>.reasoning` in the JSON patch.
 
@@ -133,3 +133,11 @@ Trials from before this change (Exp1–Exp3) keep their original parent, because
 ## Experiment and comparison families
 
 The Experiments and Comparisons sidebars list only roots: experiments with no parent or link, and comparisons that weren't forked from another. Each shows `· N branches` for all its descendants. Once one is open, the header shows **← Family i/n →** and a picker listing the family as an indented tree (root first, children under their parents, by creation time). The sidebar keeps the root highlighted while you move around the family. The lineage table on experiment pages is unchanged; the navigator is for moving between experiments, and the table is for comparing their results.
+
+## Back-and-forth
+
+When a room has exactly two participants, **Back-and-forth** appears next to Turns. With it on, a multi-turn run alternates. The first turn goes to the selected voice, or to the one who didn't speak last if Random is selected. Every later turn goes to whichever of the two didn't speak last, and your own messages don't count. The first pick is recorded as usual (`forced` or `random`). Later picks are recorded as `random` with a single eligible speaker, and every turn's run info carries `mode: "alternate"`, so the rule is visible in the selection record.
+
+## When you are in the room
+
+Characters are told who is present through a roster line in each request ("Current participants: …"). You (the human name in Settings) are in that roster only once a message under your name exists in the conversation. Until then, characters are told only about each other. Rooms where you have already spoken, including every experiment base so far (where the human is the Moderator), send exactly the same requests as before. Instructions you write yourself, such as game rules that name you, are still sent as written.

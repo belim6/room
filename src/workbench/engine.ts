@@ -1,5 +1,5 @@
 import { Store, clone, id } from './store';
-import { generate, reasoningSwitchVerified, type Provider } from './generation';
+import { generate, reasoningSwitchVerified, DEFAULT_MODEL, type Provider } from './generation';
 import { PERSONAS, type PersonaName } from '../personas/personas';
 import { GLOBAL_SYSTEM } from '../modelRouter';
 import { buildSpeakerInput } from '../speakerTurn';
@@ -17,7 +17,7 @@ const names = Object.keys(PERSONAS) as PersonaName[];
 export function initialState(): State {
   return { system: GLOBAL_SYSTEM, participants: [...names], messages: [], shadow: false, policy: 'protected', human: 'Dennis',
     characters: Object.fromEntries(names.map(name => [name, { prompt: PERSONAS[name].systemPrompt,
-      memory: '', provider: 'demo', model: 'local-demo', temperature: 0.7 }])) as State['characters'] };
+      memory: '', provider: 'opengateway', model: DEFAULT_MODEL, temperature: 0.7 }])) as State['characters'] };
 }
 export function validateState(s: State) {
   if (!s || typeof s.system !== 'string' || s.system.length > 100000 || typeof s.human !== 'string' || !s.human.trim() || s.human.length > 80) throw Error('Invalid shared instructions or human name');
@@ -25,7 +25,7 @@ export function validateState(s: State) {
   if (typeof s.shadow !== 'boolean' || !['protected','observe'].includes(s.policy)) throw Error('Invalid observation settings');
   for (const name of names) {
     const c = s.characters?.[name];
-    if (!c || typeof c.prompt !== 'string' || typeof c.memory !== 'string' || !['demo','together','opengateway'].includes(c.provider) || typeof c.model !== 'string' || !c.model.trim() || c.model.length > 200 || !Number.isFinite(c.temperature) || c.temperature < 0 || c.temperature > 2 || (c.reasoning !== undefined && !['default','off'].includes(c.reasoning))) throw Error(`Invalid character settings: ${name}`);
+    if (!c || typeof c.prompt !== 'string' || typeof c.memory !== 'string' || !['together','opengateway','demo'].includes(c.provider) || typeof c.model !== 'string' || !c.model.trim() || c.model.length > 200 || !Number.isFinite(c.temperature) || c.temperature < 0 || c.temperature > 2 || (c.reasoning !== undefined && !['default','off'].includes(c.reasoning))) throw Error(`Invalid character settings: ${name}`);
     if (c.reasoning === 'off' && !reasoningSwitchVerified(c.provider)) throw Error(`${name}: turning reasoning off is not verified for ${c.provider}`);
   }
   if (!Array.isArray(s.messages) || s.messages.length > 10000 || s.messages.some(m => typeof m.id !== 'string' || typeof m.text !== 'string' || m.text.length > 100000 || typeof m.speaker !== 'string' || !m.speaker.trim() || m.speaker.length > 80)) throw Error('Invalid conversation');
@@ -165,12 +165,14 @@ export class Engine {
     return fork;
   }
   cancel(branch: string) { this.active.get(branch)?.controller.abort(); }
-  async turn(branchId: string, expected: string, forced?: PersonaName, run?: { id: string; index: number; count: number }, experiment?: { turnId: string }) {
+  async turn(branchId: string, expected: string, forced?: PersonaName, run?: { id: string; index: number; count: number; mode?: 'alternate' }, experiment?: { turnId: string }) {
     if (this.active.has(branchId)) throw Error('A turn is already running in this branch');
     const b = this.read(branchId);
     if (b.head !== expected) throw Error('Branch changed; reload before generating');
     const s = clone(b.revision.state);
     if (forced && !s.participants.includes(forced)) throw Error('Selected character is not participating');
+    // Back-and-forth: after the opening pick, the only eligible speaker is whichever of the two didn't speak last.
+    if (run?.mode === 'alternate' && (s.participants.length !== 2 || (forced && run.index > 1))) throw Error('Back-and-forth needs exactly two participants and no fixed speaker after the first turn');
     const last = [...s.messages].reverse().find(m => names.includes(m.speaker as PersonaName))?.speaker;
     const eligible = s.participants.filter(p => p !== last);
     const pool = eligible.length ? eligible : s.participants;
@@ -187,7 +189,8 @@ export class Engine {
       const c = s.characters[speaker];
       const system = `${c.prompt}\n\n${s.system}\n\n${c.memory ? `Your retained memory:\n${c.memory}\n\n` : ''}Your identity for this request is ${speaker}. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters.`;
       const transcript = s.messages.map(m => `${m.speaker}: ${m.text}`).join('\n');
-      const user = buildSpeakerInput(speaker, transcript, s.participants).replace('Current participants: Dennis,', `Current participants: ${s.human},`);
+      // The human joins the roster only once they have said something in this conversation.
+      const user = buildSpeakerInput(speaker, transcript, s.participants, s.messages.some(m => m.speaker === s.human) ? s.human : null);
       const result = await generate({ provider: c.provider, model: c.model, temperature: c.temperature, reasoning: c.reasoning, persona: speaker,
         messages: [{ role: 'system', content: system }, { role: 'user', content: user }], branch: branchId, revision: b.head, turnId,
         policy: s.policy, signal: controller.signal }, this.store, this.transport);

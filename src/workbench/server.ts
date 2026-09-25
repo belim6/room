@@ -3,7 +3,7 @@ import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
 import { Engine, initialState, type Revision } from './engine';
-import { defaultStore, reasoningOf } from './generation';
+import { defaultStore, reasoningOf, demoEnabled } from './generation';
 import { id } from './store';
 import { Comparisons } from './comparisons';
 import { Experiments } from './experiments';
@@ -11,10 +11,10 @@ import { stateChanges } from './changes';
 
 function runInfo(run: any) {
   if (run == null) return undefined;
-  const { id, index, count } = run;
-  if (typeof id !== 'string' || !id || !Number.isInteger(index) || !Number.isInteger(count) || index < 1 || index > count || count > 20)
+  const { id, index, count, mode } = run;
+  if (typeof id !== 'string' || !id || !Number.isInteger(index) || !Number.isInteger(count) || index < 1 || index > count || count > 20 || ![undefined,'alternate'].includes(mode))
     throw Error('Invalid run');
-  return { id, index, count };
+  return { id, index, count, ...(mode ? { mode } : {}) };
 }
 
 export function createApp(engine = new Engine(defaultStore())) {
@@ -54,7 +54,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     const saved = comparisons.list(), library = engine.library();
     const trials = experiments.trialBranches();
     res.json({ ...library, branches: library.branches.map(b => trials.has(b.id) ? { ...b, isTrial: true } : b), comparisons: saved, experiments: experiments.list(), reactions: reactions(),
-      keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY },
+      keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY, demo: demoEnabled() },
       active: [...engine.active.keys()] });
   }));
   app.get('/api/branches/:id/changes', route((req,res) => res.json(changes(req.params.id))));

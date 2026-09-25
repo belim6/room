@@ -27,7 +27,7 @@ Node 22, run through `tsx`; no build step and no auto-reload. Server code change
 ## Worktrees and data
 
 - `~/dev/room` (`main`) is the working copy. `~/dev/room-stable` (`stable`) is a git worktree Deniz uses on 4317 against the real data (`ROOM_DATA_DIR=~/dev/room/.room-data`). Update it with `git -C ~/dev/room-stable merge main` plus a restart, only when asked.
-- `.room-data/` holds Deniz's research records. **Never write test turns to it.** To exercise the app, run a second instance on another port with a throwaway `ROOM_DATA_DIR` in the scratchpad. One server process per data directory.
+- `.room-data/` holds Deniz's research records. **Never write test turns to it.** To exercise the app, run a second instance on another port with a throwaway `ROOM_DATA_DIR` in the scratchpad, and `ROOM_DEMO=1` to generate without spending. One server process per data directory.
 - `saves/`, `saved/`, `oldsaves/`, `prompt-archive/`, `_dead/` are private transcripts and retired code, gitignored. Don't commit them.
 - No remote is configured. Commit only when asked; never push without asking.
 
@@ -36,7 +36,7 @@ Node 22, run through `tsx`; no build step and no auto-reload. Server code change
 - `src/workbench/` — the app.
   - `store.ts` — JSON-file store: one atomically written file per record, `.room-data/<kind>/<id>.json`.
   - `engine.ts` — branches, immutable state revisions, turns, speaker selection, forks, retcons, trash.
-  - `generation.ts` — provider calls (`demo`, `opengateway`, `together`); persists the request before dispatch and the outcome after.
+  - `generation.ts` — provider calls (`opengateway`, `together`, and local `demo`, which only generates when `ROOM_DEMO=1`); persists the request before dispatch and the outcome after.
   - `jev.ts` — nonblocking shadow Jev call per turn.
   - `comparisons.ts` — saved side-by-side comparisons of live branches.
   - `server.ts` — Express API, loopback-only.

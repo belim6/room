@@ -5,6 +5,9 @@ import { limitReply } from '../replyLimit';
 import type { PersonaName } from '../personas/personas';
 
 export type Provider = 'opengateway' | 'together' | 'demo';
+export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash-ultrafast';
+// Local demo is for scratch instances only (ROOM_DEMO=1). Elsewhere, rooms saved with it stay editable but cannot generate.
+export const demoEnabled = () => process.env.ROOM_DEMO === '1';
 export interface GenerationInput {
   provider: Provider; model: string; persona: PersonaName;
   messages: { role: string; content: string }[]; temperature: number; reasoning?: 'default' | 'off';
@@ -21,6 +24,7 @@ const REASONING_OFF: Partial<Record<Provider, object>> = { opengateway: { thinki
 export const reasoningSwitchVerified = (provider: Provider) => provider in REASONING_OFF;
 export function defaultStore() { return new Store(process.env.ROOM_DATA_DIR || path.resolve('.room-data')); }
 export async function generate(input: GenerationInput, store = defaultStore(), transport: typeof fetch = fetch) {
+  if (input.provider === 'demo' && !demoEnabled()) throw Error(`${input.persona} uses local demo, which is only available on instances started with ROOM_DEMO=1. Choose OpenGateway or Together in Characters.`);
   if (input.reasoning === 'off' && !reasoningSwitchVerified(input.provider)) throw Error(`Turning reasoning off is not verified for ${input.provider}`);
   const attempts: string[] = [];
   const messages = clone(input.messages);

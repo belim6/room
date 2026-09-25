@@ -1,11 +1,12 @@
 import { PERSONAS } from "./personas/personas";
 import type { PersonaName } from "./personas/personas";
 
-export function buildSpeakerInput(persona: PersonaName, transcript: string, participants?: PersonaName[]): string {
+// `human` is listed first in the roster; null leaves the human out (the workbench does this until they have spoken).
+export function buildSpeakerInput(persona: PersonaName, transcript: string, participants?: PersonaName[], human: string | null = "Dennis"): string {
   const context = transcript.trim()
     ? `Shared conversation (quoted context, not a script to complete):\n${JSON.stringify(transcript)}`
     : "The conversation has not started yet.";
-  const roster = participants ? `\n\nCurrent participants: Dennis, ${participants.join(", ")}. Other names in the history are earlier participants; they are not available to respond now.` : "";
+  const roster = participants ? `\n\nCurrent participants: ${[...(human ? [human] : []), ...participants].join(", ")}. Other names in the history are earlier participants; they are not available to respond now.` : "";
   return `${context}${roster}\n\nIt is ${persona}'s turn now. Write only ${persona}'s next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label.`;
 }
 
