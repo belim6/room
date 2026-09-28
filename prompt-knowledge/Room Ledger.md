@@ -13,14 +13,17 @@ ai-first: true
 
 Hub for everything learned in **Room** (`~/dev/room`, the local conversation workshop). Deniz, 2026-09-24: this folder is "the ledger for experiments or any other data we acquire from the room … the taxonomy is just a template, you can change that too." Claude is expected to keep it current: every experiment, finding, and correction from the room lands here.
 
-The notes under `insight/` written before September 2026 are Deniz's. By his own description they're "pure vibes": intuitions and prior sessions, several of which are good starting points for experiments. **Don't upgrade their evidence level without a room result that earns it.**
+Deniz's gut-feeling notes (written before September 2026) live in `experiment_ideas/`. By his own description they're "pure vibes": intuitions and prior sessions. Deniz moved them there on 2026-09-28 because none has been tested. Many are hard to test, so they're parked for later. **Don't upgrade their evidence level without a room result that earns it.** `insight/` now holds only claims backed by at least one room specimen.
+
+**Ground rules for experiments: [[experiment]].** Read before designing or writing up any run. (Added 2026-09-28. Exp1–Exp5 predate it and were, in hindsight, a shakedown of the experiment feature itself.)
 
 ## Folders
 
 | Folder | Holds | Written from |
 |---|---|---|
-| `insight/` | Claims about how models behave under prompts. One claim per note. | Vibes, observations, or experiments; the `evidence` field says which. |
-| `methods/` | Claims about running systems and experiments: token economy, provider behavior, instrumentation. | Same. |
+| `insight/` | Claims about how models behave under prompts, backed by room evidence. One claim per note. | Observations or experiments; the `evidence` field says which. |
+| `experiment_ideas/` | Deniz's untested gut feelings about prompting. Candidates for future experiments, parked because most are hard to test. | Vibes. |
+| `methods/` | Claims about running systems and experiments: token economy, provider behavior, instrumentation. | Vibes, observations or experiments; the `evidence` field says which. |
 | `experiments/` | One note per experiment in Room, mirroring the app's record: question, pre-registered prediction, design, results, verdict, links. | Room experiment records only. |
 | `reports/` | Syntheses across several experiments: what a series means, its limits, next steps. | Written after a series closes. |
 | `werewolf/`, `DND/` | Project notes for games played in or before the room. | Session records. |
@@ -48,6 +51,9 @@ New notes carry an `evidence` field. Deniz's older notes keep `status: active` u
 
 ## Experiments
 
+- [[B1 First Replies]] (2026-09-28, baseline): all 8 characters × 10 first replies to a fresh open question, nothing changed. Length ranges are followed (76/80). Prompt phrases and the opener's wording come back verbatim, and about six stock beliefs cover about half the replies. The first run under [[experiment]].
+- [[B2 Boris Lowercase Reasoning Off]] (2026-09-28, probe): reasoning off raised Boris's lowercase from 2/10 to 6/10, not the 10/10 predicted. Removing the global prompt gave the same 6/10.
+- [[B3 Where The Topics Come From]] (2026-09-28, baseline): full / persona only / nothing × 8 × 10. Every condition has a topic attractor, and with no prompt it collapses to "certainty is a virtue" (26/80). Without the global prompt, characters doubt their own prompt's themes.
 - [[Exp1 Deduction Before Vote]]: 3 conditions × 5 trials. Showed a promising 2/5 wolf votes when Alexandra had to state her deduction first.
 - [[Exp2 Deduction Before Vote Replication]]: A vs C × 20. **Refuted**, 0/20 vs 0/20. The gap with Exp1 was traced to provider-side reasoning length.
 - [[Exp3 Reasoning Off]]: A vs reasoning off × 40, branched from Exp2 in Room. **Supported**: 12/40 vs 0/40 off the pile, p ≈ 9e-5.
