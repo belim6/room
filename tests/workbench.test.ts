@@ -520,3 +520,131 @@ test('the human joins the prompt roster only after speaking; once present the pr
   const transcript=b.revision.state.messages.slice(0,-1).map(m=>`${m.speaker}: ${m.text}`).join('\n');
   assert.equal(user,buildSpeakerInput('Ilya',transcript,['Boris','Ilya']).replace('Current participants: Dennis,','Current participants: Deniz,'),'byte-identical to the previous roster once the human has spoken');
 });
+
+import { DEFAULT_FRAME } from '../src/speakerTurn';
+import { applyPatch } from '../src/workbench/experiments';
+import { stateChanges } from '../src/workbench/changes';
+test('harness framing: the default frame is byte-identical, blank parts are dropped, experiments can patch it',async()=>{
+  const s=store();let body:any;const e=new Engine(s,async(_u,opts)=>{body=JSON.parse(String(opts?.body));return response('Fine.');});
+  let b=e.create('Framed');b=e.commit(b.id,b.head,{...b.revision.state,participants:['Boris','Ilya'],human:'Deniz'},'Two');b=e.message(b.id,b.head,'Hi {speaker}');
+  const plain=e.fork(b.id,b.head,'plain');await e.turn(plain.id,plain.head,'Boris');const before=body.messages;
+  const framed=e.fork(b.id,b.head,'framed'),withFrame=e.commit(framed.id,framed.head,{...framed.revision.state,frame:{...DEFAULT_FRAME}},'Frame');
+  await e.turn(withFrame.id,withFrame.head,'Boris');assert.deepEqual(body.messages,before,'an explicit default frame sends the same request');
+  assert(before[1].content.includes('Hi {speaker}'),'placeholders inside the conversation are not expanded');
+  const bare=e.commit(framed.id,e.read(framed.id).head,{...e.read(framed.id).revision.state,system:'',frame:{identity:'',context:'{transcript}',opening:'',turn:''},characters:{...b.revision.state.characters,Ilya:{...b.revision.state.characters.Ilya,prompt:''}}},'Bare');
+  await e.turn(bare.id,bare.head,'Ilya');
+  assert.equal(body.messages.length,1,'an empty system prompt is not sent');assert.equal(body.messages[0].role,'user');
+  assert(!/turn|identity|participants/i.test(body.messages[0].content));assert(body.messages[0].content.startsWith('"Deniz: Hi {speaker}'));
+  const empty=e.create('Empty');const blank=e.commit(empty.id,empty.head,{...empty.revision.state,system:'',frame:{identity:'',context:'',opening:'',turn:''},characters:{...empty.revision.state.characters,Boris:{...empty.revision.state.characters.Boris,prompt:''}}},'Blank');
+  await assert.rejects(e.turn(blank.id,blank.head,'Boris'),/Nothing to send/);
+  assert.throws(()=>e.commit(blank.id,blank.head,{...blank.revision.state,frame:{identity:''} as any},'Bad'),/harness framing/);
+  const patched=applyPatch(b.revision.state,{frame:{...DEFAULT_FRAME,turn:''}});assert.equal(patched.frame!.turn,'');
+  assert.deepEqual(stateChanges(b.revision.state,patched).settings.map(x=>x.field),['frame']);
+});
+
+import { saveAttachment, getAttachments, attachmentTranscript, attachmentCapabilities, MAX_FILE_BYTES } from '../src/workbench/attachments';
+import { execFileSync } from 'node:child_process';
+const pixel=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jG0YAAAAASUVORK5CYII=','base64');
+test('attachments preserve original bytes and extracted text, validate files, and never truncate documents',async()=>{
+  const s=store(),doc=await saveAttachment(s,'notes.md',Buffer.from('# Room\nA quoted document.'));
+  assert.equal(doc.kind,'document');assert.equal(s.get('attachments',doc.id).text,'# Room\nA quoted document.');assert.equal(Buffer.from(s.get('attachments',doc.id).data,'base64').toString(),'# Room\nA quoted document.');
+  const image=await saveAttachment(s,'image.png',pixel);assert.equal(image.mime,'image/png');assert.equal(image.size,pixel.length);
+  for(const [name,bytes] of [['../escape.txt',Buffer.from('no')],['active.svg',Buffer.from('<svg/>')],['fake.png',Buffer.from('not an image')],['empty.txt',Buffer.alloc(0)],['too-big.txt',Buffer.alloc(MAX_FILE_BYTES+1)],['long.txt',Buffer.from('x'.repeat(100001))],['binary.txt',Buffer.from([0,255,1])]] as [string,Buffer][])await assert.rejects(saveAttachment(s,name,bytes));
+  assert.throws(()=>getAttachments(s,[doc.id,doc.id]),/different/);assert.throws(()=>getAttachments(s,['missing']),/missing/);
+  assert.equal(s.list('attachments').length,2);
+});
+test('attached documents and images reach generation, survive identity retries, and stay in forks and comparisons',async()=>{
+  const s=store();let calls=0;
+  const e=new Engine(s,async(_url,opts)=>{
+    const body=JSON.parse(String(opts?.body)),content=body.messages.at(-1).content;assert(Array.isArray(content));
+    assert(content.some((p:any)=>p.type==='text'&&p.text.includes('Document facts: blue square.')));
+    assert.equal(content.find((p:any)=>p.type==='image_url').image_url.url,'data:image/png;base64,'+pixel.toString('base64'));
+    assert.equal(s.attempts().length,++calls,'request on disk before dispatch');
+    if(calls===2)assert(content.some((p:any)=>p.type==='text'&&p.text.includes('previous attempt')));
+    return response(calls===1?'Elorin: Wrong label.':'Boris: I can discuss the attached files.');
+  });
+  const image=await saveAttachment(s,'square.png',pixel),doc=await saveAttachment(s,'facts.txt',Buffer.from('Document facts: blue square.'));
+  let b=e.create('File room');b=e.message(b.id,b.head,'',[doc.id,image.id]);const original=b;
+  b=await e.turn(b.id,b.head,'Boris');assert.equal(calls,2);
+  for(const a of s.attempts()){assert.equal(a.attachments.length,2);assert(a.attachments.some((a:any)=>a.input==='image'));}
+  const fork=e.fork(b.id,b.head,'With files');assert.deepEqual(fork.revision.state.messages[0].attachments,[doc.id,image.id]);
+  const other=e.create('Other'),pair=new Comparisons(e).save({name:'File comparison',left:b.id,right:other.id});assert.deepEqual(e.read(pair.left).revision.state.messages[0].attachments,[doc.id,image.id]);
+  const retcon=e.retcon(b.id,b.head,original.revision.state.messages[0].id,'Different caption','keep','keep');assert.deepEqual(retcon.revision.state.messages[0].attachments,[doc.id,image.id]);
+  let deleted=e.deleteMessage(b.id,b.head,b.revision.state.messages[0].id);const d=deleted.head;assert(!attachmentTranscript(s,deleted.revision.state.messages,true).parts.length);
+  deleted=e.restoreMessage(deleted.id,deleted.head,d);assert.deepEqual(deleted.revision.state.messages[0].attachments,[doc.id,image.id]);
+});
+test('image provider failures remain errors, with no text-only fallback',async()=>{
+  const s=store(),image=await saveAttachment(s,'picture.png',pixel);let calls=0;
+  const e=new Engine(s,async()=>{calls++;return new Response('vision not supported',{status:400});});
+  let b=e.create();b=e.message(b.id,b.head,'Describe',[image.id]);await assert.rejects(e.turn(b.id,b.head,'Boris'),/did not omit/);
+  assert.equal(calls,1);assert.equal(s.attempts()[0].outcome.raw,'vision not supported');assert.equal(e.read(b.id).revision.state.messages.length,1);
+});
+test('context limits fail before generation or shadow calls; Jev gets document text and image availability markers',async()=>{
+  const s=store(),image=await saveAttachment(s,'picture.png',pixel),doc=await saveAttachment(s,'large.txt',Buffer.from('x'.repeat(100000)));
+  const e=new Engine(s,async()=>{throw Error('Must not call provider');});let b=e.create();b.revision.state.shadow=true;b=e.commit(b.id,b.head,b.revision.state,'Shadow on');
+  for(let i=0;i<3;i++)b=e.message(b.id,b.head,'',[doc.id]);await assert.rejects(e.turn(b.id,b.head,'Boris'),/200,000/);assert.equal(s.attempts().length,0);assert.equal(s.list('jev-requests').length,0);
+  const context=attachmentTranscript(s,[{id:'m',speaker:'Dennis',text:'look',source:'human',attachments:[image.id]}]);assert(!context.parts.length);assert(context.transcript.includes('pixels not available'));
+});
+test('attachment HTTP upload, download, history edit and export preserve evidence without provider calls',async()=>{
+  const e=new Engine(store(),async()=>{throw Error('No provider calls');}),server=createApp(e).listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));const origin=`http://127.0.0.1:${(server.address() as any).port}`;
+  const post=async(url:string,body:any)=>{const r=await fetch(origin+'/api'+url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {status:r.status,value:await r.json() as any};};
+  try {
+    const r=await fetch(origin+'/api/attachments',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Room-Filename':encodeURIComponent('Research notes.txt')},body:'Visible file facts'});assert.equal(r.status,200);const file:any=await r.json();
+    const b=e.create(),sent=(await post('/branches/'+b.id+'/messages',{expected:b.head,text:'',attachments:[file.id]})).value;assert.equal(sent.revision.state.messages.length,1);
+    const stale=await post('/branches/'+b.id+'/messages',{expected:b.head,text:'Retry',attachments:[file.id]});assert.equal(stale.status,400);
+    const text=await fetch(origin+'/api/attachments/'+file.id);assert.equal((await text.json() as any).text,'Visible file facts');
+    const download=await fetch(origin+'/api/attachments/'+file.id+'/file');assert.equal(await download.text(),'Visible file facts');assert(download.headers.get('content-disposition')?.startsWith('attachment'));
+    const exported:any=await (await fetch(origin+'/api/branches/'+b.id+'/export')).json();assert.equal(exported.attachments[0].data,Buffer.from('Visible file facts').toString('base64'));
+    const edited=(await post('/branches/'+b.id+'/history',{expected:sent.head,memory:'keep',messages:[{id:sent.revision.state.messages[0].id,speaker:'Dennis',text:'New caption'}]})).value;assert.deepEqual(edited.revision.state.messages[0].attachments,[file.id]);
+    const foreign=await fetch(origin+'/api/attachments',{method:'POST',headers:{Origin:'https://example.com','Content-Type':'application/octet-stream','X-Room-Filename':'bad.txt'},body:'blocked'});assert.equal(foreign.status,403);assert.equal(e.store.list('attachments').length,1);
+  }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+test('native document extraction reads PDF and Word text when tools are available',async(t)=>{
+  const s=store(),caps=attachmentCapabilities();
+  if(caps.pdf){
+    const content='BT /F1 12 Tf 72 720 Td (PDF attachment facts) Tj ET';
+    const objects=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>','<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',`<< /Length ${content.length} >>\nstream\n${content}\nendstream`];
+    let pdf='%PDF-1.4\n';const offsets=[0];objects.forEach((o,i)=>{offsets.push(Buffer.byteLength(pdf));pdf+=`${i+1} 0 obj\n${o}\nendobj\n`;});const start=Buffer.byteLength(pdf);pdf+=`xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${start}\n%%EOF`;
+    const file=await saveAttachment(s,'facts.pdf',Buffer.from(pdf));assert(s.get('attachments',file.id).text.includes('PDF attachment facts'));
+  }else t.diagnostic('PDF extraction unavailable on this test host');
+  if(caps.docx){const source=path.join(s.root,'source.txt'),out=path.join(s.root,'facts.docx');fs.writeFileSync(source,'Word attachment facts');execFileSync('/usr/bin/textutil',['-convert','docx','-output',out,source]);const file=await saveAttachment(s,'facts.docx',fs.readFileSync(out));assert(s.get('attachments',file.id).text.includes('Word attachment facts'));}
+  else t.diagnostic('Word extraction unavailable on this test host');
+});
+test('image evidence is compact in the inspector while exact request downloads and exports retain pixels',async()=>{
+  const s=store(),e=new Engine(s),file=await saveAttachment(s,'photo.png',pixel);let b=e.create();b=e.message(b.id,b.head,'Look',[file.id]);b=await e.turn(b.id,b.head,'Boris');
+  const server=createApp(e).listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));const base=`http://127.0.0.1:${(server.address() as any).port}/api`;
+  try {
+    const evidence:any=await (await fetch(base+'/branches/'+b.id)).json(),attempt=evidence.attempts[0];assert(attempt.imageDataSummarized);assert(!JSON.stringify(attempt.body).includes(pixel.toString('base64')));
+    const exact:any=await (await fetch(base+'/attempts/'+attempt.id+'/request')).json();assert(JSON.stringify(exact.body).includes(pixel.toString('base64')));
+    const exported:any=await (await fetch(base+'/branches/'+b.id+'/export')).json();assert(JSON.stringify(exported.attempts[0].body).includes(pixel.toString('base64')));assert.equal(exported.attachments[0].data,pixel.toString('base64'));
+  }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+import { Alternatives } from '../src/workbench/alternatives';
+test('reply alternatives keep the original, generate from its exact request plus feedback, and curate only accepted text',async()=>{
+  const s=store(),bodies:any[]=[];let next='I saw the calendars myself.';
+  const e=new Engine(s,async(_u,opts)=>{bodies.push(JSON.parse(String(opts?.body)));return response(next);});
+  let b=e.create('Revise');b=e.commit(b.id,b.head,{...b.revision.state,participants:['Boris','Ilya']},'Two');
+  b=await e.turn(b.id,b.head,'Boris');const original=b.revision.state.messages[0];
+  const x=new Alternatives(e);
+  b=e.message(b.id,b.head,'Hello');assert.throws(()=>x.open(b.id,b.revision.state.messages[1].id),/original generated reply/);
+  const review=x.open(b.id,original.id).review;assert.equal(x.open(b.id,original.id).review.id,review.id,'one review per reply');
+  const selections=s.list('selections').length;next='Grounded point, no calendars.';
+  let d=await x.propose(review.id,"Don't invent having seen calendars.");
+  assert.equal(s.list('selections').length,selections,'alternatives are not speaker selections');
+  const sent=bodies.at(-1);assert.deepEqual(sent.messages.slice(0,-1),bodies[0].messages,'original request is reused unchanged');
+  assert(sent.messages.at(-1).content.includes("Don't invent having seen calendars."));assert(sent.messages.at(-1).content.includes(JSON.stringify(original.text)));
+  const c=d.candidates[0];assert.equal(c.result.status,'completed');assert.equal(c.result.text,'Grounded point, no calendars.');
+  assert.throws(()=>x.curate(review.id,{expected:null,candidate:c.id,judgment:null,approved:true,preference:false}),/accepted/);
+  d=x.judge(c.id,{expected:null,verdict:'accepted',text:'Grounded point.',note:'trimmed'});const j=d.candidates[0].judgment;
+  assert.throws(()=>x.judge(c.id,{expected:null,verdict:'rejected',text:'x'}),/changed/);
+  b=x.apply(c.id,{judgment:j.id,expected:e.read(b.id).head});
+  const replaced=b.revision.state.messages[0];assert.equal(replaced.text,'Grounded point.');assert.equal(replaced.source,'edited');assert.equal(replaced.review,review.id);assert.deepEqual(replaced.editedFrom,[original.id]);
+  assert.equal(b.revision.change?.kind,'replace-message');assert.equal(s.get('revisions',b.revision.parent!).state.messages[0].text,original.text,'earlier revision keeps the original');
+  next='Ilya here.';await e.turn(b.id,b.head,'Ilya');assert(!JSON.stringify(bodies.at(-1)).includes('calendars myself')&&!JSON.stringify(bodies.at(-1)).includes("Don't invent"),'feedback and the replaced text never reach later turns');
+  d=x.curate(review.id,{expected:null,candidate:c.id,judgment:j.id,approved:true,preference:true});assert(d.approval.current);
+  const [sft]=x.export('sft'),[pref]=x.export('preference');
+  assert.deepEqual(sft.messages,[...bodies[0].messages,{role:'assistant',content:'Grounded point.'}]);
+  assert.deepEqual(pref,{messages:bodies[0].messages,chosen:{role:'assistant',content:'Grounded point.'},rejected:{role:'assistant',content:original.text}});
+  x.judge(c.id,{expected:j.id,verdict:'rejected',text:'Grounded point.'});assert.equal(x.dataset().length,0,'a later rejection withdraws the approval');
+  s.put('reply-candidates','stale',{id:'stale',review:review.id,feedback:'x',instruction:'x',turnId:'t',at:new Date().toISOString()});x.recover();assert.equal(s.get('reply-candidate-results','stale').status,'interrupted');
+});

@@ -1,7 +1,7 @@
 /* Derived views only. No diff or research annotation is sent to a model. */
 const RoomChanges=(()=>{
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const titles={system:'Shared instructions',prompt:'Personality instructions',memory:'Retained memory',participants:'Participants',human:'Human name',shadow:'Jev shadow',policy:'Identity checks',reasoning:'Reasoning'};
+  const titles={system:'Shared instructions',prompt:'Personality instructions',memory:'Retained memory',participants:'Participants',human:'Human name',shadow:'Jev shadow',policy:'Identity checks',reasoning:'Reasoning',frame:'Harness framing'};
   function groups(settings){const result=[];for(const s of settings){const prior=['model','provider','reasoning'].includes(s.field)&&result.find(r=>r.field===s.field&&r.before===s.before&&r.after===s.after);if(prior)prior.characters.push(s.character);else result.push({...s,characters:s.character?[s.character]:[]});}return result;}
   function badges(changes){
     if(!changes)return [];

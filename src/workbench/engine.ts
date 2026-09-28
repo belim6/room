@@ -2,14 +2,15 @@ import { Store, clone, id } from './store';
 import { generate, reasoningSwitchVerified, DEFAULT_MODEL, type Provider } from './generation';
 import { PERSONAS, type PersonaName } from '../personas/personas';
 import { GLOBAL_SYSTEM } from '../modelRouter';
-import { buildSpeakerInput } from '../speakerTurn';
+import { buildSpeakerInput, fillFrame, type Frame } from '../speakerTurn';
 import { shadowJev } from './jev';
+import { getAttachments, attachmentTranscript } from './attachments';
 
 export interface Character { prompt: string; memory: string; provider: Provider; model: string; temperature: number; reasoning?: 'default' | 'off' }
-export interface Message { id: string; speaker: string; text: string; source: 'human' | 'generated' | 'imported' | 'edited'; turnId?: string; checkpoint?: string; editedFrom?: string[] }
+export interface Message { id: string; speaker: string; text: string; source: 'human' | 'generated' | 'imported' | 'edited'; turnId?: string; checkpoint?: string; editedFrom?: string[]; attachments?: string[]; review?: string }
 export interface State { system: string; participants: PersonaName[]; characters: Record<PersonaName, Character>;
-  messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string }
-export interface MessageChange { kind: 'delete-message' | 'restore-message'; message: Message; index: number }
+  messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string; frame?: Frame }
+export interface MessageChange { kind: 'delete-message' | 'restore-message' | 'replace-message'; message: Message; index: number; candidate?: string; judgment?: string }
 export interface Revision { id: string; branch: string; parent: string | null; at: string; reason: string; state: State; change?: MessageChange }
 export interface Branch { id: string; name: string; head: string; parent: string | null; fork: string | null; createdAt: string; comparison?: string; experiment?: string; trial?: string; workspace?: boolean }
 export interface TrashEntry { id: string; branch: string; name: string; branches: string[]; deletedAt: string; restoredAt?: string }
@@ -28,7 +29,9 @@ export function validateState(s: State) {
     if (!c || typeof c.prompt !== 'string' || typeof c.memory !== 'string' || !['together','opengateway','demo'].includes(c.provider) || typeof c.model !== 'string' || !c.model.trim() || c.model.length > 200 || !Number.isFinite(c.temperature) || c.temperature < 0 || c.temperature > 2 || (c.reasoning !== undefined && !['default','off'].includes(c.reasoning))) throw Error(`Invalid character settings: ${name}`);
     if (c.reasoning === 'off' && !reasoningSwitchVerified(c.provider)) throw Error(`${name}: turning reasoning off is not verified for ${c.provider}`);
   }
+  if (s.frame !== undefined && (!s.frame || typeof s.frame !== 'object' || Object.keys(s.frame).sort().join() !== 'context,identity,opening,turn' || Object.values(s.frame).some(v => typeof v !== 'string' || v.length > 20000))) throw Error('Invalid harness framing');
   if (!Array.isArray(s.messages) || s.messages.length > 10000 || s.messages.some(m => typeof m.id !== 'string' || typeof m.text !== 'string' || m.text.length > 100000 || typeof m.speaker !== 'string' || !m.speaker.trim() || m.speaker.length > 80)) throw Error('Invalid conversation');
+  for(const m of s.messages)if(m.attachments!==undefined&&(!Array.isArray(m.attachments)||m.attachments.length>4||new Set(m.attachments).size!==m.attachments.length||m.attachments.some(a=>typeof a!=='string'||!/^[a-zA-Z0-9_-]+$/.test(a))))throw Error('Invalid message attachments');
 }
 export class Engine {
   active = new Map<string, { controller: AbortController; turnId: string }>();
@@ -74,6 +77,7 @@ export class Engine {
   }
   create(name = 'Untitled room', state = initialState(), parent: string | null = null, fork: string | null = null, comparison?: string, experiment?: { experiment: string; trial?: string; workspace?: boolean }) {
     validateState(state);
+    for(const m of state.messages) getAttachments(this.store,m.attachments);
     if (parent) comparison = this.available(parent).comparison;
     const branch: Branch = { id: id(), name: name.slice(0, 120), head: '', parent, fork, ...(comparison ? { comparison } : {}), ...experiment, createdAt: new Date().toISOString() };
     const revision: Revision = { id: id(), branch: branch.id, parent: fork, at: new Date().toISOString(), reason: parent ? 'Branch created' : experiment?.workspace ? 'Experiment workspace created' : comparison ? 'Comparison snapshot created' : 'Room created', state: clone(state) };
@@ -82,6 +86,7 @@ export class Engine {
   }
   commit(branchId: string, expected: string, state: State, reason: string, change?: MessageChange) {
     validateState(state);
+    for(const m of state.messages) getAttachments(this.store,m.attachments);
     const b = this.available(branchId);
     if (b.head !== expected) throw Error('This branch changed. Reload before saving your edit.');
     const revision: Revision = { id: id(), branch: branchId, parent: b.head, at: new Date().toISOString(), reason, state: clone(state), ...(change ? { change: clone(change) } : {}) };
@@ -116,11 +121,12 @@ export class Engine {
     const source = this.store.get<Revision>('revisions', revisionId);
     return this.create(name || 'Alternate continuation', source.state, branchId, revisionId);
   }
-  message(branchId: string, expected: string, text: string) {
-    if (!text.trim() || text.length > 20000) throw Error('Write a message under 20,000 characters');
+  message(branchId: string, expected: string, text: string, attachments?: string[]) {
+    const files=getAttachments(this.store,attachments);
+    if (typeof text!=='string' || (!text.trim()&&!files.length) || text.length > 20000) throw Error('Write a message under 20,000 characters or attach a file');
     const b = this.read(branchId); const s = clone(b.revision.state);
     const next = id();
-    s.messages.push({ id: next, speaker: s.human, text: text.trim(), source: 'human' });
+    s.messages.push({ id: next, speaker: s.human, text: text.trim(), source: 'human', ...(files.length?{attachments:files.map(a=>a.id)}:{}) });
     const result = this.commit(branchId, expected, s, 'Human message');
     return result;
   }
@@ -183,16 +189,23 @@ export class Engine {
       at: new Date().toISOString(), // One operator pick repeated across a multi-turn run is a single decision: only its first turn is 'forced'.
       method: forced ? (!experiment && run && run.index > 1 ? 'locked' : 'forced') : 'random', run: run ?? null,
       eligible: forced ? s.participants : pool, chosen: speaker });
-    // Shadow captures this revision but never delays or influences generation.
-    if (s.shadow) void shadowJev(this.store, s, branchId, b.head, turnId, this.transport).catch(error => console.error('Jev persistence error:', error.message));
     try {
       const c = s.characters[speaker];
-      const system = `${c.prompt}\n\n${s.system}\n\n${c.memory ? `Your retained memory:\n${c.memory}\n\n` : ''}Your identity for this request is ${speaker}. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters.`;
-      const transcript = s.messages.map(m => `${m.speaker}: ${m.text}`).join('\n');
+      const context=attachmentTranscript(this.store,s.messages,true);
+      const transcript = context.transcript;
+      const human = s.messages.some(m => m.speaker === s.human) ? s.human : null, f = s.frame;
+      const fill = (t: string) => fillFrame(t, { speaker, participants: [...(human ? [human] : []), ...s.participants].join(', '), transcript: JSON.stringify(transcript) });
+      // A custom frame drops empty parts entirely, so a fully blanked room sends only what is left.
+      const system = f ? [c.prompt, s.system, c.memory ? `Your retained memory:\n${c.memory}` : '', fill(f.identity)].filter(x => x.trim()).join('\n\n')
+        : `${c.prompt}\n\n${s.system}\n\n${c.memory ? `Your retained memory:\n${c.memory}\n\n` : ''}Your identity for this request is ${speaker}. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters.`;
+      // Validate file inputs before launching any paid observation. Jev receives text and image filenames only.
+      if (s.shadow) void shadowJev(this.store,s,branchId,b.head,turnId,this.transport).catch(error=>console.error('Jev persistence error:',error.message));
       // The human joins the roster only once they have said something in this conversation.
-      const user = buildSpeakerInput(speaker, transcript, s.participants, s.messages.some(m => m.speaker === s.human) ? s.human : null);
+      const user = f ? [fill(transcript.trim() ? f.context : f.opening), fill(f.turn)].filter(x => x.trim()).join('\n\n')
+        : buildSpeakerInput(speaker, transcript, s.participants, human);
+      if (!user.trim() && !context.parts.length) throw Error('Nothing to send: the harness framing is blank and the conversation is empty');
       const result = await generate({ provider: c.provider, model: c.model, temperature: c.temperature, reasoning: c.reasoning, persona: speaker,
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }], branch: branchId, revision: b.head, turnId,
+        messages: [...(system.trim() ? [{ role: 'system' as const, content: system }] : []), { role: 'user', content: context.parts.length ? [{type:'text',text:user},...context.parts] : user }], attachments: context.attachments, branch: branchId, revision: b.head, turnId,
         policy: s.policy, signal: controller.signal }, this.store, this.transport);
       if (controller.signal.aborted || this.read(branchId).head !== b.head) {
         this.store.put('turns', turnId, { id: turnId, branch: branchId, status: controller.signal.aborted ? 'canceled' : 'detached', attempts: result.attempts });

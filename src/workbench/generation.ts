@@ -2,6 +2,7 @@ import path from 'node:path';
 import { Store, id, clone } from './store';
 import { checkSpeakerReply, WrongSpeakerError } from '../speakerTurn';
 import { limitReply } from '../replyLimit';
+import type { ContentPart } from './attachments';
 import type { PersonaName } from '../personas/personas';
 
 export type Provider = 'opengateway' | 'together' | 'demo';
@@ -10,8 +11,8 @@ export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash-ultrafast';
 export const demoEnabled = () => process.env.ROOM_DEMO === '1';
 export interface GenerationInput {
   provider: Provider; model: string; persona: PersonaName;
-  messages: { role: string; content: string }[]; temperature: number; reasoning?: 'default' | 'off';
-  branch?: string; revision?: string; turnId?: string;
+  messages: { role: string; content: string | ContentPart[] }[]; attachments?: unknown[]; temperature: number; reasoning?: 'default' | 'off';
+  branch?: string; revision?: string; turnId?: string; purpose?: 'alternative'; review?: string; candidate?: string;
   policy?: 'protected' | 'observe'; signal?: AbortSignal;
 }
 export const ENDPOINTS = {
@@ -34,7 +35,8 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
     const body = { model: input.model, messages: clone(messages), temperature: input.temperature, ...(input.reasoning === 'off' ? REASONING_OFF[input.provider] : {}) };
     const request = { id: attemptId, at: new Date().toISOString(), turnId: group, branch: input.branch,
       revision: input.revision, persona: input.persona, provider: input.provider, policy: input.policy || 'protected',
-      retryOf: n ? attempts[n - 1] : null, endpoint: ENDPOINTS[input.provider], body };
+      ...(input.purpose?{purpose:input.purpose,review:input.review,candidate:input.candidate}:{}),
+      retryOf: n ? attempts[n - 1] : null, endpoint: ENDPOINTS[input.provider], body, ...(input.attachments?.length?{attachments:clone(input.attachments)}:{}) };
     store.put('attempts', attemptId, request); // Commit before any external call.
     const start = Date.now();
     let raw: string | null = null;
@@ -58,7 +60,7 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
           headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
         status = response.status;
         raw = await response.text();
-        if (!response.ok) throw Error(`Provider returned HTTP ${status}; inspect the raw response.`);
+        if (!response.ok) throw Error(`Provider returned HTTP ${status}; inspect the raw response.${messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==='image_url'))?' This request includes images. Check that this provider/model accepts image input; Room did not omit the images.':''}`);
       }
       parsed = JSON.parse(raw!);
       const full = parsed.choices?.[0]?.message?.content;
@@ -95,7 +97,9 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
         usage: parsed?.usage ?? null, finishReason: parsed?.choices?.[0]?.finish_reason ?? null,
         latencyMs: Date.now() - start, at: new Date().toISOString() });
       if (!rejected || n === 1) throw error;
-      messages[messages.length - 1].content += `\n\nThe previous attempt used another participant's label. Write a fresh reply only as ${input.persona}, from your own perspective.`;
+      const correction=`\n\nThe previous attempt used another participant's label. Write a fresh reply only as ${input.persona}, from your own perspective.`;
+      const last=messages[messages.length-1];
+      if(typeof last.content==='string')last.content+=correction;else last.content.push({type:'text',text:correction});
     }
   }
   throw Error('No valid reply');

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Store, id } from './store';
+import { attachmentTranscript } from './attachments';
 import type { State } from './engine';
 export async function shadowJev(store: Store, state: State, branch: string, revision: string, turnId: string, transport: typeof fetch = fetch) {
   const questions = {
@@ -7,7 +8,7 @@ export async function shadowJev(store: Store, state: State, branch: string, revi
       criteria: Object.fromEntries(state.participants.map(p => [p, { what: state.characters[p].prompt }])) },
     needs_research: { type: 'noul', instructions: 'Would answering the latest_message materially benefit from looking up a verifiable external fact not already present in transcript? Values, jokes and speculation alone do not require research.' },
   };
-  const transcript = state.messages.slice(-20).map(m => `${m.speaker}: ${m.text}`);
+  const transcript = state.messages.slice(-20).map(m => attachmentTranscript(store,[m]).transcript);
   const body = { model: 'jev-latest', state: { room: state.system, participants: state.participants, transcript,
     latest_message: transcript.at(-1) || '(none)', last_speaker: state.messages.at(-1)?.speaker || '(none)' }, questions };
   const key = id(); const start = Date.now();

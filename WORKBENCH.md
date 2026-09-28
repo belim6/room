@@ -134,6 +134,12 @@ Trials from before this change (Exp1–Exp3) keep their original parent, because
 
 The Experiments and Comparisons sidebars list only roots: experiments with no parent or link, and comparisons that weren't forked from another. Each shows `· N branches` for all its descendants. Once one is open, the header shows **← Family i/n →** and a picker listing the family as an indented tree (root first, children under their parents, by creation time). The sidebar keeps the root highlighted while you move around the family. The lineage table on experiment pages is unchanged; the navigator is for moving between experiments, and the table is for comparing their results.
 
+## Harness framing
+
+Besides the personality and room instructions, every request carries framing written by the app: an identity line at the end of the system prompt ("Your identity for this request is …"), a header in front of the quoted conversation, a line used when the conversation is empty, and the turn instructions with the participant list at the end of the user message. **Characters → Shared context → Harness framing** shows all four as editable templates, with the placeholders `{speaker}`, `{participants}` and `{transcript}` (the quoted conversation).
+
+Blank a box to leave that part out. With a custom frame, empty parts are dropped rather than joined with blank lines, and if the system prompt ends up empty, no system message is sent at all. A room whose framing matches the defaults stores no frame and sends exactly the requests it sent before. Experiment conditions can set it with `frame` in the JSON patch (all four keys). The 2,000-character reply cap is still enforced after generation even if its instruction is removed.
+
 ## Back-and-forth
 
 When a room has exactly two participants, **Back-and-forth** appears next to Turns. With it on, a multi-turn run alternates. The first turn goes to the selected voice, or to the one who didn't speak last if Random is selected. Every later turn goes to whichever of the two didn't speak last, and your own messages don't count. The first pick is recorded as usual (`forced` or `random`). Later picks are recorded as `random` with a single eligible speaker, and every turn's run info carries `mode: "alternate"`, so the rule is visible in the selection record.
@@ -141,3 +147,29 @@ When a room has exactly two participants, **Back-and-forth** appears next to Tur
 ## When you are in the room
 
 Characters are told who is present through a roster line in each request ("Current participants: …"). You (the human name in Settings) are in that roster only once a message under your name exists in the conversation. Until then, characters are told only about each other. Rooms where you have already spoken, including every experiment base so far (where the human is the Moderator), send exactly the same requests as before. Instructions you write yourself, such as game rules that name you, are still sent as written.
+
+
+## Share documents and images
+
+Use **＋ Attach** beside the composer, drop files onto the composer area, or paste an image. Each message accepts up to four files of 10 MB each, with an optional caption. Both comparison panes have independent attachment drafts. **Send** saves the message locally; **Continue** sends the effective conversation, including its files, to the selected model.
+
+Supported images are PNG, JPEG and WebP. Supported documents are PDF, Word `.docx`, and UTF-8 TXT, Markdown, CSV, TSV, JSON and log files. The original file is downloadable from its message. **Read extracted text** shows exactly what Room extracted from a document. PDF and Word extraction is text-only: document images, charts and layout are not sent. Scanned PDFs without selectable text need OCR elsewhere, or their pages can be attached as images. Documents above 100,000 extracted characters are rejected rather than truncated.
+
+Images are sent as inline image inputs using chat-completions `image_url` content parts, alongside the conversation and attachment labels. The chosen provider/model must accept image input; Room never silently drops an image and retries with only text. Compatibility failures remain inspectable provider errors. Together's [image input format](https://docs.together.ai/docs/inference/vision/overview) was checked for this implementation; live image calls were not made during development. OpenGateway receives the same compatible request format; image support depends on the chosen route/model.
+
+Each request includes every attachment still present in effective history, with a maximum of 12 images / 20 MB of image input and 200,000 document characters per turn. Exceeding those limits produces an explicit error before any provider or shadow request. Use a branch with fewer attached messages to reduce input. Jev receives extracted document text and image filenames marked as unavailable visually; it does not receive image pixels.
+
+Attachments are immutable records in `.room-data/attachments/`: original bytes, SHA-256 hash, filename, media type and saved extraction. Messages reference their IDs, so files survive restarts, forks, comparisons, retcons and message restoration. Removing an attachment draft or deleting its message does not erase original evidence. Research JSON exports include referenced original files and exact requests. Inspect lists which files were sent and whether they entered as extracted text or image input; large image payloads are summarized on screen, with **Download exact request with image data** preserving the full request.
+
+No npm dependencies were added. PDF extraction uses installed `pdftotext` (standard Homebrew/Linux paths, or `ROOM_PDFTOTEXT`); Word extraction uses macOS `/usr/bin/textutil`. File pickers advertise those formats only when their local extractor is available. Extraction has a 15-second timeout and an output limit. Unsupported, empty, unreadable or oversized files show errors before they enter a message.
+
+## Revise a reply
+
+**Revise** under a generated reply opens a review in the side panel. Write feedback ("Don't invent having seen calendars. Keep the point grounded.") and click **Generate alternative**. That makes one request with the same provider and model: the reply's original request, unchanged, plus a final instruction containing the original reply and your feedback. Nothing in the conversation changes yet.
+
+Each candidate can be edited, then **Accept**ed or **Reject**ed, with an optional note. Judgments are append-only; the latest one counts. An accepted candidate offers two separate actions:
+
+- **Replace in conversation** swaps the reply in place, as a new revision (`replace-message`). The original stays in earlier revisions and in the review. Later messages that responded to the original are left as they are; the panel says how many there are. Your feedback never enters later turns.
+- **Training**: approve the pair as a training example (original input → accepted reply), and optionally keep the original as the rejected side of a preference pair. Approval follows the accepted text; a later rejection withdraws it.
+
+Export approved examples from the review panel as JSONL: `/api/dataset/sft` (chat messages ending in the accepted reply) and `/api/dataset/preference` (input with `chosen` and `rejected`). Both use the original input without your feedback, so the lesson is to answer well without needing the correction. Nothing trains a model. Records: `reply-reviews`, `reply-candidates`, `reply-candidate-results`, `reply-judgments`, `training-decisions`. Revisions are not speaker selections and are not written to `selections`. A candidate interrupted by a restart is marked `interrupted` and never retried.

@@ -24,11 +24,12 @@ export function stateChanges(from: State, to: State) {
     settings.push({field,...(character?{character}:{}),before,after,...(typeof before==='string' && typeof after==='string' && (before.includes('\n')||after.includes('\n'))?{diff:lineDiff(before,after)}:{})});
   }
   for(const key of ['system','human','participants','shadow','policy'] as const) field(key,from[key],to[key]);
+  field('frame',from.frame??null,to.frame??null);
   for(const name of Object.keys(from.characters) as PersonaName[]) {for(const key of ['prompt','memory','provider','model','temperature'] as const) field(key,from.characters[name][key],to.characters[name][key],name);field('reasoning',from.characters[name].reasoning||'default',to.characters[name].reasoning||'default',name);}
   const old = new Map(from.messages.map(m=>[m.id,m])), now = new Map(to.messages.map(m=>[m.id,m]));
   const original = (m: Message) => old.has(m.id)?m.id:m.editedFrom?.find(key=>old.has(key));
   const represented = new Set(to.messages.map(original).filter(Boolean));
-  const edited = to.messages.filter(m=>{const key=original(m),before=key?old.get(key):null;return before && (before.id!==m.id || before.text!==m.text || before.speaker!==m.speaker);}).map(m=>m.id);
+  const edited = to.messages.filter(m=>{const key=original(m),before=key?old.get(key):null;return before && (before.id!==m.id || before.text!==m.text || before.speaker!==m.speaker || JSON.stringify(before.attachments||[])!==JSON.stringify(m.attachments||[]));}).map(m=>m.id);
   const removed = from.messages.filter(m=>!represented.has(m.id)).map(m=>m.id);
   const last = to.messages.reduce((n,m,i)=>original(m)?i:n,-1);
   const appended: Record<string,number> = {}, inserted: string[]=[];

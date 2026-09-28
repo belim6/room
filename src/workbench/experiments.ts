@@ -4,7 +4,7 @@ import { clone, id } from './store';
 import { reasoningOf } from './generation';
 import { stateChanges } from './changes';
 import type { PersonaName } from '../personas/personas';
-type Patch = Partial<Pick<State,'system'|'participants'|'shadow'|'policy'|'human'>> & {characters?: Partial<Record<PersonaName,Partial<Character>>>};
+type Patch = Partial<Pick<State,'system'|'participants'|'shadow'|'policy'|'human'|'frame'>> & {characters?: Partial<Record<PersonaName,Partial<Character>>>};
 export interface Condition { key: string; label: string; control?: boolean; patch: Patch }
 interface OutcomeRule { pattern: string; flags?: string; highlight?: Record<string,string> }
 export interface Experiment { id: string; version: string; sequence: number; name: string; createdAt: string; question: string; prediction: string; base: {branch:string;revision:string}; speaker: PersonaName; conditions: Condition[]; outcome?: OutcomeRule; retrospective?: boolean; lockedAt?: string; parent?: string }
@@ -24,7 +24,7 @@ export function applyPatch(base: State, patch: Patch): State {
         }
       }
     } else {
-      if(!['system','participants','shadow','policy','human'].includes(key))throw Error('Only settings may be patched');
+      if(!['system','participants','shadow','policy','human','frame'].includes(key))throw Error('Only settings may be patched');
       (next as any)[key]=clone(value);
     }
   }

@@ -5,9 +5,12 @@ import fs from 'node:fs';
 import { Engine, initialState, type Revision } from './engine';
 import { defaultStore, reasoningOf, demoEnabled } from './generation';
 import { id } from './store';
+import { Alternatives } from './alternatives';
 import { Comparisons } from './comparisons';
 import { Experiments } from './experiments';
+import { saveAttachment, attachmentCapabilities, attachmentInfo, type Attachment } from './attachments';
 import { stateChanges } from './changes';
+import { DEFAULT_FRAME } from '../speakerTurn';
 
 function runInfo(run: any) {
   if (run == null) return undefined;
@@ -29,21 +32,38 @@ export function createApp(engine = new Engine(defaultStore())) {
     if (req.path.startsWith('/api/')) res.setHeader('Cache-Control','no-store');
     next();
   });
+  app.use('/api/attachments', express.raw({type:'application/octet-stream',limit:'10mb'}));
   app.use(express.json({ limit: '8mb' }));
   const route = (fn: (req: any, res: any) => any) => (req: any, res: any, next: any) => Promise.resolve().then(() => fn(req,res)).catch(next);
   const store = engine.store;
   const comparisons = new Comparisons(engine);
+  const alternatives = new Alternatives(engine);
+  app.locals.alternatives=alternatives;
   const experiments = new Experiments(engine);
+  app.post('/api/attachments',route(async(req,res)=>res.json(await saveAttachment(store,decodeURIComponent(String(req.headers['x-room-filename']||'')),req.body))));
+  app.get('/api/attachments/:id',route((req,res)=>{const a=store.get<Attachment>('attachments',req.params.id);res.json({...attachmentInfo(a),text:a.text});}));
+  app.get('/api/attachments/:id/file',route((req,res)=>{
+    const a=store.get<Attachment>('attachments',req.params.id);
+    res.attachment(a.name).type(a.mime);
+    if(a.kind==='image'&&req.query.inline==='1')res.setHeader('Content-Disposition','inline');
+    res.send(Buffer.from(a.data,'base64'));
+  }));
   app.locals.experiments = experiments;
   const changes = (key: string) => { const b=engine.read(key); const fork=b.fork?store.get<Revision>('revisions',b.fork):null; return {fork:fork?{branch:fork.branch,revision:fork.id}:null,changes:fork?stateChanges(fork.state,b.revision.state):null}; };
-  const evidence = (branch: string) => {
+  app.get('/api/attempts/:id/request',route((req,res)=>res.attachment('room-request.json').json(store.get('attempts',req.params.id))));
+  const evidence = (branch: string, originalImages = false) => {
     const b = engine.read(branch);
     const revisions: Revision[] = []; let cursor: string | null = b.head;
     while (cursor) { const rev: Revision = store.get<Revision>('revisions', cursor); revisions.push(rev); cursor = rev.parent; }
     const ids = new Set(revisions.map(r => r.id));
     const relevant = (r: any) => r.branch === branch || ids.has(r.revision);
     const jevResults = new Map(store.list('jev-results').map(r => [r.id,r]));
-    return { branch: b, revisions, changes: changes(branch), attempts: store.attempts().filter(relevant).map(a=>({...a,reasoning:reasoningOf(a.outcome)})), selections: store.list('selections').filter(relevant),
+    const attachmentIds=new Set(revisions.flatMap(r=>r.state.messages.flatMap(m=>m.attachments||[])));
+    return { branch: b, revisions, alternatives:alternatives.evidence(branch), attachments:[...attachmentIds].map(key=>attachmentInfo(store.get<Attachment>('attachments',key))), changes: changes(branch), attempts: store.attempts().filter(relevant).map(a=>{
+        const imageDataSummarized=!originalImages&&a.body.messages.some((m:any)=>Array.isArray(m.content)&&m.content.some((p:any)=>p.type==='image_url'));
+        const body=imageDataSummarized?{...a.body,messages:a.body.messages.map((m:any)=>({...m,content:Array.isArray(m.content)?m.content.map((p:any)=>p.type==='image_url'?{...p,image_url:{...p.image_url,url:'[Image bytes retained in exact request download]'}}:p):m.content}))}:a.body;
+        return {...a,body,imageDataSummarized,reasoning:reasoningOf(a.outcome)};
+      }), selections: store.list('selections').filter(relevant),
       turns: store.list('turns').filter(r => r.branch === branch),
       reactions: (() => { const messages = new Set(revisions.flatMap(r => r.state.messages.map(m => m.id))); return store.list('reactions').filter(r => messages.has(r.message)).sort((a,b)=>a.message.localeCompare(b.message)||a.sequence-b.sequence); })(),
       imports: store.list('imports').filter(relevant),
@@ -53,8 +73,8 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.get('/api/bootstrap', route((_req,res) => {
     const saved = comparisons.list(), library = engine.library();
     const trials = experiments.trialBranches();
-    res.json({ ...library, branches: library.branches.map(b => trials.has(b.id) ? { ...b, isTrial: true } : b), comparisons: saved, experiments: experiments.list(), reactions: reactions(),
-      keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY, demo: demoEnabled() },
+    res.json({ ...library, attachments:attachmentCapabilities(), branches: library.branches.map(b => trials.has(b.id) ? { ...b, isTrial: true } : b), comparisons: saved, experiments: experiments.list(), reactions: reactions(),
+      frame: DEFAULT_FRAME, keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY, demo: demoEnabled() },
       active: [...engine.active.keys()] });
   }));
   app.get('/api/branches/:id/changes', route((req,res) => res.json(changes(req.params.id))));
@@ -77,7 +97,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     }).sort((a,b)=>b.at.localeCompare(a.at));
   }
   app.get('/api/reactions/:value', route((req,res) => { if (!['favorite','dislike'].includes(req.params.value)) throw Error('Invalid reaction'); res.json(marked(req.params.value)); }));
-  app.get('/api/reactions/:value/export', route((req,res) => { if (!['favorite','dislike'].includes(req.params.value)) throw Error('Invalid reaction'); res.attachment(`room-${req.params.value}s.json`).json({ format: 'room-reactions-v1', value: req.params.value, exportedAt: new Date().toISOString(), items: marked(req.params.value).map(m => ({ ...m, attempts: store.attempts().filter(a => a.turnId && a.turnId === m.turnId).map(a=>({...a,reasoning:reasoningOf(a.outcome)})) })) }); }));
+  app.get('/api/reactions/:value/export', route((req,res) => { if (!['favorite','dislike'].includes(req.params.value)) throw Error('Invalid reaction'); res.attachment(`room-${req.params.value}s.json`).json({ format: 'room-reactions-v1', value: req.params.value, exportedAt: new Date().toISOString(), items: marked(req.params.value).map(m => ({ ...m, attempts: store.attempts().filter(a => a.turnId && a.turnId === m.turnId).map(a=>({...a,reasoning:reasoningOf(a.outcome)}))})) }); }));
   app.post('/api/reactions', route((req,res) => {
     const { branch, message, value } = req.body;
     if (![null,'favorite','dislike'].includes(value)) throw Error('Invalid reaction');
@@ -103,6 +123,17 @@ export function createApp(engine = new Engine(defaultStore())) {
     const value={id:id(),experiment:req.params.id,at:new Date().toISOString(),text:req.body.text.slice(0,20000)};
     store.add('observations',value);res.json(value);
   }));
+  app.post('/api/branches/:id/reviews',route((req,res)=>res.json(alternatives.open(req.params.id,req.body.message))));
+  app.get('/api/reviews/:id',route((req,res)=>res.json(alternatives.get(req.params.id))));
+  app.post('/api/reviews/:id/candidates',route(async(req,res)=>res.json(await alternatives.propose(req.params.id,req.body.feedback))));
+  app.post('/api/candidates/:id/stop',route((req,res)=>res.json(alternatives.stop(req.params.id))));
+  app.post('/api/candidates/:id/judge',route((req,res)=>res.json(alternatives.judge(req.params.id,req.body))));
+  app.post('/api/candidates/:id/apply',route((req,res)=>res.json(alternatives.apply(req.params.id,req.body))));
+  app.post('/api/reviews/:id/training',route((req,res)=>res.json(alternatives.curate(req.params.id,req.body))));
+  app.get('/api/dataset',route((_req,res)=>res.json(alternatives.dataset())));
+  app.get('/api/dataset/:kind',route((req,res)=>{
+    const rows=alternatives.export(req.params.kind);res.attachment('room-'+req.params.kind+'.jsonl').type('application/x-ndjson').send(rows.map(row=>JSON.stringify(row)).join('\n')+(rows.length?'\n':''));
+  }));
   app.post('/api/branches/:id/trash', route((req,res) => res.json(engine.trash(req.params.id,req.body.expected))));
   app.post('/api/trash/:id/restore', route((req,res) => res.json(engine.restore(req.params.id))));
   app.get('/api/comparisons/:id', route((req,res) => res.json(comparisons.get(req.params.id))));
@@ -114,10 +145,11 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.post('/api/branches/:id/settings', route((req,res) => {
     const b = engine.read(req.params.id); const s = b.revision.state;
     // Conversation edits go through the explicit retcon operation.
-    const { system, human, participants, characters, shadow, policy } = req.body;
-    res.json(engine.commit(b.id, req.body.expected, { ...s, system, human, participants, characters, shadow, policy }, 'Settings updated'));
+    const { system, human, participants, characters, shadow, policy, frame } = req.body;
+    const next: any = { ...s, system, human, participants, characters, shadow, policy, frame }; if (frame === undefined || frame === null) delete next.frame;
+    res.json(engine.commit(b.id, req.body.expected, next, 'Settings updated'));
   }));
-  app.post('/api/branches/:id/messages', route((req,res) => res.json(engine.message(req.params.id, req.body.expected, req.body.text || ''))));
+  app.post('/api/branches/:id/messages', route((req,res) => res.json(engine.message(req.params.id, req.body.expected, req.body.text || '',req.body.attachments))));
   app.post('/api/branches/:id/messages/:message/delete', route((req,res) => res.json(engine.deleteMessage(req.params.id,req.body.expected,req.params.message))));
   app.post('/api/branches/:id/messages/restore', route((req,res) => res.json(engine.restoreMessage(req.params.id,req.body.expected,req.body.deletion))));
   app.post('/api/branches/:id/turn', route(async(req,res) => res.json(await engine.turn(req.params.id, req.body.expected, req.body.speaker || undefined, runInfo(req.body.run)))));
@@ -133,7 +165,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     state.messages = req.body.messages.map((m: any) => {
       const old = originals.get(m.id);
       if (old && old.text === m.text && old.speaker === m.speaker) return old;
-      return { id: id(), speaker: m.speaker, text: m.text, source: 'edited', ...(old ? {editedFrom:[old.id,...(old.editedFrom||[])],turnId:old.turnId} : {}) };
+      return { id: id(), speaker: m.speaker, text: m.text, source: 'edited', ...(old ? {editedFrom:[old.id,...(old.editedFrom||[])],turnId:old.turnId, ...(old.attachments?{attachments:old.attachments}:{})} : {}) };
     });
     if (req.body.memory === 'clear') for (const c of Object.values(state.characters)) c.memory = '';
     const result = engine.create(b.name + ' · history retcon', state, b.id, b.head);
@@ -146,7 +178,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     const observation = { id: id(), branch: b.id, revision: b.head, at: new Date().toISOString(), text: req.body.text.slice(0,20000), messageId: req.body.messageId || null };
     store.add('observations',observation); res.json(observation);
   }));
-  app.get('/api/branches/:id/export', route((req,res) => res.attachment('room-research.json').json({ format: 'room-workbench-v1', ...evidence(req.params.id) })));
+  app.get('/api/branches/:id/export', route((req,res) => res.attachment('room-research.json').json((()=>{const record=evidence(req.params.id,true);return {format:'room-workbench-v1',...record,attachments:record.attachments.map(a=>store.get<Attachment>('attachments',a.id))};})())));
   app.get('/api/branches/:id/notebook', route((req,res) => {
     const e = evidence(req.params.id);
     res.type('text/markdown').attachment('room-notes.md').send(`# ${e.branch.name}\n\n` + e.observations.map(o => `## ${o.at}\n\nBranch: ${o.branch}\nRevision: ${o.revision}\nMessage: ${o.messageId || '(whole branch)'}\n\n${o.text}`).join('\n\n'));
@@ -185,6 +217,7 @@ if (require.main === module) {
     const done = new Set(store.list('jev-results').map(r => r.id));
     for (const r of store.list('jev-requests')) if (!done.has(r.id)) store.put('jev-results',r.id,{ id:r.id,status:'interrupted',error:'Process ended before a result was recorded' });
     app.locals.experiments.recover();
+    app.locals.alternatives.recover();
     console.log(`Room workbench: http://127.0.0.1:${port}`);
   });
   server.on('error', err => { console.error(err.message); process.exitCode = 1; });
