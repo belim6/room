@@ -10,6 +10,7 @@ Read these before non-trivial work:
 
 - **WORKBENCH.md** — what is implemented and how to use it. Keep it current when behavior changes.
 - **PRODUCT_SPEC.md** — product direction and the four-release plan. Proposal, not implementation.
+- **prompt-knowledge/experiment.md** — ground rules for running experiments in Room. Read before designing or writing one up.
 - **JEV_SPEC.md** — Jev (TypeSafe's probability model) as a shadow observation instrument for speaker selection.
 
 The repo started from `letta-ai/letta-discord-bot-example`; that history was dropped. The **Discord pipeline is abandoned** — the browser workbench is the only frontend. Don't extend Discord code or propose fixes on that path, even where the specs still mention Discord.
@@ -27,6 +28,7 @@ Node 22, run through `tsx`; no build step and no auto-reload. Server code change
 ## Worktrees and data
 
 - `~/dev/room` (`main`) is the working copy. `~/dev/room-stable` (`stable`) is a git worktree Deniz uses on 4317 against the real data (`ROOM_DATA_DIR=~/dev/room/.room-data`). Update it with `git -C ~/dev/room-stable merge main` plus a restart, only when asked.
+- The 4317 server runs under launchd (`~/Library/LaunchAgents/com.deniz.room.plist`, KeepAlive, starts at login). Restart with `launchctl kickstart -k gui/$(id -u)/com.deniz.room`; never `kill` it or start a second one with `nohup`, since launchd respawns it and a second process on the same data directory is unsafe. Logs: `~/dev/room-stable/.workbench.log`.
 - `.room-data/` holds Deniz's research records. **Never write test turns to it.** To exercise the app, run a second instance on another port with a throwaway `ROOM_DATA_DIR` in the scratchpad, and `ROOM_DEMO=1` to generate without spending. One server process per data directory.
 - `saves/`, `saved/`, `oldsaves/`, `prompt-archive/`, `_dead/` are private transcripts and retired code, gitignored. Don't commit them.
 - No remote is configured. Commit only when asked; never push without asking.
