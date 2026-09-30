@@ -64,6 +64,19 @@ A probe that looks exciting becomes a test. It doesn't become a finding ([[The R
 8. **Ledger.** One note in `experiments/`, plus updates to the `insight/` or `methods/` notes it touches, each at its correct evidence level. Add a line to [[Room Ledger]].
 9. **Decide.** Adopt the prompt change, reject it, or escalate the probe to a test. Write the decision down.
 
+## Running alongside another agent
+
+More than one agent (Claude sessions, Codex) may run experiments against the same 4317 server at the same time. The app handles it: each experiment runs in its own workspace, and branch-level locks and `expected`-head checks keep runs from interfering. The risks are around the app:
+
+1. **No restarts while anything runs.** A server restart cancels in-flight trials. Before restarting (`launchctl kickstart`), check `/api/bootstrap` → `active` is empty and no experiment has queued or running trials.
+2. **Ledger discipline.**
+   - Each agent writes only its own experiment notes.
+   - Re-read `Room Ledger.md` immediately before adding a line, and add, never rewrite, other agents' lines.
+   - Commit only your own files (`git add <paths>`, never `git add -A`). Uncommitted notes in the tree may belong to another agent.
+3. **Record overlap.** Concurrent runs share a provider window, but extra load may change latency or reasoning length. Note in each experiment's design whether another run overlapped it, and compare median completion tokens against a solo run of the same checkpoint when available.
+4. **Spend is approved per agent.** Deniz's go-ahead to one agent doesn't cover another's trials.
+5. **Don't compare across agents.** Experiments that happen to run at the same time are still separate. Compare their numbers only if they were designed together as one family, with branched experiments and a shared prediction.
+
 ## Ledger note template (`experiments/`)
 
 ```
