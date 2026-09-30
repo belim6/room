@@ -1,356 +1,64 @@
-<a href="https://docs.letta.com/">
-  <img alt="Stateful AI agent Discord chatbot template built with Letta" src="/assets/discord_chatbot_header_2x.png">
-  <h1 align="center">Letta Discord Bot Example</h1>
-</a>
+# room
 
-<p align="center">
-  Deploy your own AI chatbot using <a href="https://docs.letta.com/">Letta</a> to create agents that can learn over time.
-</p>
+a room with 8 AI characters (Boris, Ilya, Alexandra, Elorin, Jonas, Ceryn, Velric and Rook), the system prompts of which i have written myself. it runs locally on your computer as a web app: your conversations and records stay on your machine, and only the requests go out to the model provider you pick.
 
-<div align="center">
-|
-  <a href="#-features">Features</a> ·
-  <a href="#-whats-included">What's included</a> ·
-  <a href="#%EF%B8%8F-quickstart">Quickstart</a> ·
-  <a href="#-running-the-app-locally">Running the app locally</a> ·
-  <a href="#advanced-features">Advanced Features</a>
-|
-</div>
+## the idea
 
-<div align="center">
-<h3>One-click deploy with Railway</h3>
-<a href="https://railway.com/template/C__ceE?referralCode=kdR8zc"><img src="https://railway.com/button.svg" alt="Deploy on Railway"/></a></div>
-</div>
+these guys just have interesting conversations with each other. you are free to set the initial condition or do nothing and observe, although i wouldn't recommend observing for too long. give them a real purpose and put them to work. you don't need to say much, they are all purpose. you can also try to blend in as one of them and see if you pass the reverse Turing test. nothing tells them which participant is human, but in my experience, if they realise you're not AI they'll give all their attention to you, so be warned.
 
-### 
+it's also a workshop. every reply is kept as evidence: the exact request, the raw response, the model's reasoning when the provider returns it. you can branch, rewrite history and run controlled experiments on how the characters behave.
 
-> [!NOTE]
-> You must also have a Discord app to use this app. Follow these [instructions](#-create-your-discord-app-and-set-your-variables) to create your Discord app.
+## run it
 
-## 📺 Video overview (watch on YouTube)
-
-[![AI agents + Discord! Make a Discord chatbot with long-term memory using Letta](https://img.youtube.com/vi/HDyCAV-xuMw/0.jpg)](https://www.youtube.com/watch?v=HDyCAV-xuMw)
-
-## ✨ Features
-
-- 🧠 [Letta](https://github.com/letta-ai/letta)
-
-  - Formerly known as **MemGPT**, Letta is an open-source framework designed for building **stateful LLM applications**. Our Discord bot example showcases powerful core features of Letta.
-
-- Discord Bot
-
-  - Interacts with your Discord server to send and receive messages.
-    
-    <img width="400" alt="image" src="https://github.com/user-attachments/assets/a09ce294-6cec-477f-ac60-f4b52493af67" />
-  - Interacts with you through Direct Messages (DMs) and send and receive messages.
-    
-    <img width="400" alt="image" src="https://github.com/user-attachments/assets/0eabe8fa-556b-436f-9fbc-496f198ef482" />
-
-
-
-
-## 📦 What's included
-
-- [Letta TypeScript SDK](https://github.com/letta-ai/letta-node)
-
-  - The Letta TypeScript library provides convenient access to the Letta API.
-
-- [Discord.js](https://discord.js.org/)
-
-  - Discord.js is a Node.js library that allows you to interact with the [Discord API](https://discord.com/developers/docs/intro), making it easy to build bot applications.
-
-- [Express JS](https://expressjs.com)
-
-  - Express JS is a minimal and flexible web framework for Node.js. We use Express to create a web server that accepts HTTP requests and interacts with the **Letta server** to generate responses. Express is also used to interact with the **Discord API**.
-
-- [TypeScript](https://www.typescriptlang.org)
-
-  - TypeScript enhances our codebase with **static typing, improved maintainability, and better developer tooling**, reducing potential runtime errors.
-
-## Development Commands
+Requires Node 22 and an [OpenGateway](https://opengateway.ai) API key.
 
 ```bash
-# Install dependencies
 npm install
-
-# Run in development mode (with auto-reload)
-npm run dev
-
-# Run in production mode
-npm start
-
-# Build TypeScript to JavaScript
-npm run build
+echo "OPENGATEWAY_API_KEY=your_key" > .env
+npm run workbench
 ```
 
-## Message Flow
+Open http://127.0.0.1:4317. New rooms use `deepseek/deepseek-v4.1-flash-ultrafast` for every character; you can change provider and model per character. Together is also supported (`TOGETHER_API_KEY`). Keys stay in `.env` and are never entered in the browser.
 
-1. Discord message received and filtered based on type and configuration
-2. Conversation history fetched from channel (last N messages, configurable)
-3. Message formatted with sender context and channel info, sent to Letta agent
-4. Letta streams response chunks back
-5. Response sent to Discord (auto-split if longer than 2000 characters)
+Nothing generates until you press **Continue**. Every reply is a paid request, typically a fraction of a cent on the default model.
 
----
+## what you can do
 
-# ⚡️ Quickstart
+**Conversation**
+- Pick who's in the room, who speaks next (or let it choose randomly), and run up to 20 turns at a time. **Stop** cancels.
+- Join in under your own name. Characters only see you in the participant list once you've spoken.
+- **Back-and-forth** alternates two characters automatically.
+- Attach images and documents (PDF, Word, text, CSV, JSON) to messages.
+- Edit each character's personality, memory, provider, model, temperature and reasoning (on/off) in **Characters**, plus the shared room instructions and the harness framing every request carries.
 
-### 📋 What you need before starting
+**Change history**
+- **Branch** from now, or from any earlier message, with the prompts and memories as they were at that point.
+- **Retcon** a message: rewrite or remove it, then regenerate from there or keep what followed.
+- **Edit history** to insert, change, reorder or delete messages. Every edit becomes a new branch; nothing is overwritten.
+- **Compare** two conversations side by side, as independent copies you can keep running.
+- **Revise** a reply with feedback, accept or reject the alternatives, and export approved pairs as training data (JSONL).
 
-- [Node.js](https://nodejs.org/en/download/)
-- [npm](https://www.npmjs.com/get-npm)
-- [Docker](https://docs.docker.com/get-docker/)
-- [Discord App](https://discord.com/developers/applications)
-- [LocalTunnel](https://github.com/localtunnel/localtunnel)
+**Look closer**
+- **Inspect** any reply: the exact request sent, the raw response, the provider's reasoning, and how the speaker was chosen. Failed and rejected attempts are kept too.
+- **Changes** shows what a branch changed since it split off, as a red/green diff.
+- **Notebook** observations, and ★ Favorite / ✕ Dislike marks on replies. These are never shown to the characters.
+- Optional **Jev** shadow observations, which record who a separate model would have picked to speak, without affecting the room.
 
-# 🚀 Running the app locally
+**Experiments**
+- Take a checkpoint, define conditions that each change one thing, write a prediction (it locks once trials start), and run many independent replays of the same turn.
+- Results come as one table: outcomes per condition, reply text, reasoning, and token counts.
+- Experiments run on their own copy of the conversation, can be branched to vary a design, and keep a lineage of how each one relates to the last.
 
-> [!NOTE]
-> These are instructions for running the *Discord bot server* locally, which connects a Letta server to Discord.
-> If you're using Letta Cloud, all you'll need is your Letta Cloud API key + the Discord bot server, but if you're self-hosting, you'll also need to set up a Letta server.
+## where things are
 
-## 💻 Grab a Letta API key
-
-Follow the [quickstart guide](https://docs.letta.com/quickstart) to get your own Letta Cloud API key.
-
-You can run your own Letta server using [Letta Desktop](https://docs.letta.com/quickstart/desktop) or [Docker](https://docs.letta.com/quickstart/docker).
-If you're self-hosting a server, the Letta server will run on `http://localhost:8283` by default (that will be your `LETTA_BASE_URL`).
-
-## 👉 Set up app
-
-1️⃣ Clone the repository and install dependencies:
+- [WORKBENCH.md](WORKBENCH.md): how every feature works, in detail.
+- [prompt-knowledge/](prompt-knowledge/): the ledger. Experiment write-ups, findings, and the [ground rules for experiments](prompt-knowledge/experiment.md).
+- [PRODUCT_SPEC.md](PRODUCT_SPEC.md), [EXPERIMENTS_SPEC.md](EXPERIMENTS_SPEC.md), [JEV_SPEC.md](JEV_SPEC.md): direction and design.
+- `.room-data/`: your conversations and research records. Local only, never committed. Back it up yourself.
 
 ```bash
-# Clone the repository
-git clone https://github.com/letta-ai/letta-discord-bot-example.git
-
-# Navigate to the project directory
-cd letta-discord-bot-example
-
-# Install dependencies
-npm install
-
-# Set environment variables
-cp .env.template .env
+npm run test:workbench   # tests, no live API calls
+npx tsc --noEmit         # typecheck
 ```
 
-2️⃣ Update the `.env` file with your Letta variables
-
-
-## 👾 Create your Discord app and set your variables
-
-1️⃣ Create a new Discord application [here](https://discord.com/developers/applications).
-
-<img width="475" alt="image" src="https://github.com/user-attachments/assets/b57ec05b-5381-43f4-afc4-824a84abdd55" />
-
-
-2️⃣ Under `Settings` -> `General Information` of your Discord app, copy your Discord application's `Application ID` and `Public Key`, and paste them in your `.env` file.
-
-<img width="1302" alt="image" src="https://github.com/user-attachments/assets/56e55a8e-6322-48a7-9b36-afbf538db359" />
-
-
-3️⃣ Under `Settings` -> `Bot` of your Discord app, copy your Discord bot's `Token`, and paste it in your `.env` file.
-
-<img width="1426" alt="image" src="https://github.com/user-attachments/assets/f3ba4098-c976-427c-8b3d-1811d93d2b71" />
-
-4️⃣ Enable the Privileged Gateway Intents
-
-<img width="1667" alt="image" src="https://github.com/user-attachments/assets/68978702-42d0-4630-9b83-56e3a7ce6e14" />
-
-5️⃣ Under `Settings` -> `Installation`, under `Guild Install` set up `scopes` and `permissions`
-
-<img width="1057" alt="image" src="https://github.com/user-attachments/assets/73921af7-7478-4b51-b388-ff30b9844d2f" />
-
-
-6️⃣ Install Discord Bot on your server; copy and paste `Link` on your browser.
-
-<img width="2130" alt="image" src="https://github.com/user-attachments/assets/c6e22db7-7bde-4d34-ab67-074ee5c048b0" />
-
-### ⚙️ Environment variables
-
-Environment variables can be controlled by setting them in your `.env` file or by setting them in your deployment environment.
-
-#### Letta Configuration
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LETTA_API_KEY` | API key for Letta Cloud, or password if self-hosting with authentication | - |
-| `LETTA_BASE_URL` | Base URL of your Letta server | `https://api.letta.com` |
-| `LETTA_AGENT_ID` | ID of the Letta agent to use | Required |
-| `LETTA_USE_SENDER_PREFIX` | Include sender context prefix on messages | `true` |
-
-#### Message Context Settings
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LETTA_CONTEXT_MESSAGE_COUNT` | Number of recent messages to include as context (0 to disable) | `5` |
-| `LETTA_THREAD_CONTEXT_ENABLED` | Fetch full thread context when in a thread | `true` |
-| `LETTA_THREAD_MESSAGE_LIMIT` | Max messages to fetch from threads (0 for unlimited) | `50` |
-
-#### Discord Configuration
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `APP_ID` | Discord application ID | Required |
-| `DISCORD_TOKEN` | Discord bot token | Required |
-| `PUBLIC_KEY` | Discord application public key | Required |
-| `DISCORD_CHANNEL_ID` | Only listen to messages in this channel | - |
-| `DISCORD_RESPONSE_CHANNEL_ID` | Only respond in this channel (agent sees all) | - |
-
-#### Response Behavior
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `RESPOND_TO_DMS` | Respond to direct messages | `true` |
-| `RESPOND_TO_MENTIONS` | Respond to @mentions | `true` |
-| `RESPOND_TO_BOTS` | Respond to other bots | `false` |
-| `RESPOND_TO_GENERIC` | Respond to all channel messages | `false` |
-| `SURFACE_ERRORS` | Show errors in Discord (vs logs only) | `false` |
-
-#### Timer/Heartbeat Settings
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ENABLE_TIMER` | Enable periodic heartbeat events | `true` |
-| `TIMER_INTERVAL_MINUTES` | Max interval for random timer | `15` |
-| `FIRING_PROBABILITY` | Probability timer fires (0.0-1.0) | `0.1` |
-
-> Note: Timer requires `DISCORD_CHANNEL_ID` to be set.
-
-#### Message Batching
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `MESSAGE_BATCH_ENABLED` | Accumulate messages before sending to agent | `false` |
-| `MESSAGE_BATCH_SIZE` | Max messages per batch | `10` |
-| `MESSAGE_BATCH_TIMEOUT_MS` | Auto-drain timeout | `30000` |
-
-#### App Configuration
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PORT` | Port to run the app on | `3001` |
-
-### 👾 Create your Letta agent
-
-You can connect an existing agent to Discord (by using its `LETTA_AGENT_ID`), or you can create a brand new agent specifically to use as a Discord bot.
-
-If you create a new agent, we'd recommend adding some information (e.g. inside of the `human` or `persona` memory block) that explains how to interact with Discord. For example, placing the following text in `human`:
-```
-I can use this space in my core memory to take notes on the users that I am interacting with.
-So far, all I know that is that I am connected to a Discord server.
-I can see messages that other users send on this server, as long as they are directed at me (with a mention or a reply).
-I should also remember that if I want to "at" a user, I need to use the <@discord-id> format in my message response.
-This will render the user tag in a dynamic way on Discord, vs any other reference to a user (eg their username) will just result in plaintext.
-```
-
-Additionally, if you would like to give your chatbot/agent the ability to "ignore" (not reply) to certain messages, you can add a custom tool like this to your agent (for information on how to add a custom tool, see [our docs](https://docs.letta.com/guides/agents/tools#custom-tools)):
-```python
-def ignore():
-    """
-    Not every message warrants a reply (especially if the message isn't directed at you). Call this tool to ignore the message.
-    """
-    return
-```
-
-The ability for an agent to "ignore" messages can be crucial if you connect your agent to an active Discord channel with many participants, especially if you set `RESPOND_TO_GENERIC` to `true` (in which case the agent will "see" every single message in a channel, even messages not directed at the agent itself).
-
-## 🚀 Run app
-
-To run the app locally, simply do:
-```bash
-npm start
-```
-
-This will spin up the Discord bot service, which will listen for events on Discord, and when an event happens (e.g. a message is sent in a channel), it will send an appropriate message to the Letta server, check for a response from the Letta server, and potentially send back a reply message on Discord.
-
-We have also prepared a one-click deploy option to easily deploy this repo on Railway.
-Simply click the deploy link, enter your environment variables (including your Letta server address and Letta agent ID), and your Discord bot will be ready to go (and live 24/7):
-
-<a href="https://railway.com/template/C__ceE?referralCode=kdR8zc"><img src="https://railway.com/button.svg" alt="Deploy on Railway"/></a>
-
----
-
-## Advanced Features
-
-### Message Types
-
-The bot distinguishes between four message types, each with a different prefix format sent to the agent:
-
-| Type | When it applies | Format |
-|------|-----------------|--------|
-| **DM** | Direct message to the bot | `[username (id=123) sent you a direct message] message` |
-| **MENTION** | Message @mentions the bot | `[username (id=123) sent a message in #channel mentioning you] message` |
-| **REPLY** | Reply to bot's previous message | `[username (id=123) replied to you in #channel] message` |
-| **GENERIC** | Other channel messages | `[username (id=123) sent a message in #channel] message` |
-
-This context helps the agent understand where messages come from and respond appropriately.
-
-### Conversation Context
-
-The bot includes recent message history as context for the agent:
-
-**Regular channels:**
-- Fetches the last N messages (configured via `LETTA_CONTEXT_MESSAGE_COUNT`)
-- Includes both user and bot messages
-- Filters out command messages (starting with `!`)
-- Format:
-  ```
-  [Recent conversation context:]
-  - username1: message text
-  - username2: message text
-  [End context]
-
-  [Current message from username]
-  ```
-
-**Threads:**
-- Automatically detects thread messages
-- Fetches thread starter and all replies (up to `LETTA_THREAD_MESSAGE_LIMIT`)
-- Format:
-  ```
-  [Thread: "Thread name"]
-  [Thread started by username: "original message"]
-
-  [Thread conversation history:]
-  - user1: message
-  - user2: reply
-  [End thread context]
-
-  [Current message from user]
-  ```
-
-Thread context takes precedence over regular conversation history when in a thread.
-
-### Message Handling
-
-**Auto-splitting:** Messages longer than Discord's 2000 character limit are automatically split into multiple messages.
-
-**Code block preservation:** When splitting, the bot preserves markdown code blocks, ensuring they aren't broken across messages.
-
-**Code block isolation:** Code blocks are sent as separate messages for easy copying.
-
-### Message Batching
-
-When enabled, messages are accumulated before sending to the agent:
-
-- Each channel has its own message buffer
-- Batch drains when reaching `MESSAGE_BATCH_SIZE` or `MESSAGE_BATCH_TIMEOUT_MS`
-- Format:
-  ```
-  [Batch of 5 messages from #general]
-  1. [username (id=123) mentioned you] message text
-  2. [username2 (id=456)] another message
-  ...
-  ```
-
-This reduces API calls and provides better conversation context for active channels.
-
-### Timer/Heartbeat
-
-When enabled, the bot sends periodic heartbeat events to the agent:
-
-- Fires at random intervals between 1 minute and `TIMER_INTERVAL_MINUTES`
-- Only fires based on `FIRING_PROBABILITY` (default 10%)
-- Requires `DISCORD_CHANNEL_ID` to know where to send responses
-- Allows the agent to initiate conversations or update memory autonomously
+This project started from [letta-discord-bot-example](https://github.com/letta-ai/letta-discord-bot-example) (MIT licensed, see [LICENSE](LICENSE)). It used to run in Discord; the browser app has replaced that, and the old Discord code remains in `src/` unused.

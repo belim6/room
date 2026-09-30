@@ -31,7 +31,7 @@ Node 22, run through `tsx`; no build step and no auto-reload. Server code change
 - The 4317 server runs under launchd (`~/Library/LaunchAgents/com.deniz.room.plist`, KeepAlive, starts at login). Restart with `launchctl kickstart -k gui/$(id -u)/com.deniz.room`; never `kill` it or start a second one with `nohup`, since launchd respawns it and a second process on the same data directory is unsafe. Logs: `~/dev/room-stable/.workbench.log`.
 - `.room-data/` holds Deniz's research records. **Never write test turns to it.** To exercise the app, run a second instance on another port with a throwaway `ROOM_DATA_DIR` in the scratchpad, and `ROOM_DEMO=1` to generate without spending. One server process per data directory.
 - `saves/`, `saved/`, `oldsaves/`, `prompt-archive/`, `_dead/` are private transcripts and retired code, gitignored. Don't commit them.
-- No remote is configured. Commit only when asked; never push without asking.
+- Remote: `origin` = https://github.com/belim6/room (**private**; `prompt-knowledge/` holds personal notes, so it must stay private). Only `main` is pushed; `stable` stays local. Commit only when asked; never push without asking. `.room-data/` is not in git and has no backup.
 
 ## Layout
 
