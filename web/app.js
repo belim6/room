@@ -343,8 +343,20 @@ $('#import').onchange=action(async e=>{const file=e.target.files[0];if(file){con
 $('#compare').onclick=action(async()=>{
   if(comparison){if(comparison.dirty)throw Error('Save this comparison before closing, or open another conversation to leave the unsaved pairing.');await choose(current);return;}
   const options=boot.branches.filter(b=>b.id!==current&&!b.comparison);if(!options.length)throw Error('Create another conversation or branch to compare');
-  const f=await dialog('Compare continuations',`<label>Right conversation<select name="branch">${options.map(b=>`<option value="${b.id}">${esc(rootOf(b.id).name)}${b.parent?' / '+esc(b.name):''}</option>`).join('')}</select></label>`,'Compare');
-  if(f)await openComparison(await api('/comparisons/draft',{left:current,right:f.get('branch')}));
+  const left=current,choices=options.map(b=>({id:b.id,label:rootOf(b.id).name+(b.parent?' / '+b.name:'')}));
+  const pending=dialog('Compare continuations',`<label>Search conversations and branches<input id="compare-search" type="search" placeholder="Type a room or branch name…" autocomplete="off"></label><label>Right conversation<select id="compare-results" name="branch" size="8" required></select></label><p id="compare-count" class="muted" role="status" aria-live="polite"></p>`,'Compare');
+  const search=$('#compare-search'),results=$('#compare-results'),submit=$('#dialog-ok');
+  function filter(){
+    const previous=results.value,terms=search.value.normalize('NFKC').toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+    const matches=choices.filter(c=>terms.every(t=>c.label.normalize('NFKC').toLocaleLowerCase().includes(t)));
+    results.innerHTML=matches.map(c=>`<option value="${c.id}">${esc(c.label)}</option>`).join('');
+    results.value=matches.some(c=>c.id===previous)?previous:(matches[0]?.id||'');
+    submit.disabled=!matches.length;
+    $('#compare-count').textContent=matches.length?`${matches.length} of ${choices.length} conversations and branches`:'No matches. Try another name.';
+  }
+  search.oninput=filter;filter();search.focus();
+  let f;try{f=await pending;}finally{submit.disabled=false;}
+  if(f&&choices.some(c=>c.id===f.get('branch')))await openComparison(await api('/comparisons/draft',{left,right:f.get('branch')}));
 });
 $('#save-comparison').onclick=action(async()=>{
   const source={...comparison};
