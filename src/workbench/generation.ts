@@ -6,7 +6,8 @@ import type { ContentPart } from './attachments';
 import type { PersonaName } from '../personas/personas';
 
 export type Provider = 'opengateway' | 'together' | 'demo';
-export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash-ultrafast';
+// v4.1-flash-ultrafast stopped reasoning on 2026-09-30 (it now serves deepseek-flash with thinking disabled); deepseek-flash reasons by default.
+export const DEFAULT_MODEL = 'deepseek/deepseek-flash';
 // Local demo is for scratch instances only (ROOM_DEMO=1). Elsewhere, rooms saved with it stay editable but cannot generate.
 export const demoEnabled = () => process.env.ROOM_DEMO === '1';
 export interface GenerationInput {

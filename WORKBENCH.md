@@ -11,7 +11,7 @@ Open http://127.0.0.1:4317. Requires Node 22 and the project's installed depende
 
 ## First conversation
 
-1. Create a room. New rooms use **OpenGateway** with `deepseek/deepseek-v4.1-flash-ultrafast` for every character, so Continue makes a real, paid request. **Local demo** (placeholder replies, no model calls) is only offered on instances started with `ROOM_DEMO=1`, meant for throwaway test instances. Elsewhere, rooms saved with demo characters stay readable and editable, and their Characters panel says to pick a provider; a demo character cannot generate there until switched.
+1. Create a room. New rooms use **OpenGateway** with `deepseek/deepseek-flash` for every character, so Continue makes a real, paid request. **Local demo** (placeholder replies, no model calls) is only offered on instances started with `ROOM_DEMO=1`, meant for throwaway test instances. Elsewhere, rooms saved with demo characters stay readable and editable, and their Characters panel says to pick a provider; a demo character cannot generate there until switched.
 2. In Characters, choose a provider and exact model ID, then save. “Apply provider/model/reasoning to all characters” applies these settings, temperature and the reasoning setting across the cast while preserving their different prompts and memories.
 3. For OpenGateway, the existing `.env` key and Kimi model are supported. For Together, add `TOGETHER_API_KEY=...` to `.env`, restart, and enter an available model ID. Credentials are never entered in the browser.
 4. Send your message, then Continue. Select a character or random selection; optionally request up to 20 turns. Stop cancels the active request and remaining turns. Aborting locally cannot guarantee the provider stops processing or charging.
@@ -22,9 +22,9 @@ Together's chat integration follows its [official chat completions API](https://
 ## Branch and retcon
 
 - **Branch** copies the current state. **Branch here** copies the earliest stored state containing that message, including the prompts and memories at that point.
-- **Retcon** rewrites/removes a message into a new branch. Regenerate mode removes later messages and restores historical settings; keep mode preserves later messages and current settings. Memory can independently be restored to the edit point or retained as a deliberate intervention.
+- **Retcon** rewrites/removes a message in the current branch, preserving the prior revision. Branch first if you want a separate continuation. Regenerate mode removes later messages and restores historical settings; keep mode preserves later messages and current settings. Memory can independently be restored to the edit point or retained as a deliberate intervention.
 - “Regenerate” prepares the new continuation; it does not automatically spend money generating replies. Click Continue afterward.
-- **Edit history** opens an editor for inserting, changing, removing, and reordering messages. It creates a new branch with current prompts and an explicit choice to keep or clear memories.
+- **Edit history** opens an editor for inserting, changing, removing, and reordering messages. It saves a revision in the current branch with current prompts and an explicit choice to keep or clear memories.
 - Edit personality instructions, shared instructions, and memory within the new branch via Characters. These changes never overwrite earlier revisions.
 - **Compare** displays two continuations side by side.
 
@@ -66,7 +66,7 @@ This is the first usable conversation/research loop, not all four releases in PR
 
 ## Independent comparisons and branch library
 
-The sidebar has **Conversations** and **Comparisons** tabs. Conversations lists originals only. Open an original and use **Branches** to choose any descendant, including retcons; nested branches stay associated with their original conversation. The **← / →** arrows beside Branches move through that family directly: original first, then branches by creation time. The counter shows your position, and arrows disable at either end. In comparisons, each pane has its own arrows; changing one side leaves the other side alone and marks the pairing unsaved. Use Save comparison to keep the new pairing.
+The sidebar has **Conversations** and **Comparisons** tabs. Conversations lists originals only. Open an original and use **Branches** to choose any descendant, including older retcon branches; nested branches stay associated with their original conversation. The **← / →** arrows beside Branches move through that family directly: original first, then branches by creation time. The counter shows your position, and arrows disable at either end. In comparisons, each pane has its own arrows; changing one side leaves the other side alone and marks the pairing unsaved. Use Save comparison to keep the new pairing.
 
 **Compare** creates independent snapshots of the selected conversations and opens them in two panes. Copies include history, prompts, memories, participants, and provider settings. Even before saving, changes in either pane do not affect its source conversation. Each has its own message composer, speaker selection, turn count, Continue/Stop, Branch, Edit history, and Characters & settings controls. Inspect and notebook actions target the clicked pane. Both sides can generate concurrently; stopping one side does not stop the other. Editing history or branching replaces only that pane with the newly created branch.
 
@@ -108,7 +108,7 @@ A child experiment's page shows **Branched from <parent>** with the design diffe
 
 ## Reasoning setting
 
-Each character has **Reasoning** in Characters: `Provider default` or `Off`. Off adds the provider's documented switch to the request, which is saved with the attempt before it is sent. On OpenGateway that switch is `thinking: {"type": "disabled"}`, verified on 24 September 2026 against `deepseek/deepseek-v4.1-flash-ultrafast`. Together has no verified switch yet, so Off is rejected for Together characters before anything is sent. Effort levels are not offered: on the only provider probed, they were accepted but made no measurable difference.
+Each character has **Reasoning** in Characters: `Provider default` or `Off`. Off adds the provider's documented switch to the request, which is saved with the attempt before it is sent. On OpenGateway that switch is `thinking: {"type": "disabled"}`, verified on 24 September 2026 against `deepseek/deepseek-v4.1-flash-ultrafast` and on 30 September 2026 against `deepseek/deepseek-flash`. Since 30 September 2026, `v4.1-flash-ultrafast` returns no reasoning with any setting (it behaves like `deepseek-flash` with thinking disabled). Rooms created before then still name it, so switch them with **Apply provider/model/reasoning to all characters** if they should reason. Together has no verified switch yet, so Off is rejected for Together characters before anything is sent. Effort levels are not offered: on the only provider probed, they were accepted but made no measurable difference.
 
 Reasoning appears in the branch changes view like any other character field (`Boris reasoning changed`), and experiment conditions can set it with `characters.<name>.reasoning` in the JSON patch.
 
@@ -173,3 +173,14 @@ Each candidate can be edited, then **Accept**ed or **Reject**ed, with an optiona
 - **Training**: approve the pair as a training example (original input → accepted reply), and optionally keep the original as the rejected side of a preference pair. Approval follows the accepted text; a later rejection withdraws it.
 
 Export approved examples from the review panel as JSONL: `/api/dataset/sft` (chat messages ending in the accepted reply) and `/api/dataset/preference` (input with `chosen` and `rejected`). Both use the original input without your feedback, so the lesson is to answer well without needing the correction. Nothing trains a model. Records: `reply-reviews`, `reply-candidates`, `reply-candidate-results`, `reply-judgments`, `training-decisions`. Revisions are not speaker selections and are not written to `selections`. A candidate interrupted by a restart is marked `interrupted` and never retried.
+
+
+New rooms default to empty harness instructions, with only `{transcript}` in the conversation header. An empty room needs a first message or an explicit opening instruction before generation. Existing rooms retain their saved framing (including legacy implicit framing); Reset to default selects the new transcript-only framing. Character prompts and shared room instructions remain separate settings.
+
+Comparison snapshots keep the source title without accumulating “compare copy” suffixes. Existing automatic copy/retcon suffixes are hidden in conversation headings, without rewriting saved research records. Retcons and full history edits keep the same conversation and comparison pane IDs; previous content remains in Inspect → State history.
+
+## Readable PDF export
+
+Export now offers **PDF · transcript & prompts** alongside the existing research JSON download. The PDF option opens a standalone print view; click **Save as PDF / Print** and choose Save as PDF in the browser's print dialog. Disable browser headers and footers for a clean document. This uses the browser's PDF engine and needs no new runtime dependency.
+
+The layout uses a restrained green accent, serif body text, numbered speaker headings and A4 print margins. The transcript comes first; current shared instructions, active characters' personality prompts and retained memories, and harness templates follow on a new page. These are current settings, not a reconstruction of historical requests. Research notes, raw API responses, and file contents are excluded (attachment counts remain visible). Exact historical evidence stays available in JSON. Long messages can flow across pages; speaker headings stay with the following text.

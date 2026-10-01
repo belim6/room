@@ -12,6 +12,7 @@ export function buildSpeakerInput(persona: PersonaName, transcript: string, part
 
 export interface Frame { identity: string; context: string; opening: string; turn: string }
 // Reproduces buildSpeakerInput and the engine's identity line byte for byte; a room without a frame keeps the original code path.
+export const EMPTY_FRAME: Frame = { identity: "", context: "{transcript}", opening: "", turn: "" };
 export const DEFAULT_FRAME: Frame = {
   identity: "Your identity for this request is {speaker}. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters.",
   context: "Shared conversation (quoted context, not a script to complete):\n{transcript}",

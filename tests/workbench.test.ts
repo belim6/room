@@ -5,7 +5,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store, clone } from '../src/workbench/store';
-import { Engine } from '../src/workbench/engine';
+import { Engine as ProductionEngine } from '../src/workbench/engine';
+// Existing fixtures exercise legacy rooms, including generation before anyone speaks.
+// New-room framing is covered separately with ProductionEngine below.
+class Engine extends ProductionEngine {
+  override create(...args: Parameters<ProductionEngine['create']>) {
+    if (!args[1]) { args[1]=initialState(); delete args[1].frame; }
+    return super.create(...args);
+  }
+}
 import { generate } from '../src/workbench/generation';
 import { createApp } from '../src/workbench/server';
 // New rooms default to a paid provider: any non-loopback request in tests is a bug.
@@ -54,10 +62,11 @@ test('historical forks restore prompt and memory; sibling edits and retcons stay
   state=b.revision.state;state.characters.Boris.memory='Future memory';state.characters.Boris.prompt='Future prompt';
   b=e.commit(b.id,b.head,state,'Later settings');b=e.message(b.id,b.head,'Later reply');
   const fork=e.fork(b.id,early,'Past');assert.equal(fork.revision.state.characters.Boris.memory,'Early memory');assert.equal(fork.revision.state.characters.Boris.prompt,'Early prompt');
+  const preserved=e.fork(b.id,b.head,'Keep version');
   const retcon=e.retcon(b.id,b.head,message,'Changed event','regenerate','restore');
   assert.equal(retcon.revision.state.characters.Boris.prompt,'Early prompt');assert.equal(retcon.revision.state.messages.length,1);assert.equal(retcon.revision.state.characters.Boris.memory,'Early memory');
-  assert.equal(e.read(b.id).revision.state.messages[0].text,'A first event');
-  const kept=e.retcon(b.id,b.head,message,'Changed event','keep','keep');const afterRetcon=e.fork(kept.id,kept.head,'Branch edited history',kept.revision.state.messages[0].id);assert.equal(afterRetcon.revision.state.messages.length,1);assert.equal(afterRetcon.revision.state.messages[0].text,'Changed event');assert.equal(kept.revision.state.messages.length,2);assert.equal(kept.revision.state.characters.Boris.memory,'Future memory');
+  assert.equal(retcon.id,b.id);assert.equal(e.read(b.id).revision.state.messages[0].text,'Changed event');assert.equal(s.get('revisions',b.head).state.messages[0].text,'A first event');
+  const kept=e.retcon(preserved.id,preserved.head,message,'Changed event','keep','keep');const afterRetcon=e.fork(kept.id,kept.head,'Branch edited history',kept.revision.state.messages[0].id);assert.equal(afterRetcon.revision.state.messages.length,1);assert.equal(afterRetcon.revision.state.messages[0].text,'Changed event');assert.equal(kept.revision.state.messages.length,2);assert.equal(kept.revision.state.characters.Boris.memory,'Future memory');
   assert.equal(new Engine(new Store(s.root)).read(retcon.id).head,retcon.head);
 });
 test('forced and singleton random choices are recorded without Jev; stale edits are rejected',async()=>{
@@ -108,7 +117,7 @@ test('local HTTP API serves UI, rejects foreign origins, imports and exports evi
     let b=await post('/api/import',{id:'old-save',history:['Dennis: hello','Boris: hi'],participants:['Boris'],assignments:{}});
     assert.equal(b.revision.state.messages[0].source,'imported');
     b=await post(`/api/branches/${b.id}/turn`,{expected:b.head,speaker:'Boris'});
-    const history=await post(`/api/branches/${b.id}/history`,{expected:b.head,messages:[{speaker:'Rook',text:'Inserted account'}],memory:'clear'}); assert.equal(history.revision.state.messages.length,1);assert.equal(history.revision.state.messages[0].source,'edited');assert.equal(e.read(b.id).revision.state.messages.length,3);
+    const history=await post(`/api/branches/${b.id}/history`,{expected:b.head,messages:[{speaker:'Rook',text:'Inserted account'}],memory:'clear'}); assert.equal(history.revision.state.messages.length,1);assert.equal(history.revision.state.messages[0].source,'edited');assert.equal(history.id,b.id);assert.equal(e.read(b.id).revision.state.messages.length,1);assert.equal(s.get('revisions',b.head).state.messages.length,3);
     const exported=await (await fetch(base+`/api/branches/${b.id}/export`)).json();assert.equal(exported.attempts.length,1);
     assert.equal(exported.selections[0].method,'forced');assert(!JSON.stringify(exported).includes('test-secret'));
   } finally {await new Promise<void>(r=>server.close(()=>r()));}
@@ -492,8 +501,8 @@ test('experiment and comparison families list roots and order members as a tree 
 });
 test('new rooms default to OpenGateway DeepSeek; demo generates only with ROOM_DEMO=1 and stays editable otherwise',async()=>{
   const s=store(),e=new Engine(s,async()=>{throw Error('must not dispatch');}),state=initialState();
-  assert(Object.values(state.characters).every(c=>c.provider==='opengateway'&&c.model==='deepseek/deepseek-v4.1-flash-ultrafast'));
-  const legacy=clone(state);legacy.characters.Boris.provider='demo' as any;let b=e.create('Legacy',legacy);
+  assert(Object.values(state.characters).every(c=>c.provider==='opengateway'&&c.model==='deepseek/deepseek-flash'));
+  const legacy=clone(state);delete legacy.frame;legacy.characters.Boris.provider='demo' as any;let b=e.create('Legacy',legacy);
   b=e.commit(b.id,b.head,{...b.revision.state,system:'Edited'},'Still editable');
   await assert.rejects(e.turn(b.id,b.head,'Boris'),/ROOM_DEMO=1/);assert.equal(s.list('attempts').length,0);
   process.env.ROOM_DEMO='1';try{b=await e.turn(b.id,b.head,'Boris');}finally{delete process.env.ROOM_DEMO;}
@@ -570,7 +579,7 @@ test('attached documents and images reach generation, survive identity retries, 
   const fork=e.fork(b.id,b.head,'With files');assert.deepEqual(fork.revision.state.messages[0].attachments,[doc.id,image.id]);
   const other=e.create('Other'),pair=new Comparisons(e).save({name:'File comparison',left:b.id,right:other.id});assert.deepEqual(e.read(pair.left).revision.state.messages[0].attachments,[doc.id,image.id]);
   const retcon=e.retcon(b.id,b.head,original.revision.state.messages[0].id,'Different caption','keep','keep');assert.deepEqual(retcon.revision.state.messages[0].attachments,[doc.id,image.id]);
-  let deleted=e.deleteMessage(b.id,b.head,b.revision.state.messages[0].id);const d=deleted.head;assert(!attachmentTranscript(s,deleted.revision.state.messages,true).parts.length);
+  let deleted=e.deleteMessage(retcon.id,retcon.head,retcon.revision.state.messages[0].id);const d=deleted.head;assert(!attachmentTranscript(s,deleted.revision.state.messages,true).parts.length);
   deleted=e.restoreMessage(deleted.id,deleted.head,d);assert.deepEqual(deleted.revision.state.messages[0].attachments,[doc.id,image.id]);
 });
 test('image provider failures remain errors, with no text-only fallback',async()=>{
@@ -647,4 +656,42 @@ test('reply alternatives keep the original, generate from its exact request plus
   assert.deepEqual(pref,{messages:bodies[0].messages,chosen:{role:'assistant',content:'Grounded point.'},rejected:{role:'assistant',content:original.text}});
   x.judge(c.id,{expected:j.id,verdict:'rejected',text:'Grounded point.'});assert.equal(x.dataset().length,0,'a later rejection withdraws the approval');
   s.put('reply-candidates','stale',{id:'stale',review:review.id,feedback:'x',instruction:'x',turnId:'t',at:new Date().toISOString()});x.recover();assert.equal(s.get('reply-candidate-results','stale').status,'interrupted');
+});
+
+
+test('new rooms use transcript-only framing and old rooms retain their original framing',async()=>{
+  const s=store();let body:any,calls=0;const e=new ProductionEngine(s,async(_u,opts)=>{calls++;body=JSON.parse(String(opts?.body));return response('Fine.');});
+  let b=e.create('Minimal');assert.deepEqual(b.revision.state.frame,{identity:'',context:'{transcript}',opening:'',turn:''});
+  await assert.rejects(e.turn(b.id,b.head,'Boris'),/assembled user message is empty/);assert.equal(calls,0);
+  b=e.message(b.id,b.head,'Hello {speaker}');await e.turn(b.id,b.head,'Boris');
+  assert.equal(body.messages[1].content,JSON.stringify('Dennis: Hello {speaker}'));assert(!body.messages[0].content.includes('Your identity for this request'));
+  const legacy=initialState();delete legacy.frame;const old=e.create('Legacy',legacy);await e.turn(old.id,old.head,'Boris');assert(body.messages[0].content.includes('Your identity for this request is Boris'));
+});
+test('comparison copies keep short names and retcons stay local with immutable history',()=>{
+  const s=store(),e=new ProductionEngine(s),c=new Comparisons(e);let b=e.create('Velric · compare copy · retcon · compare copy');b=e.message(b.id,b.head,'Original');
+  const right=e.create('Right'),pair=c.save({name:'Pair',left:b.id,right:right.id}),fork=c.fork(pair.id,'Next',pair.version);
+  assert.equal(e.read(pair.left).name,'Velric');assert.equal(e.read(fork.left).name,'Velric');
+  const pane=e.read(fork.left),message=pane.revision.state.messages[0],count=s.list('branches').length;
+  const edited=e.retcon(pane.id,pane.head,message.id,'Edited','keep','keep');assert.equal(edited.id,pane.id);assert.equal(s.list('branches').length,count);
+  assert.equal(s.get('revisions',pane.head).state.messages[0].text,'Original');assert.equal(e.read(pair.left).revision.state.messages[0].text,'Original');assert.equal(e.read(b.id).revision.state.messages[0].text,'Original');
+  assert.throws(()=>e.retcon(pane.id,pane.head,message.id,'Stale','keep','keep'),/changed/);
+  e.active.set(edited.id,{controller:new AbortController(),turnId:'test'});assert.throws(()=>e.retcon(edited.id,edited.head,edited.revision.state.messages[0].id,'Busy','keep','keep'),/Stop generation/);
+});
+
+test('readable transcript export includes current prompts, escapes text and excludes research records',async()=>{
+  const {transcriptExport}=await import('../src/workbench/transcriptExport');
+  const s=store(),e=new ProductionEngine(s);let b=e.create('A <room> · compare copy');
+  b=e.message(b.id,b.head,'<script>alert("x")</script>\nSecond line');
+  const state=b.revision.state;state.participants=['Boris'];state.system='Shared & grounded';state.characters.Boris.prompt='Boris personality';state.characters.Boris.memory='A remembered point';state.characters.Ilya.prompt='Excluded inactive personality';
+  b=e.commit(b.id,b.head,state,'Prompts');s.add('observations',{branch:b.id,text:'PRIVATE RESEARCH NOTE'});
+  const html=transcriptExport(b.name,b.revision.state);
+  assert(html.includes('A &lt;room&gt;'));assert(!html.includes('compare copy'));assert(html.includes('&lt;script&gt;'));assert(!html.includes('<script>alert'));assert(html.includes('Shared &amp; grounded'));assert(html.includes('Boris personality'));assert(html.includes('A remembered point'));assert(html.includes('{transcript}'));assert(!html.includes('Excluded inactive personality'));assert(!html.includes('PRIVATE RESEARCH NOTE'));assert(html.includes('Earlier replies may have used different prompts'));
+  const server=createApp(e).listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));
+  try {
+    const base=`http://127.0.0.1:${(server.address() as any).port}`;
+    const page=await fetch(base+`/api/branches/${b.id}/transcript`);assert.equal(page.status,200);assert.match(page.headers.get('content-type')!,/text\/html/);assert.equal(await page.text(),html);
+    assert.equal((await fetch(base+'/transcript.css')).status,200);assert.equal((await fetch(base+'/transcript.js')).status,200);
+    const json=await (await fetch(base+`/api/branches/${b.id}/export`)).json();assert.equal(json.observations[0].text,'PRIVATE RESEARCH NOTE');
+    assert.equal(e.read(b.id).head,b.head);assert.equal(s.list('attempts').length,0);
+  }finally{await new Promise<void>(r=>server.close(()=>r()));}
 });

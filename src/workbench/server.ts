@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { transcriptExport } from './transcriptExport';
 import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ import { Comparisons } from './comparisons';
 import { Experiments } from './experiments';
 import { saveAttachment, attachmentCapabilities, attachmentInfo, type Attachment } from './attachments';
 import { stateChanges } from './changes';
-import { DEFAULT_FRAME } from '../speakerTurn';
+import { EMPTY_FRAME, DEFAULT_FRAME } from '../speakerTurn';
 
 function runInfo(run: any) {
   if (run == null) return undefined;
@@ -74,7 +75,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     const saved = comparisons.list(), library = engine.library();
     const trials = experiments.trialBranches();
     res.json({ ...library, attachments:attachmentCapabilities(), branches: library.branches.map(b => trials.has(b.id) ? { ...b, isTrial: true } : b), comparisons: saved, experiments: experiments.list(), reactions: reactions(),
-      frame: DEFAULT_FRAME, keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY, demo: demoEnabled() },
+      frame: EMPTY_FRAME, legacyFrame: DEFAULT_FRAME, keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY, demo: demoEnabled() },
       active: [...engine.active.keys()] });
   }));
   app.get('/api/branches/:id/changes', route((req,res) => res.json(changes(req.params.id))));
@@ -168,7 +169,8 @@ export function createApp(engine = new Engine(defaultStore())) {
       return { id: id(), speaker: m.speaker, text: m.text, source: 'edited', ...(old ? {editedFrom:[old.id,...(old.editedFrom||[])],turnId:old.turnId, ...(old.attachments?{attachments:old.attachments}:{})} : {}) };
     });
     if (req.body.memory === 'clear') for (const c of Object.values(state.characters)) c.memory = '';
-    const result = engine.create(b.name + ' · history retcon', state, b.id, b.head);
+    if (engine.active.has(b.id)) throw Error('Stop generation before editing history');
+    const result = engine.commit(b.id, req.body.expected, state, 'History retconned');
     store.add('edits', { branch:result.id, sourceRevision:b.head, kind:'history', memory:req.body.memory, at:new Date().toISOString() });
     res.json(result);
   }));
@@ -178,6 +180,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     const observation = { id: id(), branch: b.id, revision: b.head, at: new Date().toISOString(), text: req.body.text.slice(0,20000), messageId: req.body.messageId || null };
     store.add('observations',observation); res.json(observation);
   }));
+  app.get('/api/branches/:id/transcript', route((req,res) => {const b=engine.read(req.params.id);res.type('html').send(transcriptExport(b.name,b.revision.state));}));
   app.get('/api/branches/:id/export', route((req,res) => res.attachment('room-research.json').json((()=>{const record=evidence(req.params.id,true);return {format:'room-workbench-v1',...record,attachments:record.attachments.map(a=>store.get<Attachment>('attachments',a.id))};})())));
   app.get('/api/branches/:id/notebook', route((req,res) => {
     const e = evidence(req.params.id);

@@ -2,7 +2,7 @@ import { Store, clone, id } from './store';
 import { generate, reasoningSwitchVerified, DEFAULT_MODEL, type Provider } from './generation';
 import { PERSONAS, type PersonaName } from '../personas/personas';
 import { GLOBAL_SYSTEM } from '../modelRouter';
-import { buildSpeakerInput, fillFrame, type Frame } from '../speakerTurn';
+import { buildSpeakerInput, fillFrame, EMPTY_FRAME, type Frame } from '../speakerTurn';
 import { shadowJev } from './jev';
 import { getAttachments, attachmentTranscript } from './attachments';
 
@@ -16,7 +16,7 @@ export interface Branch { id: string; name: string; head: string; parent: string
 export interface TrashEntry { id: string; branch: string; name: string; branches: string[]; deletedAt: string; restoredAt?: string }
 const names = Object.keys(PERSONAS) as PersonaName[];
 export function initialState(): State {
-  return { system: GLOBAL_SYSTEM, participants: [...names], messages: [], shadow: false, policy: 'protected', human: 'Dennis',
+  return { frame: { ...EMPTY_FRAME }, system: GLOBAL_SYSTEM, participants: [...names], messages: [], shadow: false, policy: 'protected', human: 'Dennis',
     characters: Object.fromEntries(names.map(name => [name, { prompt: PERSONAS[name].systemPrompt,
       memory: '', provider: 'opengateway', model: DEFAULT_MODEL, temperature: 0.7 }])) as State['characters'] };
 }
@@ -155,6 +155,7 @@ export class Engine {
     return this.commit(branchId,expected,state,'Message restored',{kind:'restore-message',message:change.message,index});
   }
   retcon(branchId: string, expected: string, messageId: string, text: string, mode: string, memory: string) {
+    if (this.active.has(branchId)) throw Error('Stop generation before retconning');
     if (!['keep','regenerate'].includes(mode) || !['restore','keep'].includes(memory)) throw Error('Choose retcon and memory modes');
     const b = this.read(branchId); if (b.head !== expected) throw Error('Branch changed; reload first');
     const index = b.revision.state.messages.findIndex(m => m.id === messageId);
@@ -166,7 +167,7 @@ export class Engine {
     if (mode === 'regenerate') s.messages = s.messages.slice(0, index + 1);
     if (text.trim()) s.messages[index] = { ...s.messages[index], id: id(), text, source: 'edited', editedFrom: [s.messages[index].id, ...(s.messages[index].editedFrom || [])] };
     else s.messages.splice(index, 1);
-    const fork = this.create(`${b.name} · retcon`, s, b.id, b.head);
+    const fork = this.commit(b.id, expected, s, 'History retconned');
     this.store.add('edits', { branch: fork.id, sourceRevision: b.head, messageId, text, mode, memory, at: new Date().toISOString() });
     return fork;
   }
@@ -199,11 +200,11 @@ export class Engine {
       const system = f ? [c.prompt, s.system, c.memory ? `Your retained memory:\n${c.memory}` : '', fill(f.identity)].filter(x => x.trim()).join('\n\n')
         : `${c.prompt}\n\n${s.system}\n\n${c.memory ? `Your retained memory:\n${c.memory}\n\n` : ''}Your identity for this request is ${speaker}. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters.`;
       // Validate file inputs before launching any paid observation. Jev receives text and image filenames only.
-      if (s.shadow) void shadowJev(this.store,s,branchId,b.head,turnId,this.transport).catch(error=>console.error('Jev persistence error:',error.message));
       // The human joins the roster only once they have said something in this conversation.
       const user = f ? [fill(transcript.trim() ? f.context : f.opening), fill(f.turn)].filter(x => x.trim()).join('\n\n')
         : buildSpeakerInput(speaker, transcript, s.participants, human);
-      if (!user.trim() && !context.parts.length) throw Error('Nothing to send: the harness framing is blank and the conversation is empty');
+      if (!user.trim() && !context.parts.length) throw Error('Nothing to send: the assembled user message is empty. Include {transcript} in the conversation header, or add an opening instruction for an empty conversation.');
+      if (s.shadow) void shadowJev(this.store,s,branchId,b.head,turnId,this.transport).catch(error=>console.error('Jev persistence error:',error.message));
       const result = await generate({ provider: c.provider, model: c.model, temperature: c.temperature, reasoning: c.reasoning, persona: speaker,
         messages: [...(system.trim() ? [{ role: 'system' as const, content: system }] : []), { role: 'user', content: context.parts.length ? [{type:'text',text:user},...context.parts] : user }], attachments: context.attachments, branch: branchId, revision: b.head, turnId,
         policy: s.policy, signal: controller.signal }, this.store, this.transport);
