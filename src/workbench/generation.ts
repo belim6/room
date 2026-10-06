@@ -3,15 +3,18 @@ import { Store, id, clone } from './store';
 import { checkSpeakerReply, WrongSpeakerError } from '../speakerTurn';
 import { limitReply } from '../replyLimit';
 import type { ContentPart } from './attachments';
-import type { PersonaName } from '../personas/personas';
+import { LEGACY_NAMES, type Assembly } from './identity';
 
 export type Provider = 'opengateway' | 'together' | 'demo';
 // v4.1-flash-ultrafast stopped reasoning on 2026-09-30 (it now serves deepseek-flash with thinking disabled); deepseek-flash reasons by default.
 export const DEFAULT_MODEL = 'deepseek/deepseek-flash';
 // Local demo is for scratch instances only (ROOM_DEMO=1). Elsewhere, rooms saved with it stay editable but cannot generate.
 export const demoEnabled = () => process.env.ROOM_DEMO === '1';
+// Identity, label and validation roster are separate: personId attributes the attempt, labelAtDispatch is what the
+// model was asked to speak as, validationRoster is what checkSpeakerReply checks. `persona` alone means legacy-v1.
 export interface GenerationInput {
-  provider: Provider; model: string; persona: PersonaName;
+  provider: Provider; model: string; persona?: string; personId?: string; labelAtDispatch?: string; validationRoster?: string[];
+  assemblyVersion?: Assembly; origin?: { item: string; revision: string };
   messages: { role: string; content: string | ContentPart[] }[]; attachments?: unknown[]; temperature: number; reasoning?: 'default' | 'off';
   branch?: string; revision?: string; turnId?: string; purpose?: 'alternative'; review?: string; candidate?: string;
   policy?: 'protected' | 'observe'; signal?: AbortSignal;
@@ -24,9 +27,15 @@ export const ENDPOINTS = {
 // Only switches probed against the live provider; an unverified parameter is never sent silently.
 const REASONING_OFF: Partial<Record<Provider, object>> = { opengateway: { thinking: { type: 'disabled' } }, demo: {} };
 export const reasoningSwitchVerified = (provider: Provider) => provider in REASONING_OFF;
-export function defaultStore() { return new Store(process.env.ROOM_DATA_DIR || path.resolve('.room-data')); }
+export const readonlyMode = () => process.env.ROOM_READONLY === '1';
+export function defaultStore() { return new Store(process.env.ROOM_DATA_DIR || path.resolve('.room-data'), readonlyMode()); }
 export async function generate(input: GenerationInput, store = defaultStore(), transport: typeof fetch = fetch) {
-  if (input.provider === 'demo' && !demoEnabled()) throw Error(`${input.persona} uses local demo, which is only available on instances started with ROOM_DEMO=1. Choose OpenGateway or Together in Characters.`);
+  const label = input.labelAtDispatch ?? input.persona;
+  if (!label) throw Error('A generation needs the label it is dispatched under');
+  const assemblyVersion = input.assemblyVersion ?? 'legacy-v1', roster = assemblyVersion === 'v2' ? input.validationRoster : undefined;
+  if (assemblyVersion === 'v2' && !roster?.length) throw Error('A v2 generation needs its validation roster');
+  const identity = { persona: label, personId: input.personId ?? label, labelAtDispatch: label, validationRoster: roster ?? [...LEGACY_NAMES], assemblyVersion, ...(input.origin ? { origin: input.origin } : {}) };
+  if (input.provider === 'demo' && !demoEnabled()) throw Error(`${label} uses local demo, which is only available on instances started with ROOM_DEMO=1. Choose OpenGateway or Together in Characters.`);
   if (input.reasoning === 'off' && !reasoningSwitchVerified(input.provider)) throw Error(`Turning reasoning off is not verified for ${input.provider}`);
   const attempts: string[] = [];
   const messages = clone(input.messages);
@@ -35,7 +44,7 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
     const attemptId = id(); attempts.push(attemptId);
     const body = { model: input.model, messages: clone(messages), temperature: input.temperature, ...(input.reasoning === 'off' ? REASONING_OFF[input.provider] : {}) };
     const request = { id: attemptId, at: new Date().toISOString(), turnId: group, branch: input.branch,
-      revision: input.revision, persona: input.persona, provider: input.provider, policy: input.policy || 'protected',
+      revision: input.revision, ...identity, provider: input.provider, policy: input.policy || 'protected',
       ...(input.purpose?{purpose:input.purpose,review:input.review,candidate:input.candidate}:{}),
       retryOf: n ? attempts[n - 1] : null, endpoint: ENDPOINTS[input.provider], body, ...(input.attachments?.length?{attachments:clone(input.attachments)}:{}) };
     store.put('attempts', attemptId, request); // Commit before any external call.
@@ -50,7 +59,7 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
     try {
       input.signal?.throwIfAborted();
       if (input.provider === 'demo') {
-        raw = JSON.stringify({ choices: [{ message: { content: `[Demo · ${input.persona}] This is a local placeholder. Choose OpenGateway or Together in Character settings to generate a real reply.` }, finish_reason: 'stop' }], demo: true });
+        raw = JSON.stringify({ choices: [{ message: { content: `[Demo · ${label}] This is a local placeholder. Choose OpenGateway or Together in Character settings to generate a real reply.` }, finish_reason: 'stop' }], demo: true });
         status = 200;
       } else {
         const key = process.env[input.provider === 'together' ? 'TOGETHER_API_KEY' : 'OPENGATEWAY_API_KEY'];
@@ -75,7 +84,7 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
       if (notes.length) transformations.push('Removed future-memory notes from displayed reply');
       if (text !== full && !notes.length) transformations.push('Trimmed whitespace');
       try {
-        const checked = checkSpeakerReply(input.persona, text);
+        const checked = checkSpeakerReply(label, text, roster);
         if (checked !== text) transformations.push('Removed assigned speaker label');
         text = checked;
       } catch (error) {
@@ -98,7 +107,7 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
         usage: parsed?.usage ?? null, finishReason: parsed?.choices?.[0]?.finish_reason ?? null,
         latencyMs: Date.now() - start, at: new Date().toISOString() });
       if (!rejected || n === 1) throw error;
-      const correction=`\n\nThe previous attempt used another participant's label. Write a fresh reply only as ${input.persona}, from your own perspective.`;
+      const correction=`\n\nThe previous attempt used another participant's label. Write a fresh reply only as ${label}, from your own perspective.`;
       const last=messages[messages.length-1];
       if(typeof last.content==='string')last.content+=correction;else last.content.push({type:'text',text:correction});
     }

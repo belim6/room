@@ -20,7 +20,7 @@ export class Comparisons {
   get(key: string) {
     const comparison = this.engine.store.get<Comparison>('comparisons',key);
     this.engine.read(comparison.left); this.engine.read(comparison.right);
-    if (comparison.isolation === 'owned-v1') return comparison;
+    if (comparison.isolation === 'owned-v1' || this.engine.store.readOnly) return comparison;
     // Legacy links cannot distinguish in-comparison turns from external turns.
     // Preserve the current committed contents and the old pairing record.
     const left = this.copy(comparison.left,key), right = this.copy(comparison.right,key);

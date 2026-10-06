@@ -1,7 +1,11 @@
 import { Engine, type Message } from './engine';
 import { clone, id } from './store';
 import { generate, type GenerationInput } from './generation';
+import { LEGACY_NAMES, resolveSpeaker, generationProvenance } from './identity';
 const now=()=>new Date().toISOString();
+// A revision speaks as the original attempt did: its person, label, roster and assembly, never the room's current ones.
+// Attempts recorded before identities were split fall back to the persona name as ID and label and the 8 legacy names.
+export const reviseIdentity=(a:any)=>({personId:a.personId??a.persona,labelAtDispatch:a.labelAtDispatch??a.persona,validationRoster:a.validationRoster??[...LEGACY_NAMES],assemblyVersion:a.assemblyVersion??'legacy-v1',...(a.origin?{origin:a.origin}:{})});
 interface Review { id:string; branch:string; revision:string; message:Message; originalAttempt:string; inputAttempt:string; at:string }
 interface Candidate { id:string; review:string; feedback:string; instruction:string; turnId:string; at:string }
 interface Judgment { id:string; candidate:string; review:string; verdict:'accepted'|'rejected'; text:string; note:string; at:string; sequence:number }
@@ -47,7 +51,7 @@ export class Alternatives {
     // Keep the original request intact; correction is a separate user message in this request only.
     messages.push({role:'user',content:instruction});
     try {
-      const result=await generate({provider:original.provider,model:original.body.model,temperature:original.body.temperature,reasoning:original.body.thinking?.type==='disabled'?'off':'default',persona:original.persona,messages,attachments:original.attachments,branch:review.branch,revision:original.revision,turnId:candidate.turnId,policy:original.policy,purpose:'alternative',review:key,candidate:candidate.id,signal:controller.signal},this.store,this.engine.transport);
+      const result=await generate({provider:original.provider,model:original.body.model,temperature:original.body.temperature,reasoning:original.body.thinking?.type==='disabled'?'off':'default',...reviseIdentity(original),messages,attachments:original.attachments,branch:review.branch,revision:original.revision,turnId:candidate.turnId,policy:original.policy,purpose:'alternative',review:key,candidate:candidate.id,signal:controller.signal},this.store,this.engine.transport);
       this.store.put('reply-candidate-results',candidate.id,{id:candidate.id,status:controller.signal.aborted?'canceled':'completed',text:result.text,attempts:result.attempts,validation:result.validation,at:now()});
     }catch(error:any){this.store.put('reply-candidate-results',candidate.id,{id:candidate.id,status:controller.signal.aborted?'canceled':'failed',error:error.message,attempts:this.store.list('attempts').filter(a=>a.turnId===candidate.turnId).map(a=>a.id),at:now()});}
     finally{this.active.delete(candidate.id);}
@@ -70,7 +74,7 @@ export class Alternatives {
     if(this.engine.active.has(review.branch))throw Error('Stop conversation generation before replacing a reply');
     const b=this.engine.read(review.branch),state=clone(b.revision.state),index=state.messages.findIndex(m=>m.id===review.message.id||m.review===review.id);
     if(index<0)throw Error('The original reply has been removed or retconned. The candidate remains in the research record.');
-    const previous=state.messages[index],next:Message={...previous,id:id(),text:judgment.text,source:'edited',turnId:candidate.turnId,review:review.id,editedFrom:[previous.id,...(previous.editedFrom||[])]};
+    const previous=state.messages[index],next:Message={...previous,speakerRef:resolveSpeaker(state,previous,generationProvenance(this.store)),id:id(),text:judgment.text,source:'edited',turnId:candidate.turnId,review:review.id,editedFrom:[previous.id,...(previous.editedFrom||[])]};
     state.messages[index]=next;
     // Provenance lives in the same immutable revision as the replacement.
     const result=this.engine.commit(b.id,input.expected,state,'Approved reply alternative applied',{kind:'replace-message',message:previous,index,candidate:key,judgment:judgment.id});

@@ -9,6 +9,8 @@
     "dev": "ts-node-dev src/server.ts",
     "workbench": "node --import tsx src/workbench/server.ts",
     "test:workbench": "node --import tsx --test tests/workbench.test.ts",
+    "backup": "node --import tsx scripts/backup.ts",
+    "backup:verify-restore": "node --import tsx scripts/backup.ts verify-restore",
     "discord": "node --import tsx src/discord.ts"
   },
   "keywords": [],

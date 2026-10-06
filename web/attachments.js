@@ -10,7 +10,7 @@ function messageAttachments(message,key){
   return (message.attachments||[]).map(id=>{const a=attachments.find(a=>a.id===id);return a?fileCard(a):'<p class="notice">Attachment unavailable.</p>';}).join('');
 }
 function attachmentComposer(key){
-  const draft=drafts.get(key)||{},caps=boot.attachments||{},busy=attachmentBusy(key)||isBusy(key);
+  const draft=drafts.get(key)||{},caps=boot.attachments||{},busy=attachmentBusy(key);
   return `<div class="attachment-tools"><label class="attach-button">＋ Attach<input data-attach="${key}" type="file" multiple accept="${esc(caps.accept||'')}" ${busy?'disabled':''}></label><span class="muted">${attachmentUploads.has(key)?'Uploading and reading files…':messageSends.has(key)?'Sending…':'Drop files or paste an image · up to '+(caps.maxFiles||4)+' files, 10 MB each'}</span></div><div class="draft-attachments" aria-live="polite">${(draft.attachments||[]).map(a=>fileCard(a,key)).join('')}</div>${draft.attachments?.length?'<p class="attachment-hint">Files stay local until Continue. Documents send extracted text; embedded document images and layout are not included. Images require a vision-capable model.</p>':''}`;
 }
 async function addAttachments(key,files){
@@ -34,7 +34,9 @@ async function sendRoomMessage(form){
   if(!text.trim()&&!attachments.length)throw Error('Write a message or attach a file');
   messageSends.add(key);render();
   try {
-    await api('/branches/'+key+'/messages',{expected:snapshot.branch.head,text,attachments});
+    // During a run the head moves with each reply, so send against the latest head; the run continues after the message.
+    const head=isBusy(key)?(await api('/branches/'+key)).branch.head:snapshot.branch.head;
+    await api('/branches/'+key+'/messages',{expected:head,text,attachments});
     // Clear only this pane's draft after a successful commit; failed sends keep all files.
     drafts.set(key,{...drafts.get(key),text:'',attachments:[]});
     const input=document.querySelector(`[data-controls="${key}"] [data-text]`);if(input)input.value='';

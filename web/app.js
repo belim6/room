@@ -1,6 +1,6 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let boot, data, current=localStorage.getItem('room-branch'), tab='characters', character='Boris', selected=null;
+let boot, data, current=localStorage.getItem('room-branch'), tab='characters', character=null, selected=null;
 let comparison=null, category=localStorage.getItem('room-library')||'conversations', refreshVersion=0;
 let showJev=localStorage.getItem('room-show-jev')==='true',jevTimer,jevPollVersion=0;
 let branchNavigationPending=false, paneChanges=null;
@@ -13,6 +13,10 @@ function dialog(title,html,label='Save'){
   return new Promise(resolve=>{const d=$('#dialog');d.onclose=()=>resolve(d.returnValue==='default'?new FormData(d.querySelector('form')):null);d.showModal();});
 }
 function details(label,obj){return `<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`;}
+// People are keyed by ID; labels are display text. Legacy characters are keyed by name and have no separate label.
+const labelOf=(s,key)=>s.characters[key]?.label??key;
+const labelsOf=s=>Object.fromEntries(Object.keys(s.characters).map(k=>[k,labelOf(s,k)]));
+const usageText=u=>u?`${u.input} in · ${u.output} out${u.reasoning?` · ${u.reasoning} reasoning`:''}${u.missing?` · ${u.missing} attempt${u.missing===1?'':'s'} without usage`:''}`:'';
 function compactRoomName(name){return name.replace(/(?: · (?:compare copy|history retcon|retcon))+$/g,'');}
 function rootOf(key){let b=boot.branches.find(b=>b.id===key);const visited=new Set();while(b?.parent&&!visited.has(b.id)){visited.add(b.id);const p=boot.branches.find(p=>p.id===b.parent);if(!p)break;b=p;}return b;}
 // Experiment trials stay out of conversation families unless asked for; the open branch always counts.
@@ -58,12 +62,12 @@ async function stepBranch(key,direction){
   try{if(comparison)await replacePane(key,target);else await choose(target.id);}
   finally{branchNavigationPending=false;}
 }
-function isBusy(key){return runs.has(key)||boot?.active.includes(key);}
+function isBusy(key){return runs.has(key)||boot?.active.includes(key)||!!records.get(key)?.run;}
 function rememberInputs(){
   document.querySelectorAll('[data-controls]').forEach(el=>{
     if(el.closest('[hidden]'))return;
     const old=drafts.get(el.dataset.controls)||{};
-    drafts.set(el.dataset.controls,{...old,text:el.querySelector('[data-text]')?.value||'',speaker:el.querySelector('[data-speaker]')?.value||'',count:el.querySelector('[data-count]')?.value||'1',alternate:el.querySelector('[data-alternate]')?.checked??old.alternate??false});
+    drafts.set(el.dataset.controls,{...old,text:el.querySelector('[data-text]')?.value||'',speaker:el.querySelector('[data-speaker]')?.value||'',count:el.querySelector('[data-count]')?.value||'1',alternate:el.querySelector('[data-alternate]')?.checked??old.alternate});
   });
 }
 async function refresh(){
@@ -88,9 +92,9 @@ function trackView(){
   $('#back').disabled=!history.state?.depth;
 }
 addEventListener('popstate',ev=>{const v=ev.state;if(!v)return;restoringView=true;action(async()=>{try{if(v.kind==='experiment')await openExperiment(v.id);else if(v.kind==='comparison')await openComparison(await api('/comparisons/'+v.id));else await choose(v.id);}finally{restoringView=false;$('#back').disabled=!history.state?.depth;}})();});
-async function choose(id){leaveExperiment();paneChanges=null;rememberInputs();comparison=null;localStorage.removeItem('room-comparison');current=id;selected=null;category='conversations';await refresh();}
+async function choose(id){leaveExperiment();leaveVault();paneChanges=null;rememberInputs();comparison=null;localStorage.removeItem('room-comparison');current=id;selected=null;category='conversations';await refresh();}
 async function openComparison(value){
-  leaveExperiment();paneChanges=null;
+  leaveExperiment();leaveVault();paneChanges=null;
   rememberInputs();comparison=value;current=value.left;selected=null;category='comparisons';
   if(value.id)localStorage.setItem('room-comparison',value.id);else localStorage.removeItem('room-comparison');
   await refresh();
@@ -113,10 +117,11 @@ function markedLibrary(value){
   api('/reactions/'+value).then(items=>{marked.items=items;if(category===(value==='favorite'?'favorites':'dislikes'))paint();}).catch(error);
 }
 function renderLibrary(){
-  for(const name of ['conversations','comparisons','experiments','trash','favorites','dislikes'])$('#show-'+name).classList.toggle('selected',category===name);
-  $('#library-label').textContent=category==='favorites'?'FAVORITE REPLIES':category==='dislikes'?'DISLIKED REPLIES':category==='conversations'?'CONVERSATIONS':category==='trash'?'TRASH':category==='experiments'?'EXPERIMENTS':'SAVED COMPARISONS';localStorage.setItem('room-library',category);
+  for(const name of ['conversations','comparisons','experiments','vault','trash','favorites','dislikes'])$('#show-'+name).classList.toggle('selected',category===name);
+  $('#library-label').textContent=category==='favorites'?'FAVORITE REPLIES':category==='dislikes'?'DISLIKED REPLIES':category==='conversations'?'CONVERSATIONS':category==='trash'?'TRASH':category==='experiments'?'EXPERIMENTS':category==='vault'?'VAULT':'SAVED COMPARISONS';localStorage.setItem('room-library',category);
   $('#new-experiment').hidden=category!=='experiments';
-  if(category==='experiments'){experimentLibrary();}
+  if(category==='vault'){vaultLibrary();}
+  else if(category==='experiments'){experimentLibrary();}
   else if(category==='favorites'||category==='dislikes'){markedLibrary(category==='favorites'?'favorite':'dislike');}
   else if(category==='conversations'){
     const root=rootOf(current);
@@ -136,7 +141,7 @@ function paintJev(){
   document.querySelectorAll('[data-jev-message]').forEach(el=>{
     el.hidden=!showJev;if(!showJev){el.innerHTML='';return;}
     const record=records.get(el.dataset.owner),message=record?.branch.revision.state.messages.find(m=>m.id===el.dataset.jevMessage);
-    el.innerHTML=message?RoomJev.render(message,record.jev,record.selections):'';
+    el.innerHTML=message?RoomJev.render(message,record.jev,record.selections,labelsOf(record.branch.revision.state)):'';
   });
 }
 function scheduleJevPoll(){
@@ -157,17 +162,23 @@ async function refreshJevObservations(version,round,manual){
   $('#jev-refresh-status').textContent=failed?'Could not refresh. Try Refresh observations.':'';
   if(!failed&&round<5)jevTimer=setTimeout(()=>refreshJevObservations(version,round+1,false),1200);
 }
-function messagesHtml(state,key){return state.messages.map(m=>`<article class="message ${m.source==='human'?'human':''}"><div class="avatar">${esc(m.speaker[0])}</div><div><div class="message-head"><strong>${esc(m.speaker)}</strong><span class="badge">${esc(m.source)}</span></div><p>${esc(m.text)}</p><div class="message-attachments">${messageAttachments(m,key)}</div><div class="message-actions"><button data-inspect="${m.id}" data-owner="${key}">Inspect</button><button data-fork="${m.id}" data-owner="${key}">Branch here</button><button data-retcon="${m.id}" data-owner="${key}">Retcon</button><button data-note="${m.id}" data-owner="${key}">Observe</button>${m.source==='generated'||m.review?`<button data-revise="${m.id}" data-owner="${key}">Revise</button>`:''}${m.source==='human'?'':reactionButtons(m.id,key)}<button data-delete-message="${m.id}" data-owner="${key}">Delete message</button></div><div data-jev-message="${m.id}" data-owner="${key}" hidden></div></div></article>`).join('')||'<div class="empty"><h2>What should we get into?</h2><p>Add a thought, or let a character begin.</p></div>';}
+// The label a line was written under stays as evidence; a later rename is shown beside it, never instead of it.
+function speakerNote(state,key,m){const r=records.get(key)?.identity?.[m.id];if(r?.kind==='person'&&labelOf(state,r.id)!==m.speaker)return `<span class="muted" title="This person has been renamed since">now ${esc(labelOf(state,r.id))}</span>`;if(r?.kind==='unbound')return '<span class="badge" title="Not attributed to anyone in this room">unbound</span>';if(r?.kind==='narrator')return '<span class="badge">narrator</span>';return '';}
+function messagesHtml(state,key){return state.messages.map(m=>`<article class="message ${m.source==='human'?'human':''}"><div class="avatar">${esc([...m.speaker][0])}</div><div><div class="message-head"><strong>${esc(m.speaker)}</strong>${speakerNote(state,key,m)}<span class="badge">${esc(m.source)}</span></div><p>${esc(m.text)}</p><div class="message-attachments">${messageAttachments(m,key)}</div><div class="message-actions"><button data-inspect="${m.id}" data-owner="${key}">Inspect</button><button data-fork="${m.id}" data-owner="${key}">Branch here</button><button data-retcon="${m.id}" data-owner="${key}">Retcon</button><button data-note="${m.id}" data-owner="${key}">Observe</button>${m.source==='generated'||m.review?`<button data-revise="${m.id}" data-owner="${key}">Revise</button>`:''}${m.source==='human'?'':reactionButtons(m.id,key)}<button data-delete-message="${m.id}" data-owner="${key}">Delete message</button></div><div data-jev-message="${m.id}" data-owner="${key}" hidden></div></div></article>`).join('')||'<div class="empty"><h2>What should we get into?</h2><p>Add a thought, or let a character begin.</p></div>';}
 function reactionButtons(message,key){const r=boot.reactions?.[message];return `<button data-react="favorite" data-message="${message}" data-owner="${key}" class="${r==='favorite'?'reacted':''}" aria-pressed="${r==='favorite'}">${r==='favorite'?'★ Favorite':'☆ Favorite'}</button><button data-react="dislike" data-message="${message}" data-owner="${key}" class="${r==='dislike'?'reacted':''}" aria-pressed="${r==='dislike'}">${r==='dislike'?'✕ Disliked':'Dislike'}</button>`;}
 function controlsHtml(key){
-  const s=records.get(key).branch.revision.state,d=drafts.get(key)||{},generating=isBusy(key),busy=generating||attachmentBusy(key),run=runs.get(key);
-  return `<div class="turn-controls"><label>Next voice <select data-speaker><option value="">Random participant</option>${s.participants.map(p=>`<option ${p===d.speaker?'selected':''}>${p}</option>`).join('')}</select></label><label>Turns <input data-count type="number" value="${esc(d.count||1)}" min="1" max="20"></label>${s.participants.length===2?`<label title="Each turn goes to whichever of the two didn't speak last"><input data-alternate type="checkbox" ${d.alternate?'checked':''} style="width:auto"> Back-and-forth</label>`:''}<button data-generate="${key}" class="primary" ${busy?'disabled':''}>Continue ↗</button><button data-stop="${key}" ${generating?'':'hidden'}>Stop</button><span class="muted">${run?esc(run.stopping?'Stopping…':`Generating ${run.index} of ${run.count}…`):generating?'Generating…':''}</span></div>${attachmentComposer(key)}<form data-compose="${key}"><textarea data-text aria-label="Your message" rows="2" placeholder="Say something to this conversation…" ${messageSends.has(key)?'disabled':''}>${esc(d.text||'')}</textarea><button class="primary" type="submit" ${busy?'disabled':''}>Send</button></form>`;
+  const rec=records.get(key),s=rec.branch.revision.state,d=drafts.get(key)||{},generating=isBusy(key),busy=generating||attachmentBusy(key),run=runs.get(key),remote=!run&&rec.run,empty=!s.participants.length;
+  // The run line reflects the server's run record (checked against the branch), not a guess from local state.
+  const status=run?(run.stopping?'Stopping…':`Run · turn ${run.index} of ${run.count}${run.usage?' · '+usageText(run.usage):''}`):remote?`A run is active (turn ${remote.turns.length} of ${remote.maxTurns}${remote.usage?' · '+usageText(remote.usage):''})`:generating?'Generating…':'';
+  return `${empty?'<p class="notice">Nobody is in this room yet. Use <button type="button" class="link-button" data-add-person-now="'+key+'">Add person</button> in Characters to begin.</p>':''}<div class="turn-controls"><label>Next voice <select data-speaker><option value="">Random participant</option>${s.participants.map(p=>`<option value="${esc(p)}" ${p===d.speaker?'selected':''}>${esc(labelOf(s,p))}</option>`).join('')}</select></label><label>Turns <input data-count type="number" value="${esc(d.count||1)}" min="1" max="20"></label>${s.participants.length===2?`<label title="Each turn goes to whichever of the two didn't speak last"><input data-alternate type="checkbox" ${(d.alternate??s.flow==='alternate')?'checked':''} style="width:auto"> Back-and-forth</label>`:''}<button data-generate="${key}" class="primary" ${busy||empty?'disabled':''}>Continue ↗</button><button data-stop="${key}" ${generating?'':'hidden'}>Stop</button><span class="muted" role="status">${esc(status)}</span></div>${attachmentComposer(key)}<form data-compose="${key}"><textarea data-text aria-label="Your message" rows="2" placeholder="Say something to this conversation…" ${messageSends.has(key)?'disabled':''}>${esc(d.text||'')}</textarea><button class="primary" type="submit" ${attachmentBusy(key)?'disabled':''} title="You can speak during a run; the run continues after your message">Send</button></form>`;
 }
 function changesBadge(key){const c=records.get(key)?.changes;if(!c?.fork)return '';const all=RoomChanges.badges(c.changes);return `<button class="changes-badge" data-changes="${key}" title="View changes since fork">${esc(all.slice(0,3).join(' · ')||'No changes since fork')}${all.length>3?' · +'+(all.length-3)+' more':''}</button>`;}
 function render(){
   clearTimeout(jevTimer);++jevPollVersion;
   rememberInputs();renderLibrary();$('#connection').textContent=`OpenGateway ${boot.keys.opengateway?'● ready':'○ no key'} · Together ${boot.keys.together?'● ready':'○ no key'}`;
   trackView();
+  if(vaultPage){$('#family-nav').hidden=true;renderVault();return;}
+  $('#vault-page').hidden=true;
   if(experimentPage){$('#title-changes').hidden=true;$('#family-nav').hidden=false;$('#family-nav').innerHTML=familyNavHtml('experiment');bindFamilyNav();renderExperiment();return;}
   document.querySelector('.workspace').classList.remove('experiment-mode');$('#experiment-page').hidden=true;
   $('#diff-panes').hidden=!comparison;
@@ -203,7 +214,7 @@ function render(){
     $('#messages').innerHTML=messagesHtml(s,current);
     const footer=document.querySelector('main > footer');footer.dataset.controls=current;footer.innerHTML=controlsHtml(current)+'<div class="footnote">Sending adds your message. Continue gives a character the floor.</div>';
   }
-  bindControls();renderPanel(false);paintJev();scheduleJevPoll();
+  bindControls();renderPanel(false);paintJev();scheduleJevPoll();scheduleRunPoll();
 }
 function bindControls(){
   document.querySelectorAll('[data-changes]').forEach(b=>b.onclick=()=>{paneChanges=null;focusPane(b.dataset.changes,'changes');});
@@ -220,17 +231,31 @@ function bindControls(){
   document.querySelectorAll('[data-branch-step]').forEach(b=>b.onclick=action(()=>stepBranch(b.dataset.owner,Number(b.dataset.branchStep))));
   document.querySelectorAll('[data-family]').forEach(b=>b.onclick=action(()=>showFamily(b.dataset.family)));
   document.querySelectorAll('[data-generate]').forEach(b=>b.onclick=action(()=>runTurns(b.dataset.generate)));
-  document.querySelectorAll('[data-stop]').forEach(b=>b.onclick=action(async()=>{const run=runs.get(b.dataset.stop);if(run)run.stopping=true;await api('/branches/'+b.dataset.stop+'/stop',{});await refresh();}));
+  // Stop ends the run for good, including between turns; a run started in another tab is stopped through its record.
+  document.querySelectorAll('[data-stop]').forEach(b=>b.onclick=action(async()=>{const key=b.dataset.stop,run=runs.get(key),target=run?.id||records.get(key)?.run?.id;if(run)run.stopping=true;if(target)await api('/runs/'+target+'/stop',{});else await api('/branches/'+key+'/stop',{});await refresh();}));
+  document.querySelectorAll('[data-add-person-now]').forEach(b=>b.onclick=action(()=>{focusPane(b.dataset.addPersonNow,'characters');return addPerson(b.dataset.addPersonNow);}));
   document.querySelectorAll('[data-compose]').forEach(f=>f.onsubmit=action(async e=>{e.preventDefault();await sendRoomMessage(f);}));
   bindAttachmentControls();
   document.querySelectorAll('[data-text]').forEach(t=>t.onkeydown=e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))t.closest('form').requestSubmit();});
 }
+// Runs advanced by another tab are polled until they end; focus and reconnect refresh at once.
+let runPollTimer=null;
+// A failed refresh reschedules itself with backoff; a successful one re-renders, which reschedules from zero.
+function scheduleRunPoll(failures=0){
+  clearTimeout(runPollTimer);const visible=(comparison?[comparison.left,comparison.right]:current?[current]:[]).map(k=>records.get(k));
+  if(RoomRuns.shouldPoll(visible,k=>runs.has(k)))runPollTimer=setTimeout(()=>{refresh().catch(()=>scheduleRunPoll(failures+1));},RoomRuns.pollDelay(failures));
+}
+addEventListener('focus',()=>{if(boot)refresh().catch(()=>{});});addEventListener('online',()=>{if(boot)refresh().catch(()=>{});});
 function scrollMessages(key){const pane=document.querySelector(`[data-pane="${key}"] .pane-messages`);const el=pane||(!comparison&&key===current?$('#messages'):null);if(el)el.scrollTop=el.scrollHeight;}
 async function runTurns(key){
-  if(isBusy(key)||attachmentBusy(key))return;rememberInputs();const d=drafts.get(key)||{},count=Number(d.count||1),speaker=d.speaker||'',alternate=!!d.alternate&&records.get(key).branch.revision.state.participants.length===2;
+  if(isBusy(key)||attachmentBusy(key))return;rememberInputs();const rec=records.get(key),s=rec.branch.revision.state,d=drafts.get(key)||{},count=Number(d.count||1),speaker=d.speaker||'',alternate=!!(d.alternate??s.flow==='alternate')&&s.participants.length===2;
   if(!Number.isInteger(count)||count<1||count>20)throw Error('Choose 1–20 turns');
-  const run={id:crypto.randomUUID(),count,index:1,stopping:false};runs.set(key,run);render();
-  try{for(let n=0;n<count&&!run.stopping;n++){run.index=n+1;const snap=await api('/branches/'+key);if(run.stopping)break;await api('/branches/'+key+'/turn',{expected:snap.branch.head,speaker:alternate&&n?'':speaker,run:{id:run.id,index:n+1,count,...(alternate?{mode:'alternate'}:{})}});await refresh();scrollMessages(key);}}
+  // Every Continue is a run record, persisted before its first turn; the server accepts only the next index.
+  const policy=alternate?{kind:'alternate',...(speaker?{speaker}:{})}:speaker?{kind:'fixed',speaker}:{kind:'random'};
+  const record=await api('/branches/'+key+'/runs',{expected:rec.branch.head,maxTurns:count,policy});
+  const run={id:record.id,count,index:1,stopping:false,usage:record.usage};runs.set(key,run);render();
+  // The server decides when the run is done: a turn detached by your interjection doesn't count toward the limit.
+  try{await RoomRuns.drive(n=>api('/runs/'+run.id+'/turns',{index:n}),async out=>{run.usage=out.run.usage;run.index=out.run.turns.length-(out.run.uncounted?.length||0)+1;await refresh();scrollMessages(key);},()=>run.stopping);}
   finally{runs.delete(key);await refresh();}
 }
 function renderPanel(force = true) {
@@ -243,13 +268,25 @@ function renderPanel(force = true) {
   const noteDraft=tab==='notes' && panel.dataset.key===panelKey ? $('#observation')?.value : '';
   panel.dataset.key=panelKey;
   if(tab==='characters') {
-    const c=s.characters[character];
-    panel.innerHTML=`<h2>The cast</h2><div class="checks">${Object.keys(s.characters).map(p=>`<label><input type="checkbox" name="participant" value="${p}" ${s.participants.includes(p)?'checked':''}> ${p}</label>`).join('')}</div><div class="divider"></div><label for="character">Character</label><select id="character">${Object.keys(s.characters).map(p=>`<option ${p===character?'selected':''}>${p}</option>`).join('')}</select><label for="prompt">Personality instructions</label><textarea id="prompt" rows="9">${esc(c.prompt)}</textarea><label for="memory">Retained memory · edited by you</label><textarea id="memory" rows="3">${esc(c.memory)}</textarea><label for="provider">Provider</label><select id="provider">${['opengateway','together',...(boot.keys.demo?['demo']:[])].map(p=>`<option value="${p}" ${p===c.provider?'selected':''}>${p==='demo'?'Local demo (no API calls)':p==='together'?'Together':'OpenGateway'}</option>`).join('')}</select>${c.provider==='demo'&&!boot.keys.demo?'<p class="notice">This character uses local demo, which only runs on instances started with ROOM_DEMO=1. Choose a provider and model, then save (or apply to all characters) before generating.</p>':''}<label for="model">Model ID</label><input id="model" value="${esc(c.provider==='demo'&&!boot.keys.demo?'deepseek/deepseek-flash':c.model)}" placeholder="Exact provider model identifier"><label for="temperature">Temperature</label><input id="temperature" type="number" min="0" max="2" step="0.1" value="${c.temperature}"><label for="reasoning">Reasoning</label><select id="reasoning"><option value="default">Provider default</option><option value="off" ${c.reasoning==='off'?'selected':''}>Off</option></select><p class="muted">Off sends the provider's documented switch (OpenGateway: thinking disabled). Not available for Together until a switch is verified.</p><button id="apply-all" class="wide">Apply provider/model/reasoning to all characters</button><div class="divider"></div><h2>Shared context</h2><label for="system">Room instructions</label><textarea id="system" rows="6">${esc(s.system)}</textarea>${(()=>{const f=s.frame||boot.legacyFrame,parts=[['identity','Identity line (end of system prompt)',3],['context','Conversation header ({transcript} is the quoted conversation)',2],['opening','When the conversation is empty',1],['turn','Turn instructions (end of user message)',6]];return `<details class="frame-settings" ${s.frame?'open':''}><summary>Harness framing${s.frame?' · customized':''}</summary><p class="muted">Sent with every request, after the room instructions and around the conversation. Placeholders: {speaker}, {participants}, {transcript}. Blank a box to leave that part out.</p>${parts.map(([k,l,r])=>`<label for="frame-${k}">${l}</label><textarea id="frame-${k}" rows="${r}">${esc(f[k])}</textarea>`).join('')}<button type="button" id="frame-reset">Reset to default</button></details>`;})()}<label for="human">Your name in the room</label><input id="human" value="${esc(s.human)}"><label for="policy">Identity checks</label><select id="policy"><option value="protected" ${s.policy==='protected'?'selected':''}>Protect: reject wrong speaker labels</option><option value="observe" ${s.policy==='observe'?'selected':''}>Observe: show reply and flag issues</option></select><label><input id="shadow" type="checkbox" ${s.shadow?'checked':''} ${!boot.keys.jev?'disabled':''}> Jev shadow observations</label><p class="muted">${boot.keys.jev?'One extra API request per turn; may incur provider charges. Jev observes but never selects or adds context.':'Add TYPESAFE_API_KEY to .env to enable optional shadow calls.'}</p><button id="save-settings" class="primary wide">Save settings</button><p class="muted">Edits apply only to this branch. Earlier versions stay inspectable.</p>`;
-    $('#character').onchange=action(async e=>{await saveSettings(false);character=e.target.value;renderPanel();});
-    $('#provider').onchange=()=>{const p=$('#provider').value;$('#model').value=p==='demo'?'local-demo':p==='opengateway'?'deepseek/deepseek-flash':'';};
+    const ids=Object.keys(s.characters),people=data.people||{},v2=data.assemblyVersion==='v2';
+    if(!s.characters[character]){character=s.participants[0]||ids[0]||null;panel.dataset.key=current+':'+tab+':'+character;}
+    const c=character?s.characters[character]:null,former=formerLabels(data),template=Object.entries(data.template||{});
+    const flagged=k=>{const sit=(s.characters[k].situation||'').toLocaleLowerCase();return [...former].filter(l=>sit.includes(l.toLocaleLowerCase()));};
+    const row=k=>{const st=people[k]||{},f=flagged(k);return `<div class="person-row ${k===character?'selected':''}"><div><button type="button" class="link-button" data-person-select="${esc(k)}">${esc(labelOf(s,k))}</button> ${st.active?'':'<span class="badge">inactive</span>'}${st.originTitle?`<span class="badge" title="Persona revision ${esc(st.origin.revision)}">from ${esc(st.originTitle)}</span>`:''}${st.diverged?'<span class="badge badge-warn" title="Prompt edited here; it no longer matches its persona revision">diverged</span>':''}${st.updateAvailable?'<span class="badge badge-update">update available</span>':''}${f.length?`<span class="badge badge-warn" title="Its situation mentions a former label (${esc(f.join(', '))}). It was not rewritten.">review situation</span>`:''}</div><div class="person-actions"><button type="button" data-person-rename="${esc(k)}">Rename</button>${st.origin?`<button type="button" data-person-adopt="${esc(k)}">Adopt…</button>`:''}<button type="button" data-person-active="${esc(k)}" data-active="${st.active?'false':'true'}">${st.active?'Deactivate':'Activate'}</button><button type="button" data-person-preview="${esc(k)}">Assembled</button></div></div>`;};
+    const providers=['opengateway','together',...(boot.keys.demo?['demo']:[])].map(p=>`<option value="${p}" ${p===c?.provider?'selected':''}>${p==='demo'?'Local demo (no API calls)':p==='together'?'Together':'OpenGateway'}</option>`).join('');
+    const person=c?`<div class="divider"></div><h2>${esc(labelOf(s,character))}</h2><label for="prompt">Personality instructions${people[character]?.diverged?' · edited here':''}</label><textarea id="prompt" rows="9">${esc(c.prompt)}</textarea><label for="situation">Situation in this room · role, wants, relationships</label><textarea id="situation" rows="3" placeholder="Only for this room; never part of the persona.">${esc(c.situation||'')}</textarea><label for="memory">Retained memory · edited by you</label><textarea id="memory" rows="3">${esc(c.memory)}</textarea><label for="provider">Provider</label><select id="provider">${providers}</select>${c.provider==='demo'&&!boot.keys.demo?'<p class="notice">This character uses local demo, which only runs on instances started with ROOM_DEMO=1. Choose a provider and model, then save (or apply to all characters) before generating.</p>':''}<label for="model">Model ID</label><input id="model" value="${esc(c.provider==='demo'&&!boot.keys.demo?'deepseek/deepseek-flash':c.model)}" placeholder="Exact provider model identifier"><label for="temperature">Temperature</label><input id="temperature" type="number" min="0" max="2" step="0.1" value="${c.temperature}"><label for="reasoning">Reasoning</label><select id="reasoning"><option value="default">Provider default</option><option value="off" ${c.reasoning==='off'?'selected':''}>Off</option></select><p class="muted">Off sends the provider's documented switch (OpenGateway: thinking disabled). Not available for Together until a switch is verified.</p><button id="apply-all" class="wide">Apply provider/model/reasoning to all characters</button>`:'';
+    const templateHtml=template.length?`<div class="divider"></div><h2>Room template</h2>${template.map(([f,t])=>`<p>${esc(f)} ${t.diverged?'<span class="badge badge-warn">changed here</span>':'<span class="badge">as adopted</span>'}${t.updateAvailable?'<span class="badge badge-update">update available</span>':''}</p>`).join('')}<button id="adopt-template" class="wide">Adopt from template…</button><p class="muted">Adoption covers room instructions, framing and flow, each chosen separately. The cast and opening are never re-applied.</p>`:'';
+    panel.innerHTML=`<h2>People</h2><p class="muted">${v2?'v2 assembly: replies are checked against everyone in this room plus your name.':'Legacy assembly: replies are checked against the 8 legacy names. Adding a person or renaming switches this room to v2, after a preview.'}</p><div class="people-list">${ids.map(row).join('')||'<p class="notice">Nobody is in this room yet. Add a person to begin; Continue stays disabled until then.</p>'}</div><button id="add-person" class="wide">＋ Add person</button>${person}<div class="divider"></div><h2>Shared context</h2><label for="system">Room instructions</label><textarea id="system" rows="6">${esc(s.system)}</textarea>${(()=>{const f=s.frame||boot.legacyFrame,parts=[['identity','Identity line (end of system prompt)',3],['context','Conversation header ({transcript} is the quoted conversation)',2],['opening','When the conversation is empty',1],['turn','Turn instructions (end of user message)',6]];return `<details class="frame-settings" ${s.frame?'open':''}><summary>Harness framing${s.frame?' · customized':''}</summary><p class="muted">Sent with every request, after the room instructions and around the conversation. Placeholders: {speaker}, {participants}, {transcript}. Blank a box to leave that part out.</p>${parts.map(([k,l,r])=>`<label for="frame-${k}">${l}</label><textarea id="frame-${k}" rows="${r}">${esc(f[k])}</textarea>`).join('')}<button type="button" id="frame-reset">Reset to default</button></details>`;})()}<label for="flow">Flow</label><select id="flow"><option value="random">Random speaker</option><option value="alternate" ${s.flow==='alternate'?'selected':''} ${s.participants.length===2?'':'disabled'}>Back-and-forth (exactly two active people)</option></select><label for="human">Your name in the room</label><input id="human" value="${esc(s.human)}"><label for="policy">Identity checks</label><select id="policy"><option value="protected" ${s.policy==='protected'?'selected':''}>Protect: reject wrong speaker labels</option><option value="observe" ${s.policy==='observe'?'selected':''}>Observe: show reply and flag issues</option></select><label><input id="shadow" type="checkbox" ${s.shadow?'checked':''} ${!boot.keys.jev?'disabled':''}> Jev shadow observations</label><p class="muted">${boot.keys.jev?'One extra API request per turn; may incur provider charges. Jev observes but never selects or adds context.':'Add TYPESAFE_API_KEY to .env to enable optional shadow calls.'}</p><button id="save-settings" class="primary wide">Save settings</button><p class="muted">Edits apply only to this branch. Earlier versions stay inspectable.</p>${templateHtml}`;
+    panel.querySelectorAll('[data-person-select]').forEach(b=>b.onclick=action(async()=>{if(settingsChanged())await saveSettings(false);character=b.dataset.personSelect;renderPanel();}));
+    panel.querySelectorAll('[data-person-rename]').forEach(b=>b.onclick=action(()=>renamePerson(current,b.dataset.personRename)));
+    panel.querySelectorAll('[data-person-adopt]').forEach(b=>b.onclick=action(()=>adoptPersona(current,b.dataset.personAdopt)));
+    panel.querySelectorAll('[data-person-active]').forEach(b=>b.onclick=action(async()=>{await api('/branches/'+current+'/people/'+encodeURIComponent(b.dataset.personActive)+'/participation',{expected:data.branch.head,active:b.dataset.active==='true'});$('#panel').dataset.key='';await refresh();}));
+    panel.querySelectorAll('[data-person-preview]').forEach(b=>b.onclick=action(async()=>{const p=await api('/branches/'+current+'/people/'+encodeURIComponent(b.dataset.personPreview)+'/assembled');await dialog('Assembled system message · '+p.label,`<p class="muted">${p.assemblyVersion==='v2'?'Persona prompt, situation, room instructions, retained memory, identity line.':'Legacy assembly.'} This is what the next request would send as the system message. No model call is made.</p><pre class="compiled">${esc(p.assembled)||'(empty: no system message is sent)'}</pre>`,'Close');}));
+    $('#add-person').onclick=action(()=>addPerson(current));
+    if(c){$('#provider').onchange=()=>{const p=$('#provider').value;$('#model').value=p==='demo'?'local-demo':p==='opengateway'?'deepseek/deepseek-flash':'';};$('#apply-all').onclick=action(()=>saveSettings(true));}
     $('#save-settings').onclick=action(()=>saveSettings(false));
     $('#frame-reset').onclick=()=>{for(const k of Object.keys(boot.frame))$('#frame-'+k).value=boot.frame[k];};
-    $('#apply-all').onclick=action(()=>saveSettings(true));
+    $('#adopt-template')?.addEventListener('click',action(()=>adoptTemplate(current)));
   } else if(tab==='revise') {
     renderReview(panel);
   } else if(tab==='changes') {
@@ -261,9 +298,10 @@ function renderPanel(force = true) {
     const removedHtml=[...deleted.values()].map(r=>`<details><summary>${esc(r.change.message.speaker)} · deleted message</summary><p>${esc(r.change.message.text)}</p><button data-restore-message="${r.id}">Restore message</button></details>`).join('');
     const selections=message ? data.selections.filter(r=>r.id===message.turnId) : data.selections;
     const jev=message ? data.jev.filter(r=>r.turnId===message.turnId) : data.jev;
-    panel.innerHTML=`<h2>${message?'Behind this message':'Turn records'}</h2><p class="muted">${message?esc(message.speaker)+' · '+esc(message.source):'Every attempt survives, including failures and rejected replies.'}</p><button id="all-attempts">All attempts</button> <button id="refresh-evidence">Refresh</button>${message?.source==='imported'?'<p class="notice">Historical prompts, selection methods and raw responses were not saved. Current defaults do not reconstruct them.</p>':''}${message?.review?'<p class="notice">This reply replaced the original through Revise. The linked generation is the candidate as generated; you may have edited it when accepting. The original, your feedback and your judgment are under Revise.</p>':message?.source==='edited'?'<p class="notice">This text was retconned. Any linked generation describes the original text, not the edit.</p>':''}${message?.attachments?.length?'<h3>Shared files</h3>'+messageAttachments(message,current):''}${selections.map(r=>details('Selection · '+r.method+' → '+r.chosen,r)).join('')}${[...attempts].reverse().map(a=>`<details open><summary>${esc(a.persona)} · ${esc(a.provider)} · ${esc(a.outcome?.status||'pending')}<br><span class="muted">${esc(a.body.model)}</span></summary>${a.attachments?.length?details('Attachment inputs sent',a.attachments):''}${details(a.imageDataSummarized?'Dispatched request · image data summarized':'Exact dispatched request', {endpoint:a.endpoint,body:a.body,revision:a.revision,retryOf:a.retryOf})}${a.imageDataSummarized?`<p><a href="/api/attempts/${a.id}/request">Download exact request with image data</a></p>`:''}${a.reasoning?`<details><summary>Reasoning (as returned by provider)</summary><p class="provider-reasoning">${esc(a.reasoning)}</p></details>`:''}${details('Raw response & processing',a.outcome||{status:'pending'})}</details>`).join('')}${jev.map(j=>details('Jev shadow · '+(j.outcome?.status||'pending'),j)).join('')}${!attempts.length?'<p class="muted">No generation attempt for this selection.</p>':''}${removedHtml?'<div class="divider"></div><h2>Deleted messages</h2>'+removedHtml:''}<div class="divider"></div><h2>State history</h2>${data.revisions.slice(0,30).map(r=>details(r.reason+' · '+new Date(r.at).toLocaleTimeString(),r)).join('')}`;
+    panel.innerHTML=`<h2>${message?'Behind this message':'Turn records'}</h2><p class="muted">${message?esc(message.speaker)+' · '+esc(message.source):'Every attempt survives, including failures and rejected replies.'}</p><button id="all-attempts">All attempts</button> <button id="refresh-evidence">Refresh</button>${message?.source==='imported'?'<p class="notice">Historical prompts, selection methods and raw responses were not saved. Current defaults do not reconstruct them.</p>':''}${message?.review?'<p class="notice">This reply replaced the original through Revise. The linked generation is the candidate as generated; you may have edited it when accepting. The original, your feedback and your judgment are under Revise.</p>':message?.source==='edited'?'<p class="notice">This text was retconned. Any linked generation describes the original text, not the edit.</p>':''}${message?.attachments?.length?'<h3>Shared files</h3>'+messageAttachments(message,current):''}${selections.map(r=>details('Selection · '+r.method+' → '+labelOf(s,r.chosen),r)).join('')}${[...attempts].reverse().map(a=>`<details open><summary>${esc(a.persona)} · ${esc(a.provider)} · ${esc(a.outcome?.status||'pending')}<br><span class="muted">${esc(a.body.model)}${a.origin?' · from persona revision '+esc(a.origin.revision.slice(0,8)):''}</span></summary>${details('Identity at dispatch',{personId:a.personId??a.persona,labelAtDispatch:a.labelAtDispatch??a.persona,validationRoster:a.validationRoster??'8 legacy names (recorded before identities were split)',assemblyVersion:a.assemblyVersion??'legacy-v1',origin:a.origin??null})}${a.origin?`<p class="muted">Ran persona revision <code>${esc(a.origin.revision)}</code> <button data-open-vault-item="${esc(a.origin.item)}">Open in vault</button></p>`:''}${a.attachments?.length?details('Attachment inputs sent',a.attachments):''}${details(a.imageDataSummarized?'Dispatched request · image data summarized':'Exact dispatched request', {endpoint:a.endpoint,body:a.body,revision:a.revision,retryOf:a.retryOf})}${a.imageDataSummarized?`<p><a href="/api/attempts/${a.id}/request">Download exact request with image data</a></p>`:''}${a.reasoning?`<details><summary>Reasoning (as returned by provider)</summary><p class="provider-reasoning">${esc(a.reasoning)}</p></details>`:''}${details('Raw response & processing',a.outcome||{status:'pending'})}</details>`).join('')}${jev.map(j=>details('Jev shadow · '+(j.outcome?.status||'pending'),j)).join('')}${!attempts.length?'<p class="muted">No generation attempt for this selection.</p>':''}${removedHtml?'<div class="divider"></div><h2>Deleted messages</h2>'+removedHtml:''}<div class="divider"></div><h2>State history</h2>${data.revisions.slice(0,30).map(r=>details(r.reason+' · '+new Date(r.at).toLocaleTimeString(),r)).join('')}`;
     document.querySelectorAll('[data-restore-message]').forEach(b=>b.onclick=action(async()=>{if(isBusy(current))throw Error('Stop generation before restoring a message.');await api('/branches/'+current+'/messages/restore',{expected:data.branch.head,deletion:b.dataset.restoreMessage});await refresh();}));
     bindAttachmentReaders();
+    panel.querySelectorAll('[data-open-vault-item]').forEach(b=>b.onclick=action(async()=>{await openVault(b.dataset.openVaultItem);}));
     $('#all-attempts').onclick=()=>{selected=null;renderPanel();};$('#refresh-evidence').onclick=action(refresh);
   } else {
     panel.innerHTML=`<h2>Field notes</h2><p class="muted">${selected?'Linked to the selected message.':'Linked to the current branch revision.'} Record what happened, your interpretation, alternatives, and what to test next.</p><textarea id="observation" rows="8" placeholder="Observation…&#10;&#10;Possible explanations…&#10;&#10;Next experiment…"></textarea><button id="save-note" class="primary wide">Save observation</button><p><a href="/api/branches/${current}/notebook">Export Markdown</a></p>${data.observations.map(o=>`<div class="note"><span class="muted">${esc(new Date(o.at).toLocaleString())}</span><br>${esc(o.text)}</div>`).join('')}`;
@@ -271,16 +309,57 @@ function renderPanel(force = true) {
     $('#save-note').onclick=action(async()=>{await api('/branches/'+current+'/observations',{text:$('#observation').value,messageId:selected});$('#observation').value='';await refresh();});
   }
 }
-async function saveSettings(all) {
-  const s=structuredClone(data.branch.revision.state);
-  s.participants=[...document.querySelectorAll('[name=participant]:checked')].map(x=>x.value);
-  s.characters[character]={prompt:$('#prompt').value,memory:$('#memory').value,provider:$('#provider').value,model:$('#model').value,temperature:Number($('#temperature').value),...($('#reasoning').value==='off'?{reasoning:'off'}:{})};
-  if(all) for(const c of Object.values(s.characters)) { c.provider=$('#provider').value;c.model=$('#model').value;c.temperature=Number($('#temperature').value);if($('#reasoning').value==='off')c.reasoning='off';else delete c.reasoning; }
-  s.system=$('#system').value;s.human=$('#human').value;s.shadow=$('#shadow').checked;s.policy=$('#policy').value;
-  const frame=Object.fromEntries(Object.keys(boot.frame).map(k=>[k,$('#frame-'+k).value]));
+// Field-level merge: only the shown person's fields and the shared settings are sent; labels, origins and other people stay as stored.
+function settingsBody(all){
+  const s=data.branch.revision.state,body={expected:data.branch.head,system:$('#system').value,human:$('#human').value,shadow:$('#shadow').checked,policy:$('#policy').value,flow:$('#flow').value,characters:{}};
   // Persist the selected framing explicitly; legacy rooms retain their old framing until edited.
-  s.frame=frame;
-  await api('/branches/'+current+'/settings',{...s,expected:data.branch.head});$('#panel').dataset.key='';await refresh();
+  body.frame=Object.fromEntries(Object.keys(boot.frame).map(k=>[k,$('#frame-'+k).value]));
+  if(character&&s.characters[character]&&$('#prompt'))body.characters[character]={prompt:$('#prompt').value,situation:$('#situation').value,memory:$('#memory').value,provider:$('#provider').value,model:$('#model').value,temperature:Number($('#temperature').value),reasoning:$('#reasoning').value};
+  if(all&&$('#provider'))for(const k of Object.keys(s.characters))body.characters[k]={...body.characters[k],provider:$('#provider').value,model:$('#model').value,temperature:Number($('#temperature').value),reasoning:$('#reasoning').value};
+  return body;
+}
+function settingsChanged(){
+  if(!$('#system'))return false;const s=data.branch.revision.state,b=settingsBody(false),c=b.characters[character],o=s.characters[character];
+  if(b.system!==s.system||b.human!==s.human||b.shadow!==s.shadow||b.policy!==s.policy||b.flow!==(s.flow||'random')||JSON.stringify(b.frame)!==JSON.stringify(s.frame||boot.legacyFrame))return true;
+  return !!c&&!!o&&(c.prompt!==o.prompt||c.situation!==(o.situation||'')||c.memory!==o.memory||c.provider!==o.provider||c.model!==o.model||c.temperature!==o.temperature||c.reasoning!==(o.reasoning||'default'));
+}
+async function saveSettings(all){await api('/branches/'+current+'/settings',settingsBody(all));$('#panel').dataset.key='';await refresh();}
+// Labels a person used to have in this branch's history, for flagging situations that still mention them.
+function formerLabels(d){const s=d.branch.revision.state,out=new Set();for(const r of d.revisions||[])for(const k of Object.keys(r.state.characters))if(s.characters[k]&&labelOf(r.state,k)!==labelOf(s,k))out.add(labelOf(r.state,k));return out;}
+async function addPerson(key){
+  const v=await api('/vault'),personas=v.items.filter(i=>i.type==='persona');
+  const f=await dialog('Add person',`<label>Label in this room<input name="label" required maxlength="80" placeholder="the judge, movie star #1…"></label><label>From persona<select name="persona"><option value="">Blank (write the prompt yourself)</option>${personas.map(p=>`<option value="${p.id}">${esc(p.title)}${p.archived?' (archived)':''} · revision ${esc(p.head.slice(0,8))}</option>`).join('')}</select></label><label>Situation in this room (optional)<textarea name="situation" rows="3" placeholder="Role, wants and relationships here. Not part of the persona."></textarea></label><h3>Instantiation</h3><label>Provider<select name="provider">${['opengateway','together',...(boot.keys.demo?['demo']:[])].map(p=>`<option value="${p}">${p==='demo'?'Local demo (no API calls)':p==='together'?'Together':'OpenGateway'}</option>`).join('')}</select></label><label>Model ID<input name="model" value="deepseek/deepseek-flash" required></label><label>Temperature<input name="temperature" type="number" min="0" max="2" step="0.1" value="0.7"></label><label>Reasoning<select name="reasoning"><option value="default">Provider default</option><option value="off">Off</option></select></label><p class="muted">Two people from one persona are independent: separate labels, situations and memories. Labels: up to 80 characters, one line, no ":".</p>`,'Preview');
+  if(!f)return;
+  const p=f.get('persona'),input={label:f.get('label').trim(),situation:f.get('situation'),provider:f.get('provider'),model:f.get('model'),temperature:Number(f.get('temperature')),reasoning:f.get('reasoning'),...(p?{persona:{item:p,revision:personas.find(x=>x.id===p).head}}:{})};
+  const preview=await api('/branches/'+key+'/people/preview',input);
+  const ok=await dialog(preview.switchRequired?'Switch this room to v2 and add '+input.label+'?':'Add '+input.label+'?',`${preview.switchRequired?`<p class="notice">This room uses legacy assembly. Adding a person switches it to v2, recorded in the same revision:</p><ul>${preview.switchNotes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`:''}<h3>Assembled system message</h3><pre class="compiled">${esc(preview.assembled)||'(empty)'}</pre><p class="muted">No model call is made.</p>`,preview.switchRequired?'Switch to v2 and add':'Add person');
+  if(!ok)return;
+  await api('/branches/'+key+'/people',{...input,expected:records.get(key).branch.head,switchAssembly:preview.switchRequired});
+  $('#panel').dataset.key='';await refresh();
+}
+async function renamePerson(key,person){
+  const rec=records.get(key),s=rec.branch.revision.state,old=labelOf(s,person),legacy=rec.assemblyVersion!=='v2';
+  const f=await dialog('Rename '+old,`<label>New label<input name="label" value="${esc(old)}" required maxlength="80"></label><p class="muted">Earlier lines keep the label they were written under. Situations that mention ${esc(old)} are not rewritten; they are flagged for review.</p>${legacy?'<p class="notice">This room uses legacy assembly. Renaming switches it to v2 in the same revision: replies will be checked against the full cast plus your name instead of the 8 legacy names. Earlier revisions keep legacy behavior.</p>':''}`,legacy?'Switch to v2 and rename':'Rename');
+  if(!f)return;
+  await api('/branches/'+key+'/people/'+encodeURIComponent(person)+'/rename',{expected:rec.branch.head,label:f.get('label').trim(),switchAssembly:legacy});
+  $('#panel').dataset.key='';await refresh();
+}
+async function adoptPersona(key,person){
+  const rec=records.get(key),s=rec.branch.revision.state,st=rec.people[person],item=await api('/vault/'+st.origin.item),persona={item:st.origin.item,revision:item.item.head};
+  const p=await api('/branches/'+key+'/people/'+encodeURIComponent(person)+'/adopt/preview',{persona});
+  const f=await dialog(`Adopt “${item.item.title}” into ${labelOf(s,person)}`,`<p class="muted">Only these fields change, on this branch only. Label, situation, memory and provider settings stay as they are.</p><h3>Personality instructions</h3>${RoomChanges.diff(p.diff)}<h3>Origin</h3><p><code>${esc(p.fields.origin.before?.revision?.slice(0,8)||'none')}</code> → <code>${esc(p.fields.origin.after.revision.slice(0,8))}</code></p>${p.diverged?'<p class="notice">This prompt was edited here. Adopting replaces it with the new compiled text; there is no merge. Cancel to keep your edit.</p>':''}`,p.diverged?'Replace prompt':'Adopt');
+  if(!f)return;
+  await api('/branches/'+key+'/people/'+encodeURIComponent(person)+'/adopt',{expected:rec.branch.head,persona,replace:p.diverged});
+  $('#panel').dataset.key='';await refresh();
+}
+async function adoptTemplate(key){
+  const rec=records.get(key),s=rec.branch.revision.state,itemId=s.origin?.template.item||Object.values(s.templateFields||{})[0]?.item,item=await api('/vault/'+itemId),template={item:itemId,revision:item.item.head};
+  const p=await api('/branches/'+key+'/template/preview',{template}),names={system:'Room instructions',frame:'Harness framing',flow:'Flow'};
+  const f=await dialog(`Adopt from “${item.item.title}”`,`<p class="muted">Choose each field separately. Unchosen fields, the cast and the opening stay as they are.</p>${Object.entries(p.fields).map(([k,x])=>`<fieldset><legend><label class="inline-check"><input type="checkbox" name="field" value="${k}" ${x.available&&x.changed?'':'disabled'}> ${names[k]}</label></legend>${!x.available?'<p class="muted">Not set in this template.</p>':!x.changed?'<p class="muted">Already the same as the template.</p>':`${x.local?'<p class="notice">Changed here. Adopting replaces your value.</p>':''}${RoomChanges.diff(x.diff)}`}</fieldset>`).join('')}<label class="inline-check"><input type="checkbox" name="replace"> Replace values that were changed here</label>`,'Adopt selected');
+  if(!f)return;const fields=f.getAll('field');if(!fields.length)throw Error('Choose at least one field to adopt');
+  if(fields.some(k=>p.fields[k].local)&&!f.get('replace'))throw Error('A chosen field was changed here. Tick “Replace values that were changed here”, or leave it out.');
+  await api('/branches/'+key+'/template/adopt',{expected:rec.branch.head,template,fields,replace:!!f.get('replace')});
+  $('#panel').dataset.key='';await refresh();
 }
 async function deleteMessage(key,messageId){
   if(isBusy(key))throw Error('Stop generation before deleting a message.');
@@ -303,13 +382,16 @@ async function retcon(key,messageId){
 }
 async function editHistory(key){
   if(isBusy(key))throw Error('Stop this conversation before editing history');
-  const source=records.get(key).branch,s=source.revision.state;
-  const row=m=>`<div class="history-row" data-original="${esc(m.id||'')}"><input class="history-speaker" aria-label="Speaker" value="${esc(m.speaker)}">${m.attachments?.length?`<p class="muted">${m.attachments.length} attached file(s) retained with this message.</p>`:''}<textarea class="history-text" aria-label="Message text" rows="3">${esc(m.text)}</textarea><button type="button" data-move="up">↑</button> <button type="button" data-move="down">↓</button> <button type="button" data-remove>Remove</button></div>`;
-  const promise=dialog('Retcon · '+source.name,`<p class="muted">Edit, insert, remove, or reorder messages. Changes apply to this conversation; earlier versions remain in Inspect → State history. Branch first to keep a separate continuation.</p><div id="history-rows">${s.messages.map(row).join('')}</div><button type="button" id="add-history">＋ Insert message</button><label>Retained memories<select name="memory"><option value="keep">Keep current memories</option><option value="clear">Clear memories</option></select></label>`,'Apply retcon');
-  function bind(){document.querySelectorAll('[data-move]').forEach(b=>b.onclick=()=>{const r=b.closest('.history-row');if(b.dataset.move==='up'&&r.previousElementSibling)r.previousElementSibling.before(r);else if(b.dataset.move==='down'&&r.nextElementSibling)r.nextElementSibling.after(r);});document.querySelectorAll('[data-remove]').forEach(b=>b.onclick=()=>b.closest('.history-row').remove());}
+  const rec=records.get(key),source=rec.branch,s=source.revision.state,ids=Object.keys(s.characters);
+  // Attribution is an explicit choice per row; the label text is evidence and is only typed for unbound lines.
+  const refValue=r=>!r?'unbound':r.kind==='person'?'person:'+r.id:r.kind,labelFor=v=>v.startsWith('person:')?labelOf(s,v.slice(7)):v==='human'?s.human:v==='narrator'?'Narrator':null;
+  const options=sel=>`${ids.map(k=>`<option value="person:${esc(k)}" ${sel==='person:'+k?'selected':''}>${esc(labelOf(s,k))}</option>`).join('')}<option value="human" ${sel==='human'?'selected':''}>You (${esc(s.human)})</option><option value="narrator" ${sel==='narrator'?'selected':''}>Narrator</option><option value="unbound" ${sel==='unbound'?'selected':''}>Unbound · label only</option>`;
+  const row=m=>{const sel=m.id?refValue(rec.identity?.[m.id]):'human';return `<div class="history-row" data-original="${esc(m.id||'')}" data-initial="${esc(m.id?sel:'')}"><select class="history-ref" aria-label="Who said this">${options(sel)}</select><input class="history-speaker" aria-label="Label as written" value="${esc(m.speaker)}" ${sel==='unbound'?'':'readonly'}>${m.attachments?.length?`<p class="muted">${m.attachments.length} attached file(s) retained with this message.</p>`:''}<textarea class="history-text" aria-label="Message text" rows="3">${esc(m.text)}</textarea><button type="button" data-move="up">↑</button> <button type="button" data-move="down">↓</button> <button type="button" data-remove>Remove</button></div>`;};
+  const promise=dialog('Retcon · '+source.name,`<p class="muted">Edit, insert, remove, or reorder messages. Text edits keep who said a line; change attribution with the selector. Changes apply to this conversation; earlier versions remain in Inspect → State history. Branch first to keep a separate continuation.</p><div id="history-rows">${s.messages.map(row).join('')}</div><button type="button" id="add-history">＋ Insert message</button><label>Retained memories<select name="memory"><option value="keep">Keep current memories</option><option value="clear">Clear memories</option></select></label>`,'Apply retcon');
+  function bind(){document.querySelectorAll('.history-ref').forEach(sel=>sel.onchange=()=>{const input=sel.closest('.history-row').querySelector('.history-speaker'),label=labelFor(sel.value);input.readOnly=label!==null;if(label!==null)input.value=label;});document.querySelectorAll('[data-move]').forEach(b=>b.onclick=()=>{const r=b.closest('.history-row');if(b.dataset.move==='up'&&r.previousElementSibling)r.previousElementSibling.before(r);else if(b.dataset.move==='down'&&r.nextElementSibling)r.nextElementSibling.after(r);});document.querySelectorAll('[data-remove]').forEach(b=>b.onclick=()=>b.closest('.history-row').remove());}
   bind();$('#add-history').onclick=()=>{$('#history-rows').insertAdjacentHTML('beforeend',row({speaker:s.human,text:''}));bind();};
   const f=await promise;if(!f)return;
-  const messages=[...document.querySelectorAll('.history-row')].map(r=>({id:r.dataset.original,speaker:r.querySelector('.history-speaker').value,text:r.querySelector('.history-text').value}));
+  const messages=[...document.querySelectorAll('.history-row')].map(r=>{const sel=r.querySelector('.history-ref').value,ref=sel.startsWith('person:')?{kind:'person',id:sel.slice(7)}:{kind:sel};return {id:r.dataset.original||undefined,speaker:r.querySelector('.history-speaker').value,text:r.querySelector('.history-text').value,...(sel!==r.dataset.initial?{speakerRef:ref}:{})};});
   const b=await api('/branches/'+key+'/history',{expected:source.head,messages,memory:f.get('memory')});await refresh();
 }
 async function showFamily(key){
@@ -323,7 +405,10 @@ async function showFamily(key){
 }
 $('#new-experiment').onclick=action(()=>editExperimentDesign());
 $('#diff-panes').onclick=action(async()=>{paneChanges=await api('/changes',{left:comparison.left,right:comparison.right});tab='changes';renderPanel();});
-$('#new').onclick=action(async()=>{const f=await dialog('Start a room','<label>Name<input name="name" value="A new conversation" required></label>','Create room');if(f){const b=await api('/branches',{name:f.get('name')});await choose(b.id);}});
+// Every new room is v2: empty, or a one-time snapshot of a room template.
+$('#new').onclick=action(async()=>{const v=await api('/vault'),templates=v.items.filter(i=>i.type==='room-template'&&!i.archived);
+  const f=await dialog('Start a room',`<label>Name<input name="name" value="A new conversation" required></label><label>Start from<select name="template"><option value="">Empty room · add people afterwards</option>${templates.map(t=>`<option value="${t.id}">Template · ${esc(t.title)}</option>`).join('')}</select></label><p class="muted">A template's room instructions, framing, flow, opening and cast are copied once. Later template revisions reach the room only when you adopt them there.</p>`,'Create room');
+  if(f){const t=f.get('template'),b=await api('/branches',{name:f.get('name'),...(t?{template:{item:t,revision:templates.find(x=>x.id===t).head}}:{})});await choose(b.id);}});
 $('#fork').onclick=action(()=>forkAt(current));$('#history').onclick=action(()=>editHistory(current));
 $('#delete').onclick=action(async()=>{
   const source=data.branch,subtree=new Set([source.id]);
@@ -375,6 +460,7 @@ $('#show-jev').checked=showJev;
 $('#show-jev').onchange=()=>{showJev=$('#show-jev').checked;localStorage.setItem('room-show-jev',String(showJev));$('#jev-refresh-status').textContent='';paintJev();scheduleJevPoll();};
 $('#refresh-jev').onclick=()=>{clearTimeout(jevTimer);void refreshJevObservations(++jevPollVersion,0,true);};
 for(const name of ['conversations','comparisons','experiments','trash','favorites','dislikes'])$('#show-'+name).onclick=()=>{category=name;marked.stale=true;renderLibrary();};
+$('#show-vault').onclick=action(()=>openVault());
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;renderPanel();});
-action(async()=>{const savedExperiment=localStorage.getItem('room-experiment');if(savedExperiment){try{experimentPage=await api('/experiments/'+savedExperiment);category='experiments';}catch{localStorage.removeItem('room-experiment');}}const saved=localStorage.getItem('room-comparison');if(saved){try{comparison=await api('/comparisons/'+saved);current=comparison.left;}catch{localStorage.removeItem('room-comparison');}}await refresh();})();
+action(async()=>{const savedExperiment=localStorage.getItem('room-experiment');if(savedExperiment){try{experimentPage=await api('/experiments/'+savedExperiment);category='experiments';}catch{localStorage.removeItem('room-experiment');}}const saved=localStorage.getItem('room-comparison');if(saved){try{comparison=await api('/comparisons/'+saved);current=comparison.left;}catch{localStorage.removeItem('room-comparison');}}await refresh();if(category==='vault')await openVault();})();
 $('#back').onclick=()=>history.back();

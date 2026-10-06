@@ -1,12 +1,13 @@
 import type { State } from './engine';
 import { DEFAULT_FRAME } from '../speakerTurn';
+import { labelOf } from './identity';
 const escape=(value:string)=>value.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 // A standalone print document: no research records, credentials or provider responses.
 export function transcriptExport(name:string,state:State) {
   const title=name.replace(/(?: · (?:compare copy|history retcon|retcon))+$/g,'');
   const block=(heading:string,text:string)=>text.trim()?`<section class="prompt"><h3>${escape(heading)}</h3><div class="copy">${escape(text)}</div></section>`:'';
   const frame=state.frame||DEFAULT_FRAME;
-  const characters=state.participants.map(name=>{const c=state.characters[name];return `<section class="character"><h2>${escape(name)}</h2>${block('Personality instructions',c.prompt)}${block('Retained memory',c.memory)}${!c.prompt.trim()&&!c.memory.trim()?'<p class="muted">No personality instructions or retained memory.</p>':''}</section>`;}).join('');
+  const characters=state.participants.map(person=>{const c=state.characters[person];return `<section class="character"><h2>${escape(labelOf(state,person))}</h2>${block('Situation in this room',c.situation||'')}${block('Personality instructions',c.prompt)}${block('Retained memory',c.memory)}${!c.prompt.trim()&&!c.memory.trim()?'<p class="muted">No personality instructions or retained memory.</p>':''}</section>`;}).join('');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)} — Room transcript</title><link rel="stylesheet" href="/transcript.css"><script src="/transcript.js" defer></script></head><body>
   <nav class="print-tools"><span>Transcript &amp; current prompts</span><button id="print">Save as PDF / Print</button><p>In the print dialog, choose Save as PDF. Turn off browser headers and footers for a clean document.</p></nav>
   <main><header><div class="eyebrow">THE ROOM / TRANSCRIPT</div><h1>${escape(title)}</h1><p class="meta">${state.messages.length} messages · ${state.participants.length} active characters</p></header>

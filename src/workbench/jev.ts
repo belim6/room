@@ -2,14 +2,16 @@ import { createHash } from 'node:crypto';
 import { Store, id } from './store';
 import { attachmentTranscript } from './attachments';
 import type { State } from './engine';
+import { labelOf } from './identity';
 export async function shadowJev(store: Store, state: State, branch: string, revision: string, turnId: string, transport: typeof fetch = fetch) {
   const questions = {
     next_speaker: { type: 'choice', instructions: 'Choose the participant whose specific concerns can most advance the latest_message in transcript. Refer to character criteria. Avoid the last speaker when alternatives exist. Do not choose for fairness.',
-      criteria: Object.fromEntries(state.participants.map(p => [p, { what: state.characters[p].prompt }])) },
+      criteria: Object.fromEntries(state.participants.map(p => [labelOf(state, p), { what: state.characters[p].prompt }])) },
     needs_research: { type: 'noul', instructions: 'Would answering the latest_message materially benefit from looking up a verifiable external fact not already present in transcript? Values, jokes and speculation alone do not require research.' },
   };
   const transcript = state.messages.slice(-20).map(m => attachmentTranscript(store,[m]).transcript);
-  const body = { model: 'jev-latest', state: { room: state.system, participants: state.participants, transcript,
+  // Jev sees labels, never person IDs.
+  const body = { model: 'jev-latest', state: { room: state.system, participants: state.participants.map(p => labelOf(state, p)), transcript,
     latest_message: transcript.at(-1) || '(none)', last_speaker: state.messages.at(-1)?.speaker || '(none)' }, questions };
   const key = id(); const start = Date.now();
   store.put('jev-requests', key, { id: key, branch, revision, turnId, mode: 'shadow', at: new Date().toISOString(),
