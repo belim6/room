@@ -695,3 +695,57 @@ test('readable transcript export includes current prompts, escapes text and excl
     assert.equal(e.read(b.id).head,b.head);assert.equal(s.list('attempts').length,0);
   }finally{await new Promise<void>(r=>server.close(()=>r()));}
 });
+
+// ---- Stage 0: backup and restore (§9.17) ----
+import { preflight, backup, verifyRestore, manifest } from '../src/workbench/backup';
+import { recoverOnStartup } from '../src/workbench/server';
+async function listen(e: ProductionEngine) { const app=createApp(e),server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));return {app,server,base:`http://127.0.0.1:${(server.address() as any).port}`,close:()=>new Promise<void>(r=>server.close(()=>r()))}; }
+const json=(body:any)=>({method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+test('backup preflight refuses active work, treats an unreachable API as failed, and pauses mutations while quiesced',async()=>{
+  assert.match((await preflight('http://127.0.0.1:9')).reason!,/preflight failed.*unreachable/);
+  const e=new ProductionEngine(store()),{base,close}=await listen(e);
+  try {
+    e.active.set('busy',{controller:new AbortController(),turnId:'t'});
+    const refused=await preflight(base);assert.equal(refused.ok,false);assert.match(refused.reason!,/1 active turn/);
+    assert.equal((await (await fetch(base+'/api/admin/activity')).json() as any).quiesced,false,'a refused preflight leaves the server unpaused');
+    e.active.delete('busy');e.store.put('jev-requests','pending',{id:'pending'});
+    assert.match((await preflight(base)).reason!,/shadow/);e.store.put('jev-results','pending',{id:'pending',status:'completed'});
+    assert.deepEqual(await preflight(base),{ok:true});
+    assert.equal((await fetch(base+'/api/branches',json({}))).status,503);assert.equal(e.store.list('branches').length,0);
+    await fetch(base+'/api/admin/quiesce',json({on:false}));
+    assert.equal((await fetch(base+'/api/branches',json({}))).status,200);
+  } finally { await close(); }
+});
+test('backup copies offline with a verified manifest, reloads the service, and marks a bad copy INCOMPLETE',async()=>{
+  const data=store(),e=new ProductionEngine(data);let b=e.create('Kept');b=e.message(b.id,b.head,'Remember this');
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'room-backups-'));roots.push(root);const calls:string[]=[];
+  const service={async stop(){calls.push('stop');},async start(){calls.push('start');}};
+  const ok=await backup({dataDir:data.root,backupRoot:root,apiBase:'http://127.0.0.1:9',service,appDir:process.cwd(),offlineConfirmed:true,holders:()=>[]});
+  assert(ok.ok);assert.deepEqual(calls,['stop','start']);
+  assert(!fs.existsSync(path.join(ok.dir!,'INCOMPLETE')));assert.equal(fs.statSync(ok.dir!).mode&0o777,0o700);
+  assert.deepEqual(manifest(path.join(ok.dir!,'data')),JSON.parse(fs.readFileSync(path.join(ok.dir!,'manifest.json'),'utf8')));
+  const meta=JSON.parse(fs.readFileSync(path.join(ok.dir!,'metadata.json'),'utf8'));assert.equal(meta.status,'complete');assert.match(meta.gitRevision,/^[0-9a-f]{40}$/);
+  assert.equal((await backup({dataDir:data.root,backupRoot:root,apiBase:'http://127.0.0.1:9',service,appDir:process.cwd()})).status,'preflight failed');assert.equal(calls.length,2,'no service change without a preflight');
+  await new Promise(r=>setTimeout(r,1100));
+  const bad=await backup({dataDir:data.root,backupRoot:root,apiBase:'',service,appDir:process.cwd(),offlineConfirmed:true,holders:()=>[],copy:(from,to)=>{fs.cpSync(from,to,{recursive:true});fs.rmSync(path.join(to,'branches'),{recursive:true});}});
+  assert.equal(bad.ok,false);assert.equal(bad.status,'INCOMPLETE');assert(fs.existsSync(path.join(bad.dir!,'INCOMPLETE')));assert.equal(calls.at(-1),'start');
+  assert.equal((await verifyRestore({backup:bad.dir!,repoDir:process.cwd()})).ok,false);
+  const held=await backup({dataDir:data.root,backupRoot:root,apiBase:'',service,appDir:process.cwd(),offlineConfirmed:true,holders:()=>[123],waitMs:300});
+  assert.equal(held.ok,false);assert.match(held.reason!,/still holds/);assert.equal(calls.at(-1),'start');
+});
+test('restore verification opens the copy read-only without writing; read-only mode skips recovery and legacy conversion',async()=>{
+  const data=store(),e=new ProductionEngine(data);let b=e.create('Restorable');b=e.message(b.id,b.head,'Hello');
+  data.put('attempts','orphan',{id:'orphan',branch:b.id,body:{messages:[]}});
+  const right=e.create('Other');data.put('comparisons','legacy',{id:'legacy',version:'v',name:'Legacy pair',left:b.id,right:right.id,parent:null,createdAt:'2026-09-22',updatedAt:'2026-09-22'});
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'room-backups-'));roots.push(root);
+  const copy=await backup({dataDir:data.root,backupRoot:root,apiBase:'',service:{async stop(){},async start(){}},appDir:process.cwd(),offlineConfirmed:true,holders:()=>[]});
+  const report=await verifyRestore({backup:copy.dir!,repoDir:process.cwd(),appDir:process.cwd()});
+  assert(report.ok,report.reason);assert.equal(report.rooms,2);assert.equal(report.comparisons,1);
+  const ro=new Store(data.root,true),before=manifest(data.root),{app,base,close}=await listen(new ProductionEngine(ro));
+  try {
+    recoverOnStartup(app,ro);
+    assert.equal((await fetch(base+'/api/comparisons/legacy')).status,200);assert.equal((await fetch(base+'/api/bootstrap')).status,200);
+    assert.equal((await fetch(base+'/api/branches',json({}))).status,403);
+    assert.throws(()=>ro.put('branches','x',{}),/read-only/);assert.deepEqual(manifest(data.root),before);
+  } finally { await close(); }
+});

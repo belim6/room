@@ -24,7 +24,8 @@ export const ENDPOINTS = {
 // Only switches probed against the live provider; an unverified parameter is never sent silently.
 const REASONING_OFF: Partial<Record<Provider, object>> = { opengateway: { thinking: { type: 'disabled' } }, demo: {} };
 export const reasoningSwitchVerified = (provider: Provider) => provider in REASONING_OFF;
-export function defaultStore() { return new Store(process.env.ROOM_DATA_DIR || path.resolve('.room-data')); }
+export const readonlyMode = () => process.env.ROOM_READONLY === '1';
+export function defaultStore() { return new Store(process.env.ROOM_DATA_DIR || path.resolve('.room-data'), readonlyMode()); }
 export async function generate(input: GenerationInput, store = defaultStore(), transport: typeof fetch = fetch) {
   if (input.provider === 'demo' && !demoEnabled()) throw Error(`${input.persona} uses local demo, which is only available on instances started with ROOM_DEMO=1. Choose OpenGateway or Together in Characters.`);
   if (input.reasoning === 'off' && !reasoningSwitchVerified(input.provider)) throw Error(`Turning reasoning off is not verified for ${input.provider}`);

@@ -4,13 +4,15 @@ import { randomUUID } from 'node:crypto';
 export const id = () => randomUUID();
 export const clone = <T>(value: T): T => structuredClone(value);
 export class Store {
-  constructor(public root: string) { fs.mkdirSync(root, { recursive: true, mode: 0o700 }); }
+  // Read-only instances (ROOM_READONLY=1, restore verification) refuse every write instead of creating files.
+  constructor(public root: string, public readOnly = false) { if (!readOnly) fs.mkdirSync(root, { recursive: true, mode: 0o700 }); }
   file(kind: string, key: string) {
     if (!/^[a-z-]+$/.test(kind) || !/^[a-zA-Z0-9_-]+$/.test(key)) throw Error('Invalid record identifier');
     return path.join(this.root, kind, key + '.json');
   }
   put(kind: string, key: string, value: unknown) {
     const target = this.file(kind, key);
+    if (this.readOnly) throw Error('This instance is read-only; nothing was saved.');
     fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
     const temp = target + '.' + id() + '.tmp';
     const fd = fs.openSync(temp, 'wx', 0o600);

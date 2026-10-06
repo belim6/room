@@ -5,7 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { Engine, initialState, type Revision } from './engine';
 import { defaultStore, reasoningOf, demoEnabled } from './generation';
-import { id } from './store';
+import { id, Store } from './store';
 import { Alternatives } from './alternatives';
 import { Comparisons } from './comparisons';
 import { Experiments } from './experiments';
@@ -31,6 +31,14 @@ export function createApp(engine = new Engine(defaultStore())) {
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (req.path.startsWith('/api/')) res.setHeader('Cache-Control','no-store');
+    next();
+  });
+  // Backup preflight asks the server to hold still; a read-only instance (restore verification) never mutates.
+  app.locals.quiesced = false;
+  app.use('/api', (req, res, next) => {
+    if (req.method === 'GET' || req.method === 'HEAD') return next();
+    if (engine.store.readOnly) return res.status(403).json({ error: 'This instance is read-only.' });
+    if (app.locals.quiesced && !req.path.startsWith('/admin/')) return res.status(503).json({ error: 'A backup is in progress; changes are paused.' });
     next();
   });
   app.use('/api/attachments', express.raw({type:'application/octet-stream',limit:'10mb'}));
@@ -71,11 +79,19 @@ export function createApp(engine = new Engine(defaultStore())) {
       observations: store.list('observations').filter(r => r.branch === branch), edits: store.list('edits').filter(r => r.branch === branch),
       jev: store.list('jev-requests').filter(relevant).map(r => ({ ...r, outcome: jevResults.get(r.id) || null })) };
   };
+  const activity = () => {
+    const done = new Set(store.list('jev-results').map(r => r.id));
+    const value = { turns: [...engine.active.keys()], experiments: [...experiments.active.keys()], candidates: [...alternatives.active.keys()],
+      shadow: store.list('jev-requests').filter(r => !done.has(r.id)).map(r => r.id), quiesced: !!app.locals.quiesced, readOnly: store.readOnly };
+    return { ...value, busy: !!(value.turns.length || value.experiments.length || value.candidates.length || value.shadow.length) };
+  };
+  app.get('/api/admin/activity', route((_req,res) => res.json(activity())));
+  app.post('/api/admin/quiesce', route((req,res) => { if (typeof req.body.on !== 'boolean') throw Error('Choose on or off'); app.locals.quiesced = req.body.on; res.json(activity()); }));
   app.get('/api/bootstrap', route((_req,res) => {
     const saved = comparisons.list(), library = engine.library();
     const trials = experiments.trialBranches();
     res.json({ ...library, attachments:attachmentCapabilities(), branches: library.branches.map(b => trials.has(b.id) ? { ...b, isTrial: true } : b), comparisons: saved, experiments: experiments.list(), reactions: reactions(),
-      frame: EMPTY_FRAME, legacyFrame: DEFAULT_FRAME, keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY, demo: demoEnabled() },
+      frame: EMPTY_FRAME, legacyFrame: DEFAULT_FRAME, readOnly: store.readOnly, keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY, demo: demoEnabled() },
       active: [...engine.active.keys()] });
   }));
   app.get('/api/branches/:id/changes', route((req,res) => res.json(changes(req.params.id))));
@@ -209,19 +225,24 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.use((err: any,_req: any,res: any,_next: any) => res.status(err.code === 'ENOENT' ? 404 : 400).json({ error: err.message || 'Request failed' }));
   return app;
 }
+// Marks interrupted work after a restart. Skipped on read-only instances, which must not write.
+export function recoverOnStartup(app: express.Express, store: Store) {
+  if (store.readOnly) return;
+  // Discord uses the same attempt store but owns its own in-flight requests.
+  for (const attempt of store.attempts()) if (attempt.branch && !attempt.outcome) store.put('outcomes', attempt.id, { id: attempt.id, status: 'interrupted', error: 'Process ended before an outcome was recorded' });
+  const done = new Set(store.list('jev-results').map(r => r.id));
+  for (const r of store.list('jev-requests')) if (!done.has(r.id)) store.put('jev-results',r.id,{ id:r.id,status:'interrupted',error:'Process ended before a result was recorded' });
+  app.locals.experiments.recover();
+  app.locals.alternatives.recover();
+}
 if (require.main === module) {
   const store = defaultStore();
   const port = Number(process.env.ROOM_PORT || 4317);
   const app = createApp(new Engine(store));
   const server = app.listen(port, '127.0.0.1', () => {
     // Only recover browser requests after successfully acquiring the listening port.
-    // Discord uses the same attempt store but owns its own in-flight requests.
-    for (const attempt of store.attempts()) if (attempt.branch && !attempt.outcome) store.put('outcomes', attempt.id, { id: attempt.id, status: 'interrupted', error: 'Process ended before an outcome was recorded' });
-    const done = new Set(store.list('jev-results').map(r => r.id));
-    for (const r of store.list('jev-requests')) if (!done.has(r.id)) store.put('jev-results',r.id,{ id:r.id,status:'interrupted',error:'Process ended before a result was recorded' });
-    app.locals.experiments.recover();
-    app.locals.alternatives.recover();
-    console.log(`Room workbench: http://127.0.0.1:${port}`);
+    recoverOnStartup(app, store);
+    console.log(`Room workbench: http://127.0.0.1:${port}${store.readOnly ? ' (read-only)' : ''}`);
   });
   server.on('error', err => { console.error(err.message); process.exitCode = 1; });
 }
