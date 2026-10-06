@@ -5,14 +5,17 @@ import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 // Backups are taken offline: preflight asks the live server to hold still, then the service is unloaded, copied and reloaded.
-export interface ServiceControl { stop(): Promise<void>; start(): Promise<void> }
+// stop() resolves false when the service was not running; it is then left stopped afterwards.
+export interface ServiceControl { stop(): Promise<boolean | void>; start(): Promise<void> }
 export interface Entry { path: string; size: number; sha256: string }
 type Log = (line: string) => void;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 export function launchdService(label: string, plist: string): ServiceControl {
   const target = `gui/${process.getuid!()}`;
   // bootout unloads the job, so KeepAlive cannot respawn it; never kill the process directly.
-  return { async stop() { execFileSync('launchctl', ['bootout', `${target}/${label}`], { stdio: 'pipe' }); },
+  return { async stop() {
+      try { execFileSync('launchctl', ['print', `${target}/${label}`], { stdio: 'pipe' }); } catch { return false; }
+      execFileSync('launchctl', ['bootout', `${target}/${label}`], { stdio: 'pipe' }); return true; },
     async start() { execFileSync('launchctl', ['bootstrap', target, plist], { stdio: 'pipe' }); } };
 }
 export function processHolders(dir: string): number[] {
@@ -60,7 +63,7 @@ export async function backup(o: BackupOptions) {
   else log('Preflight skipped (--offline-confirmed).');
   let stopped = false, dest: string | null = null;
   try {
-    await o.service.stop(); stopped = true; log('Service unloaded.');
+    stopped = (await o.service.stop()) !== false; log(stopped ? 'Service unloaded.' : 'Service was not loaded; it stays stopped.');
     const deadline = Date.now() + (o.waitMs ?? 15000);
     while (holders(o.dataDir).length) { if (Date.now() > deadline) throw Error('A process still holds the data directory after unloading the service'); await sleep(250); }
     fs.mkdirSync(o.backupRoot, { recursive: true, mode: 0o700 });
@@ -91,7 +94,9 @@ export async function backup(o: BackupOptions) {
 }
 const freePort = () => new Promise<number>((resolve, reject) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as net.AddressInfo).port; s.close(() => resolve(p)); }); s.on('error', reject); });
 const spread = <T>(items: T[], n: number) => items.length <= n ? items : Array.from({ length: n }, (_, i) => items[Math.floor(i * (items.length - 1) / (n - 1 || 1))]);
-export interface VerifyOptions { backup: string; repoDir: string; appDir?: string; sample?: number; log?: Log; keep?: boolean }
+// repoDir defaults to the app directory recorded in the backup. An explicit appDir runs other code than the recorded revision,
+// which proves compatibility with that code, not a matching-version restore.
+export interface VerifyOptions { backup: string; repoDir?: string; appDir?: string; sample?: number; log?: Log; keep?: boolean }
 // Restores into a disposable directory and opens a sample read-only, with the app version that wrote the backup.
 export async function verifyRestore(o: VerifyOptions) {
   const log = o.log || (() => {}), meta = JSON.parse(fs.readFileSync(path.join(o.backup, 'metadata.json'), 'utf8'));
@@ -104,11 +109,13 @@ export async function verifyRestore(o: VerifyOptions) {
   try {
     fs.cpSync(path.join(o.backup, 'data'), data, { recursive: true });
     let app = o.appDir;
+    const repo = o.repoDir ?? meta.appDir;
     if (!app) {
+      if (!repo) throw Error('The backup does not record its app directory; pass one explicitly.');
       if (!meta.gitRevision) throw Error('The backup has no recorded app revision; pass an app directory explicitly.');
       app = path.join(temp, 'app'); fs.mkdirSync(app);
-      execFileSync('sh', ['-c', 'git -C "$1" archive "$2" | tar -x -C "$3"', 'sh', o.repoDir, meta.gitRevision, app]);
-      fs.symlinkSync(path.join(o.repoDir, 'node_modules'), path.join(app, 'node_modules'));
+      execFileSync('sh', ['-c', 'git -C "$1" archive "$2" | tar -x -C "$3"', 'sh', repo, meta.gitRevision, app]);
+      fs.symlinkSync(path.join(repo, 'node_modules'), path.join(app, 'node_modules'));
       if (meta.gitDirty) log('Note: the app had uncommitted changes when the backup was taken; verifying with the committed revision.');
     }
     if (!fs.readFileSync(path.join(app, 'src/workbench/generation.ts'), 'utf8').includes('ROOM_READONLY')) throw Error('The app version for this backup has no read-only mode, so opening it could write. Verify with a newer app directory.');
@@ -128,7 +135,7 @@ export async function verifyRestore(o: VerifyOptions) {
     child.kill('SIGTERM'); await new Promise(r => child!.exitCode !== null ? r(null) : child!.once('exit', r)); child = null;
     const writes = compareManifests(expected, manifest(data));
     if (writes.length) throw Error(`Opening the restored copy changed it (${writes.length} change(s), first: ${writes[0]})`);
-    return { ok: true, opened, rooms: boot.branches.length, comparisons: boot.comparisons.length, experiments: boot.experiments.length, files: expected.length, restoredTo: o.keep ? temp : null };
+    return { ok: true, mode: o.appDir ? 'compatibility with newer code' : 'matching-version restore', appRevision: o.appDir ? null : meta.gitRevision, opened, rooms: boot.branches.length, comparisons: boot.comparisons.length, experiments: boot.experiments.length, files: expected.length, restoredTo: o.keep ? temp : null };
   } catch (e: any) { return { ok: false, reason: e.message };
   } finally { if (child) child.kill('SIGTERM'); if (!o.keep) fs.rmSync(temp, { recursive: true, force: true }); }
 }

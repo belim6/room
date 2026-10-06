@@ -1,16 +1,19 @@
 // npm run backup [-- --offline-confirmed]   ·   npm run backup:verify-restore -- <backup directory>
 // Defaults match the stable launchd service; override with ROOM_DATA_DIR, ROOM_BACKUP_DIR, ROOM_PORT,
-// ROOM_SERVICE_LABEL, ROOM_SERVICE_PLIST, ROOM_APP_DIR. ROOM_SERVICE_LABEL=none skips service control (scratch instances).
+// ROOM_SERVICE_LABEL, ROOM_SERVICE_PLIST, ROOM_APP_DIR (default ~/dev/room-stable), ROOM_VERIFY_APP_DIR. ROOM_SERVICE_LABEL=none skips service control (scratch instances).
 import os from 'node:os';
 import path from 'node:path';
 import { backup, verifyRestore, launchdService, type ServiceControl } from '../src/workbench/backup';
 const home = os.homedir(), args = process.argv.slice(2), log = (line: string) => console.log(line);
-const appDir = process.env.ROOM_APP_DIR || process.cwd();
+// The app version actually serving the data (the stable worktree by default), recorded in the backup.
+const appDir = path.resolve(process.env.ROOM_APP_DIR || path.join(home, 'dev/room-stable'));
 async function main() {
   if (args[0] === 'verify-restore') {
     const target = args[1];
     if (!target) throw Error('Usage: npm run backup:verify-restore -- <backup directory>');
-    const result = await verifyRestore({ backup: path.resolve(target), repoDir: appDir, appDir: process.env.ROOM_VERIFY_APP_DIR, log, keep: args.includes('--keep') });
+    const verifyApp = process.env.ROOM_VERIFY_APP_DIR;
+    if (verifyApp) log(`Using ${verifyApp} instead of the recorded revision: this checks compatibility with newer code, not a matching-version restore.`);
+    const result = await verifyRestore({ backup: path.resolve(target), ...(process.env.ROOM_APP_DIR ? { repoDir: appDir } : {}), appDir: verifyApp, log, keep: args.includes('--keep') });
     console.log(JSON.stringify(result, null, 2)); if (!result.ok) process.exitCode = 1; return;
   }
   const label = process.env.ROOM_SERVICE_LABEL || 'com.deniz.room';
