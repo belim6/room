@@ -749,3 +749,269 @@ test('restore verification opens the copy read-only without writing; read-only m
     assert.throws(()=>ro.put('branches','x',{}),/read-only/);assert.deepEqual(manifest(data.root),before);
   } finally { await close(); }
 });
+
+// ---- Stage 1 acceptance (§9) ----
+import { scenarios, capture } from './legacyScenarios';
+import { Vault, compileV1 } from '../src/workbench/vault';
+import { People } from '../src/workbench/people';
+import { Runs, statusOf } from '../src/workbench/runs';
+import { resolveSpeaker, LEGACY_NAMES } from '../src/workbench/identity';
+import { reviseIdentity } from '../src/workbench/alternatives';
+import { checkSpeakerReply, WrongSpeakerError, EMPTY_FRAME } from '../src/speakerTurn';
+// A recording transport: every provider call is counted, and replies can be scripted per call.
+function recorder(script:(n:number,body:any)=>string|Response='Fine.' as any){const calls:any[]=[];const transport=async(_u:any,opts:any)=>{const body=JSON.parse(String(opts?.body));calls.push(body);const r=typeof script==='function'?script(calls.length,body):script;return r instanceof Response?r:new Response(JSON.stringify({choices:[{message:{content:r},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:5}}));};return {calls,transport:transport as typeof fetch};}
+function world(script?:any){const s=store(),r=recorder(script),e=new ProductionEngine(s,r.transport),vault=new Vault(s),people=new People(e,vault),runs=new Runs(e);vault.seedKinds();return {s,e,vault,people,runs,calls:r.calls};}
+function persona(vault:Vault,texts:string[],extra=''){
+  const kinds=vault.kinds(),parts=texts.map((text,i)=>vault.create({type:'component',title:'part '+i,content:{text,kind:kinds[i%kinds.length].id}}));
+  return {parts,persona:vault.create({type:'persona',title:'the stoic',content:{components:parts.map(p=>({item:p.item.id,revision:p.item.head})),extra}})};
+}
+const ref=(d:any)=>({item:d.item.id,revision:d.item.head});
+const person=(state:any,label:string)=>Object.keys(state.characters).find(k=>(state.characters[k].label??k)===label)!;
+
+test('§9.1 legacy first requests and retries are byte-identical to golden fixtures',async()=>{
+  const golden=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/legacy-requests.json'),'utf8'));
+  assert.deepEqual(Object.keys(golden),Object.keys(scenarios));
+  for(const name of Object.keys(scenarios)){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'room-golden-'));roots.push(dir);assert.deepEqual(await capture(dir,name),golden[name],name);}
+});
+test('§9.2 legacy collisions and unresolved imported speakers open, export and replay without rewrites',async()=>{
+  const {s,e}=world('Fine.'),state=initialState();delete state.frame;state.human='Boris';
+  state.messages=[{id:'h',speaker:'Boris',text:'I am the human Boris',source:'human'},{id:'g',speaker:'Boris',text:'I am the character',source:'generated',turnId:'t'},{id:'x',speaker:'Boris',text:'Who wrote this?',source:'edited'},{id:'i',speaker:'Stranger',text:'Unknown voice',source:'imported'},{id:'r',speaker:'Rook',text:'Imported Rook',source:'imported'}];
+  const b=e.create('Collision',state),{base,close}=await listen(e);
+  try{
+    const before=manifest(s.root);
+    const opened:any=await (await fetch(base+'/api/branches/'+b.id)).json();
+    assert.deepEqual(opened.identity,{h:{kind:'human'},g:{kind:'person',id:'Boris'},x:{kind:'unbound'},i:{kind:'unbound'},r:{kind:'person',id:'Rook'}});
+    assert.equal((await fetch(base+'/api/branches/'+b.id+'/export')).status,200);assert.equal((await fetch(base+'/api/branches/'+b.id+'/transcript')).status,200);
+    const imported=await (await fetch(base+'/api/import',json({id:'save',history:['Dennis: hi','Somebody: odd','Boris: hello'],participants:['Boris']}))).json() as any;
+    const after=manifest(s.root),changed=after.filter(f=>before.some(x=>x.path===f.path&&x.sha256!==f.sha256));assert.deepEqual(changed,[],'opening and exporting rewrite nothing');
+    assert.deepEqual(Object.values((await (await fetch(base+'/api/branches/'+imported.id)).json() as any).identity),[{kind:'human'},{kind:'unbound'},{kind:'person',id:'Boris'}]);
+    const replay=e.fork(b.id,b.head,'Replay');await e.turn(replay.id,replay.head,'Ilya');assert.equal(s.get('revisions',b.head).state.messages.length,5);
+  }finally{await close();}
+});
+test('§9.3 legacy experiments reopen with their evidence; a new experiment measures a non-legacy instance',async()=>{
+  const w=world('I vote Elorin.'),{s,vault,people}=w,e=new Engine(s,recorder('I vote Elorin.').transport),x=new Experiments(e);
+  const input=design(e);input.conditions[1].patch={frame:{...DEFAULT_FRAME,turn:''},human:'Moderator'} as any;
+  const exp=x.create(input);x.run(exp.id,1,exp.version);await x.active.get(exp.id)?.done;
+  // Strip the identity fields new attempts carry, so the records look like Exp1–5 / B-series evidence on disk.
+  for(const a of s.list('attempts')){for(const k of ['personId','labelAtDispatch','validationRoster','assemblyVersion'])delete a[k];s.put('attempts',a.id,a);}
+  let d=x.detail(exp.id);assert.equal(d.trials.length,2);assert(d.trials.every((t:any)=>t.status==='completed'&&t.effectiveOutcome==='Elorin'&&t.reply==='I vote Elorin.'));
+  let manual=e.fork(input.base.branch,input.base.revision,'B-style attached');manual=await e.turn(manual.id,manual.head,'Boris');x.attach(exp.id,{condition:'A',branch:manual.id});
+  assert.equal(x.detail(exp.id).trials.length,3);
+  const {persona:p}=persona(vault,['steady']);let room=people.createRoom({name:'New'});room=people.add(room.id,{expected:room.head,label:'the judge',persona:ref(p)});
+  const judge=person(room.revision.state,'the judge');room=e.message(room.id,room.head,'Verdict?');
+  const v2={name:'v2',question:'q',prediction:'p',base:{branch:room.id,revision:room.head},speaker:judge,conditions:[{key:'A',label:'Control',control:true,patch:{}},{key:'B',label:'Situation',patch:{characters:{[judge]:{situation:'You are tired.'}}}}],outcome:{pattern:'I vote (\\w+)'}};
+  const exp2=x.create(v2);x.run(exp2.id,1,exp2.version);await x.active.get(exp2.id)?.done;
+  d=x.detail(exp2.id);assert(d.trials.every((t:any)=>t.status==='completed'));assert.equal(d.conditions[1].character.situation,'You are tired.');
+  const sent=s.attempts().filter(a=>a.personId===judge);assert.equal(sent.length,2);assert(sent.every(a=>a.labelAtDispatch==='the judge'&&a.assemblyVersion==='v2'));
+  assert(sent.some(a=>a.body.messages[0].content.includes('You are tired.')));
+  assert.throws(()=>applyPatch(s.get('revisions',input.base.revision).state,{characters:{Boris:{label:'Judge'}}}),/legacy assembly/);
+  assert.equal(applyPatch(s.get('revisions',input.base.revision).state,{assemblyVersion:'v2',characters:{Boris:{label:'Judge'}}}).characters.Boris.label,'Judge');
+  assert.throws(()=>applyPatch(room.revision.state,{characters:{[judge]:{origin:{item:'a',revision:'b'}}}} as any),/Unknown character field/);
+});
+test('§9.4 empty room → add person → generate',async()=>{
+  const {s,e,calls}=world('Hello there.'),{base,close}=await listen(e);
+  try{
+    let b:any=await (await fetch(base+'/api/branches',json({name:'Fresh'}))).json();
+    assert.equal(b.revision.state.assemblyVersion,'v2');assert.deepEqual(b.revision.state.characters,{});assert.deepEqual(b.revision.state.participants,[]);
+    const refused=await fetch(base+'/api/branches/'+b.id+'/runs',json({expected:b.head,maxTurns:1,policy:{kind:'random'}}));assert.equal(refused.status,400);
+    b=await (await fetch(base+'/api/branches/'+b.id+'/people',json({expected:b.head,label:'the host',prompt:'You host.',provider:'opengateway',model:'m',temperature:0.5}))).json();
+    b=await (await fetch(base+'/api/branches/'+b.id+'/messages',json({expected:b.head,text:'Welcome?'}))).json();
+    const run:any=await (await fetch(base+'/api/branches/'+b.id+'/runs',json({expected:b.head,maxTurns:1,policy:{kind:'random'}}))).json();
+    const out:any=await (await fetch(base+'/api/runs/'+run.id+'/turns',json({index:1}))).json();assert.equal(out.status,'attached');assert.equal(out.run.status,'completed');
+    const state=e.read(b.id).revision.state,host=person(state,'the host'),reply=state.messages.at(-1)!;
+    assert.deepEqual(reply.speakerRef,{kind:'person',id:host});assert.equal(reply.speaker,'the host');assert.deepEqual(state.messages[0].speakerRef,{kind:'human'});
+    const a=s.attempts()[0];assert.equal(a.personId,host);assert.deepEqual(a.validationRoster,['the host','Dennis']);assert.equal(a.body.model,'m');assert.equal(calls.length,1);
+    assert(!JSON.stringify(calls[0]).includes(host),'person IDs never reach the model');
+  }finally{await close();}
+});
+test('§9.5 two instances of one persona have separate labels, memories and attribution',async()=>{
+  const {s,e,vault,people}=world((_n,body)=>'Reply from '+(body.messages[0].content.includes('Memory A')?'A':'B'));
+  const {persona:p}=persona(vault,['curious','quick']);let b=people.createRoom({name:'Twins'});
+  b=people.add(b.id,{expected:b.head,label:'movie star #1',persona:ref(p)});b=people.add(b.id,{expected:b.head,label:'movie star #2',persona:ref(p),situation:'Arrived late.'});
+  const one=person(b.revision.state,'movie star #1'),two=person(b.revision.state,'movie star #2');assert.notEqual(one,two);
+  assert.equal(b.revision.state.characters[one].prompt,'curious\n\nquick');assert.equal(b.revision.state.characters[two].prompt,b.revision.state.characters[one].prompt);
+  b=people.settings(b.id,{expected:b.head,characters:{[one]:{memory:'Memory A'}}});b=e.message(b.id,b.head,'Hi');
+  b=await e.turn(b.id,b.head,one);b=await e.turn(b.id,b.head,two);
+  const [m1,m2]=b.revision.state.messages.slice(1);assert.deepEqual([m1.speaker,m1.speakerRef],['movie star #1',{kind:'person',id:one}]);assert.deepEqual([m2.speaker,m2.speakerRef],['movie star #2',{kind:'person',id:two}]);
+  assert.equal(m1.text,'Reply from A');assert.equal(m2.text,'Reply from B');assert.equal(b.revision.state.characters[two].memory,'');
+  const sys=s.attempts().find(a=>a.personId===two).body.messages[0].content;assert(sys.startsWith('curious\n\nquick\n\nArrived late.'),'v2 order: prompt, situation, then room instructions');
+});
+test('§9.6 labels with spaces, digits, # and Unicode work end to end; ":" and newlines are rejected; UI escapes labels',async()=>{
+  const labels=['movie star #1','Zoë 2','the judge'];let n=0;
+  const {s,e,people}=world(()=>++n===1?'Zoë 2: not mine':n===2?'**movie star #1:** mine':'ok');let b=people.createRoom({name:'Labels'});
+  for(const label of labels)b=people.add(b.id,{expected:b.head,label});
+  for(const bad of ['a:b','two\nlines','',' padded','x'.repeat(81),'tab\there'])assert.throws(()=>people.add(b.id,{expected:b.head,label:bad}),/label/i);
+  assert.throws(()=>people.add(b.id,{expected:b.head,label:'ZOË 2'}),/already labeled/);assert.throws(()=>people.add(b.id,{expected:b.head,label:'dennis'}),/your name/);
+  b=e.message(b.id,b.head,'Go');b=await e.turn(b.id,b.head,person(b.revision.state,'movie star #1'));
+  assert.equal(b.revision.state.messages.at(-1)!.text,'mine');assert.deepEqual(s.attempts().map(a=>a.outcome.status).sort(),['completed','rejected']);
+  assert.equal(checkSpeakerReply('Zoë 2','ZOË 2: hi',[...labels,'Dennis']),'hi');assert.throws(()=>checkSpeakerReply('movie star #1','Zoë 2: hi',[...labels,'Dennis']),WrongSpeakerError);
+  assert.equal(checkSpeakerReply('a b','a b: hi',['a b','a']),'hi');assert.throws(()=>checkSpeakerReply('a','a b: hi',['a b','a']),/labeled a b/);
+  const renamed=people.rename(b.id,person(b.revision.state,'the judge'),{expected:b.head,label:'<img src=x onerror=alert(1)>'});
+  const view=require('../web/changes-view.js'),html=view.render(stateChanges(b.revision.state,renamed.revision.state));assert(!html.includes('<img'));assert(html.includes('&lt;img'));
+  const jev=require('../web/jev-view.js').render({turnId:'t',speaker:'<b>x</b>'},[{turnId:'t'}],[{id:'t',chosen:'uuid',method:'forced'}],{uuid:'<i>label</i>'});assert(!jev.includes('<i>'));assert(jev.includes('&lt;i&gt;label'));
+});
+test('§9.7 rename, text-only history edit, delete/restore and Revise keep attribution; Revise uses the original label and roster',async()=>{
+  const {s,e,people}=world('First words.'),{base,close}=await listen(e);
+  try{
+    let b=people.createRoom({name:'Attribution'});b=people.add(b.id,{expected:b.head,label:'Velric'});b=people.add(b.id,{expected:b.head,label:'Ilya'});
+    const velric=person(b.revision.state,'Velric');b=e.message(b.id,b.head,'Start');b=await e.turn(b.id,b.head,velric);b=await e.turn(b.id,b.head,velric);
+    const [,first,second]=b.revision.state.messages,roster=s.attempts()[0].validationRoster;
+    b=people.rename(b.id,velric,{expected:b.head,label:'the judge'});assert.equal(b.revision.state.messages[1].speaker,'Velric','lines keep the label they were written under');
+    const rows=b.revision.state.messages.map(m=>({id:m.id,speaker:m.speaker,text:m.id===first.id?'Edited words.':m.text}));
+    b=await (await fetch(base+'/api/branches/'+b.id+'/history',json({expected:b.head,memory:'keep',messages:rows}))).json() as any;
+    const edited=b.revision.state.messages[1];assert.equal(edited.text,'Edited words.');assert.deepEqual(edited.speakerRef,{kind:'person',id:velric});assert.equal(edited.speaker,'Velric');
+    const retyped=b.revision.state.messages.map((m:any)=>({id:m.id,speaker:m.id===edited.id?'Ilya':m.speaker,text:m.text}));
+    const typed=await (await fetch(base+'/api/branches/'+b.id+'/history',json({expected:b.head,memory:'keep',messages:retyped}))).json() as any;
+    assert.deepEqual(typed.revision.state.messages[1].speakerRef,{kind:'unbound'},'a retyped label never silently reassigns identity');
+    const explicit=typed.revision.state.messages.map((m:any,i:number)=>({id:m.id,speaker:m.speaker,text:m.text,...(i===1?{speakerRef:{kind:'person',id:person(typed.revision.state,'Ilya')}}:{})}));
+    b=await (await fetch(base+'/api/branches/'+b.id+'/history',json({expected:typed.head,memory:'keep',messages:explicit}))).json() as any;
+    assert.equal(b.revision.state.messages[1].speaker,'Ilya');assert.equal(stateChanges(typed.revision.state,b.revision.state).identity.length,1);
+    b=e.deleteMessage(b.id,b.head,second.id);const del=b.head;b=e.restoreMessage(b.id,b.head,del);assert.deepEqual(b.revision.state.messages.at(-1)!.speakerRef,{kind:'person',id:velric});
+    const x=new Alternatives(e),review=x.open(b.id,second.id).review;await x.propose(review.id,'Shorter.');
+    const cand=s.attempts().find(a=>a.purpose==='alternative');assert.equal(cand.labelAtDispatch,'Velric');assert.deepEqual(cand.validationRoster,roster);assert.equal(cand.personId,velric);
+    assert(cand.body.messages.at(-1).content.includes("Revise only Velric's reply"));
+    assert.deepEqual(reviseIdentity({persona:'Boris'}),{personId:'Boris',labelAtDispatch:'Boris',validationRoster:LEGACY_NAMES,assemblyVersion:'legacy-v1'});
+  }finally{await close();}
+});
+test('§9.8 people added, deactivated and removed across retcons and comparisons; memory follows identity in all four modes',()=>{
+  const {e,people}=world();let b=people.createRoom({name:'Memory'});b=people.add(b.id,{expected:b.head,label:'A'});b=people.add(b.id,{expected:b.head,label:'B'});
+  const st=()=>e.read(b.id).revision.state,A=person(st(),'A'),B=person(st(),'B');
+  b=people.settings(b.id,{expected:b.head,characters:{[A]:{memory:'a1'},[B]:{memory:'b1'}}});b=e.message(b.id,b.head,'Checkpoint');const msg=b.revision.state.messages[0].id;
+  b=people.add(b.id,{expected:b.head,label:'C'});const C=person(st(),'C');b=people.participation(b.id,B,{expected:b.head,active:false});
+  b=people.settings(b.id,{expected:b.head,characters:{[A]:{memory:'a2'},[C]:{memory:'c2'}}});b=e.message(b.id,b.head,'Later');
+  const expect:any={'regenerate/restore':{people:[A,B],active:[A,B],memory:{[A]:'a1',[B]:'b1'}},'regenerate/keep':{people:[A,B],active:[A,B],memory:{[A]:'a2',[B]:'b1'}},
+    'keep/restore':{people:[A,B,C],active:[A,C],memory:{[A]:'a1',[B]:'b1',[C]:'c2'}},'keep/keep':{people:[A,B,C],active:[A,C],memory:{[A]:'a2',[B]:'b1',[C]:'c2'}}};
+  for(const [key,want] of Object.entries(expect)){const [mode,memory]=key.split('/');const f=e.fork(b.id,b.head,key);const r=e.retcon(f.id,f.head,msg,'Changed checkpoint',mode,memory).revision.state;
+    assert.deepEqual(Object.keys(r.characters),want.people,key);assert.deepEqual(r.participants,want.active,key);assert.deepEqual(Object.fromEntries(Object.entries(r.characters).map(([k,c])=>[k,c.memory])),want.memory,key);}
+  const other=people.createRoom({name:'Other'}),pair=new Comparisons(e).save({name:'Pair',left:b.id,right:other.id});
+  const pane=e.read(pair.left);people.participation(pane.id,C,{expected:pane.head,active:false});assert.deepEqual(e.read(b.id).revision.state.participants,[A,C]);
+  const ch=stateChanges(e.read(b.id).revision.state,e.read(pair.left).revision.state);assert.deepEqual(ch.people.deactivated,[C]);
+  assert.throws(()=>people.participation(b.id,'missing',{expected:e.read(b.id).head,active:false}),/Unknown person/);
+});
+test('§9.9 a narrator opening does not put the human in the roster; a human opening does',async()=>{
+  const {vault,people,e,calls}=world(),{persona:p}=persona(vault,['calm']);
+  const frame={...DEFAULT_FRAME};
+  for(const kind of ['narrator','human']){
+    const t=vault.create({type:'room-template',title:'dinner party',content:{system:'Dinner.',frame,flow:'random',opening:{kind,text:'The soup arrives.'},cast:[{persona:ref(p),label:'the host'},{persona:ref(p),label:'the guest',situation:'Owes the host money.'}]}});
+    const b=people.createRoom({name:kind,template:ref(t)}),st=b.revision.state;
+    assert.equal(st.messages.length,1);assert.deepEqual(st.messages[0].speakerRef,{kind});assert.equal(st.messages[0].speaker,kind==='human'?'Dennis':'Narrator');
+    await e.turn(b.id,b.head,person(st,'the host'));const user=calls.at(-1).messages[1].content;
+    assert(user.includes(kind==='human'?'Current participants: Dennis, the host, the guest.':'Current participants: the host, the guest.'),kind);
+    assert(user.includes(kind==='human'?'Dennis: The soup arrives.':'Narrator: The soup arrives.'));
+  }
+});
+test('§9.10 revising a component changes nothing downstream until adopted; adoption on one branch leaves siblings unchanged',async()=>{
+  const {s,e,vault,people,calls}=world(),{parts,persona:p}=persona(vault,['old trait','voice']);
+  let b=people.createRoom({name:'Adopt'});b=people.add(b.id,{expected:b.head,label:'the stoic',persona:ref(p)});const stoic=person(b.revision.state,'the stoic');
+  const sibling=e.fork(b.id,b.head,'Sibling'),snapshot=JSON.stringify(e.read(b.id).revision.state);
+  const revised=vault.revise(parts[0].item.id,{expected:parts[0].item.head,content:{text:'new trait'}});
+  assert.equal(JSON.stringify(e.read(b.id).revision.state),snapshot);assert.equal(vault.item(p.item.id).head,p.item.head);
+  assert.equal(people.status(e.read(b.id).revision.state)[stoic].updateAvailable,false);
+  assert.deepEqual(vault.detail(p.item.id).updates.map((u:any)=>u.item),[parts[0].item.id]);
+  const p2=vault.revise(p.item.id,{expected:p.item.head,content:{...p.current.content,components:[ref(revised),ref(parts[1])],compiled:undefined}});
+  assert.equal(p2.current.content.compiled,'new trait\n\nvoice');assert.equal(people.status(e.read(b.id).revision.state)[stoic].updateAvailable,true);
+  const preview=people.previewPersona(b.id,stoic,{persona:ref(p2)});assert.equal(preview.diverged,false);assert.deepEqual(Object.keys(preview.fields),['prompt','origin']);
+  b=people.adoptPersona(b.id,stoic,{expected:b.head,persona:ref(p2)});assert.equal(b.revision.state.characters[stoic].prompt,'new trait\n\nvoice');assert.equal(b.revision.adoption!.kind,'persona');
+  assert.equal(e.read(sibling.id).revision.state.characters[stoic].prompt,'old trait\n\nvoice');assert.equal(people.status(e.read(sibling.id).revision.state)[stoic].updateAvailable,true);
+  assert.equal(calls.length,0);assert.equal(s.list('attempts').length,0);
+});
+test('§9.11 template adoption changes only opted-in fields; locally modified values and diverged prompts need replace-or-cancel',()=>{
+  const {e,vault,people}=world(),{persona:p}=persona(vault,['steady']);
+  const t1=vault.create({type:'room-template',title:'court',content:{system:'S1',frame:{...EMPTY_FRAME},flow:'random',cast:[{persona:ref(p),label:'the judge'},{persona:ref(p),label:'the clerk'}]}});
+  let b=people.createRoom({name:'Court',template:ref(t1)});const judge=person(b.revision.state,'the judge');
+  b=people.settings(b.id,{expected:b.head,system:'local rules',characters:{[judge]:{memory:'kept',prompt:'edited here'}}});
+  const t2=vault.revise(t1.item.id,{expected:t1.item.head,content:{...t1.current.content,system:'S2',frame:{...DEFAULT_FRAME},flow:'alternate'}});
+  assert.deepEqual(people.templateStatus(b.revision.state).system,{...b.revision.state.templateFields!.system,diverged:true,updateAvailable:true});
+  const pv=people.previewTemplate(b.id,{template:ref(t2)});assert.equal(pv.fields.system.local,true);assert.equal(pv.fields.frame.local,false);
+  b=people.adoptTemplate(b.id,{expected:b.head,template:ref(t2),fields:['frame','flow']});
+  assert.deepEqual(b.revision.state.frame,DEFAULT_FRAME);assert.equal(b.revision.state.flow,'alternate');assert.equal(b.revision.state.system,'local rules');
+  assert.equal(b.revision.state.templateFields!.frame!.revision,t2.item.head);assert.equal(b.revision.state.templateFields!.system!.revision,t1.item.head);assert.deepEqual(b.revision.adoption!.fields,['frame','flow']);
+  assert.throws(()=>people.adoptTemplate(b.id,{expected:b.head,template:ref(t2),fields:['system']}),/changed here/);
+  b=people.adoptTemplate(b.id,{expected:b.head,template:ref(t2),fields:['system'],replace:true});assert.equal(b.revision.state.system,'S2');assert.equal(b.revision.state.messages.length,0,'the opening and cast are never re-applied');
+  assert.equal(b.revision.state.characters[judge].memory,'kept');
+  assert.throws(()=>people.adoptPersona(b.id,judge,{expected:b.head,persona:ref(p)}),/Replace it/);
+  b=people.adoptPersona(b.id,judge,{expected:b.head,persona:ref(p),replace:true});assert.equal(b.revision.state.characters[judge].prompt,'steady');assert.equal(b.revision.state.characters[judge].memory,'kept');
+  b=people.participation(b.id,judge,{expected:b.head,active:false});assert.equal(b.revision.state.flow,'random');assert.match(b.revision.reason,/reset to random/);
+});
+test('§9.12 archived components still compile; wrong items, wrong kinds and mismatched compiled text are rejected',()=>{
+  const {vault}=world(),{parts,persona:p}=persona(vault,['  a  ','b']);
+  const blank=vault.create({type:'component',title:'blank',content:{text:'   '}});
+  vault.archive(parts[0].item.id,{expected:parts[0].item.head,archived:true});
+  const p2=vault.create({type:'persona',title:'again',content:{components:[ref(parts[0]),ref(blank),ref(parts[1])],extra:' x '}});
+  assert.equal(p2.current.content.compiled,'a\n\nb\n\nx');assert.equal(compileV1([],''),'');assert.equal(vault.detail(p2.item.id).item.archived,false);
+  assert.equal(vault.create({type:'persona',title:'empty',content:{components:[]}}).current.content.compiled,'');
+  assert.throws(()=>vault.create({type:'persona',title:'x',content:{components:[{item:parts[1].item.id,revision:parts[0].item.head}]}}),/another item/);
+  assert.throws(()=>vault.create({type:'persona',title:'x',content:{components:[ref(p)]}}),/not a component/);
+  assert.throws(()=>vault.create({type:'persona',title:'x',content:{components:[ref(parts[1])],compiled:'forged'}}),/compiled/);
+  assert.throws(()=>vault.create({type:'component',title:'x',content:{text:'t',kind:'nope'}}),/kind/);
+  const k=vault.kinds()[0],renamed=vault.reviseKind(k.id,{expected:k.head,name:'archetype (renamed)',description:'',examples:[]});assert.equal(renamed.id,k.id);
+  assert.equal(vault.revision(parts[0].item.head).content.kind,k.id,'renaming a kind keeps references');
+});
+test('§9.13 a fresh data directory starts with an empty vault and new rooms are v2',async()=>{
+  const e=new ProductionEngine(store()),{base,close}=await listen(e);
+  try{
+    const v:any=await (await fetch(base+'/api/vault')).json();assert.deepEqual(v.items,[]);
+    const b:any=await (await fetch(base+'/api/branches',json({name:'New'}))).json();assert.equal(b.revision.state.assemblyVersion,'v2');assert.equal(Object.keys(b.revision.state.characters).length,0);
+    const vault=new Vault(e.store);vault.seedKinds();assert.equal(vault.kinds().length,8);assert.deepEqual(vault.list(),[]);vault.seedKinds();assert.equal(vault.kinds().length,8);
+  }finally{await close();}
+});
+test('§9.14 stale expected heads are rejected for vault items, kinds and rooms',()=>{
+  const {vault,people}=world(),{parts}=persona(vault,['x']);const c=parts[0];
+  vault.revise(c.item.id,{expected:c.item.head,content:{text:'y'}});
+  assert.throws(()=>vault.revise(c.item.id,{expected:c.item.head,content:{text:'z'}}),/changed/);assert.throws(()=>vault.archive(c.item.id,{expected:c.item.head,archived:true}),/changed/);
+  const k=vault.kinds()[0];vault.reviseKind(k.id,{expected:k.head,name:'n'});assert.throws(()=>vault.reviseKind(k.id,{expected:k.head,name:'m'}),/changed/);
+  let b=people.createRoom({name:'Stale'});const old=b.head;b=people.add(b.id,{expected:b.head,label:'A'});
+  for(const fn of [()=>people.add(b.id,{expected:old,label:'B'}),()=>people.rename(b.id,person(b.revision.state,'A'),{expected:old,label:'C'}),()=>people.settings(b.id,{expected:old,system:'x'}),()=>people.participation(b.id,person(b.revision.state,'A'),{expected:old,active:false})])assert.throws(fn,/changed/);
+});
+test('§9.15 runs: one generation per index, Stop is final, browser loss and restarts interrupt, one advancing run per branch',async()=>{
+  let release:()=>void=()=>{};const gate=()=>new Promise<void>(r=>release=r);let hold:Promise<void>|null=null;
+  const {s,e,people,runs,calls}=world(()=>'Line.');
+  const slow=new ProductionEngine(s,async(u,o)=>{if(hold)await hold;return recorder(()=>'Line.').transport(u,o as any);});
+  let b=people.createRoom({name:'Runs'});b=people.add(b.id,{expected:b.head,label:'A'});b=people.add(b.id,{expected:b.head,label:'B'});b=e.message(b.id,b.head,'Go');
+  const r=runs.start(b.id,{expected:b.head,maxTurns:3,policy:{kind:'alternate'}});assert.equal(s.get('runs',r.id).transitions[0].status,'running','persisted before the first dispatch');
+  await runs.advance(r.id,1);const again=await runs.advance(r.id,1);assert.equal(again.duplicate,true);assert.equal(calls.length,1,'resubmitting an index never dispatches');
+  await assert.rejects(runs.advance(r.id,3),/consecutive/);
+  assert.throws(()=>runs.start(b.id,{expected:e.read(b.id).head,maxTurns:2}),/Another run/);
+  runs.stop(r.id);await assert.rejects(runs.advance(r.id,2),/stopped/);assert.equal(calls.length,1);assert.equal(statusOf(runs.get(r.id)),'stopped');
+  const u=runs.get(r.id).usage;assert.deepEqual(u,{input:10,output:5,reasoning:0,missing:0});
+  // Browser loss: no next turn within the timeout.
+  runs.timeoutMs=60;b=e.read(b.id);const lost=runs.start(b.id,{expected:b.head,maxTurns:2});await runs.advance(lost.id,1);await new Promise(r=>setTimeout(r,150));
+  assert.equal(statusOf(runs.get(lost.id)),'interrupted');assert.match(runs.get(lost.id).transitions.at(-1)!.reason!,/browser/);runs.timeoutMs=60000;
+  // Head moved outside the run.
+  b=e.read(b.id);const moved=runs.start(b.id,{expected:b.head,maxTurns:2});e.message(b.id,b.head,'Interjection');assert.equal(statusOf(runs.get(moved.id)),'interrupted');
+  await assert.rejects(runs.advance(moved.id,1),/interrupted/);
+  // Stop while a turn is in flight: the late reply is canceled, never attached.
+  const slowRuns=new Runs(slow);b=e.read(b.id);const inflight=slowRuns.start(b.id,{expected:b.head,maxTurns:2,policy:{kind:'fixed',speaker:person(b.revision.state,'A')}});
+  hold=gate();const pending=slowRuns.advance(inflight.id,1);await new Promise(r=>setTimeout(r,20));
+  assert.equal((await slowRuns.advance(inflight.id,1)).status,'pending');slowRuns.stop(inflight.id);release();hold=null;const done=await pending;
+  assert.equal(done.status,'canceled');assert.equal(statusOf(slowRuns.get(inflight.id)),'stopped');assert.equal(e.read(b.id).head,b.head);
+  // Missing provider usage is counted, not zeroed.
+  const noUsage=new ProductionEngine(s,async()=>new Response(JSON.stringify({choices:[{message:{content:'No usage.'}}]})));const nr=new Runs(noUsage);b=e.read(b.id);
+  const m=nr.start(b.id,{expected:b.head,maxTurns:1});const fin=await nr.advance(m.id,1);assert.equal(fin.run.status??statusOf(fin.run),'completed');assert.deepEqual(nr.get(m.id).usage,{input:0,output:0,reasoning:0,missing:1});
+  // Restart: a running run is interrupted, never resumed.
+  b=e.read(b.id);const left=runs.start(b.id,{expected:b.head,maxTurns:5});new Runs(new ProductionEngine(new Store(s.root))).recover();assert.equal(statusOf(runs.get(left.id)),'interrupted');
+  // Two tabs on one branch: the second start is refused while the first is advancing.
+  b=e.read(b.id);const tab1=runs.start(b.id,{expected:b.head,maxTurns:2});assert.throws(()=>runs.start(b.id,{expected:b.head,maxTurns:2}),/Another run/);runs.stop(tab1.id);
+  assert.throws(()=>runs.start(b.id,{expected:b.head,maxTurns:21}),/1–20/);
+});
+test('§9.16 creating, revising, composing, previewing, instantiating, adopting, renaming and opening make zero provider calls',async()=>{
+  const {s,e,calls}=world(),{base,close}=await listen(e);
+  const post=async(url:string,body:any)=>{const r=await fetch(base+'/api'+url,json(body));const v:any=await r.json();assert.equal(r.status,200,url+': '+v.error);return v;};
+  try{
+    const kinds=(await post('/vault-kinds',{name:'trait',description:'d'}));
+    const c1=await post('/vault',{type:'component',title:'one',content:{text:'one',kind:kinds.id}}),c2=await post('/vault',{type:'component',title:'two',content:{text:'two'}});
+    const content={components:[ref(c1),ref(c2)],extra:''};assert.equal((await post('/vault/compile',{type:'persona',content})).compiled,'one\n\ntwo');
+    const p=await post('/vault',{type:'persona',title:'p',content});await post('/vault/'+c1.item.id+'/revise',{expected:c1.item.head,content:{text:'one!'}});
+    const t=await post('/vault',{type:'room-template',title:'t',content:{system:'s',flow:'random',cast:[{persona:ref(p),label:'X'}]}});
+    let b=await post('/branches',{name:'From template',template:ref(t)});
+    const preview=await post('/branches/'+b.id+'/people/preview',{label:'Y',persona:ref(p),situation:'here'});assert(preview.assembled.includes('here'));
+    b=await post('/branches/'+b.id+'/people',{expected:b.head,label:'Y',persona:ref(p)});const y=person(b.revision.state,'Y');
+    await (await fetch(base+'/api/branches/'+b.id+'/people/'+y+'/assembled')).json();
+    b=await post('/branches/'+b.id+'/people/'+y+'/rename',{expected:b.head,label:'Z'});
+    await post('/branches/'+b.id+'/people/'+y+'/adopt/preview',{persona:ref(p)});await post('/branches/'+b.id+'/template/preview',{template:ref(t)});
+    b=await post('/branches/'+b.id+'/template/adopt',{expected:b.head,template:ref(t),fields:['system']});
+    for(const url of ['/vault','/vault/'+p.item.id,'/vault/revisions/'+p.item.head,'/branches/'+b.id,'/bootstrap','/vault/'+c1.item.id+'/diff?from='+c1.item.head+'&to='+vault_head(s,c1.item.id)])assert.equal((await fetch(base+'/api'+url)).status,200,url);
+    assert.equal(calls.length,0);assert.equal(s.list('attempts').length,0);
+  }finally{await close();}
+});
+function vault_head(s:Store,item:string){return s.get('vault-items',item).head;}

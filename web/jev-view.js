@@ -3,12 +3,13 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const valid = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
   const percent = value => valid(value) ? new Intl.NumberFormat('en',{style:'percent',maximumFractionDigits:1}).format(value) : 'Unavailable';
-  function render(message, observations = [], selections = []) {
+  // `labels` maps person IDs to labels; selections record IDs, and labels are what people read.
+  function render(message, observations = [], selections = [], labels = {}) {
     const observation = message.turnId && observations.find(j => j.turnId === message.turnId);
     if (!observation) return '<div class="jev-empty">No Jev observation recorded for this message.</div>';
     const selection = selections.find(s => s.id === message.turnId);
     const method = {forced:'your pick',locked:'locked for this run',random:'random',jev:'Jev selection'}[selection?.method] || selection?.method;
-    const speaker = selection?.chosen || message.speaker;
+    const speaker = selection?.chosen ? labels[selection.chosen] ?? selection.chosen : message.speaker;
     const heading = `<div class="jev-heading"><strong>Jev shadow</strong><span>Before this reply</span></div><div class="jev-actual">Actually selected: <strong>${esc(speaker)}</strong>${method?' · '+esc(method):''}</div>`;
     const edited = message.source === 'edited' ? '<div class="jev-caveat">This message was edited. The observation belongs to the original turn.</div>' : '';
     const outcome = observation.outcome;

@@ -26,7 +26,10 @@ export function fillFrame(template: string, values: { speaker: string; participa
 
 export class WrongSpeakerError extends Error {}
 
-export function checkSpeakerReply(persona: PersonaName, reply: string): string {
+// Without a roster this is the legacy-v1 check, against the 8 legacy names. With one (v2 rooms) any roster label counts,
+// including labels with spaces, digits, # or Unicode; comparison is NFC plus lowercase.
+export function checkSpeakerReply(persona: string, reply: string, roster?: string[]): string {
+  if (roster) return checkRoster(persona, reply, roster);
   let text = reply.trim();
   // Check explicit transcript labels, including markdown labels, before stripping our own.
   const label = /^(?:\*\*|__)?([A-Za-z]+)(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*/;
@@ -39,5 +42,17 @@ export function checkSpeakerReply(persona: PersonaName, reply: string): string {
       throw new WrongSpeakerError(`Expected ${persona}, but the response was labeled ${speaker}.`);
     }
     text = text.slice(match[0].length).trim();
+  }
+}
+
+function checkRoster(persona: string, reply: string, roster: string[]): string {
+  const key = (v: string) => v.normalize("NFC").toLowerCase(), labels = [...roster].sort((a, b) => b.length - a.length);
+  let text = reply.trim();
+  for (;;) {
+    const rest = text.replace(/^(?:\*\*|__)/, "");
+    const found = labels.find(l => key(rest.slice(0, l.length)) === key(l) && /^(?:\*\*|__)?\s*:/.test(rest.slice(l.length)));
+    if (!found) return text;
+    if (key(found) !== key(persona)) throw new WrongSpeakerError(`Expected ${persona}, but the response was labeled ${found}.`);
+    text = rest.slice(found.length).replace(/^(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*/, "").trim();
   }
 }

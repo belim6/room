@@ -3,11 +3,12 @@ import { Engine, validateState, type State, type Character, type Revision } from
 import { clone, id } from './store';
 import { reasoningOf } from './generation';
 import { stateChanges } from './changes';
-import type { PersonaName } from '../personas/personas';
-type Patch = Partial<Pick<State,'system'|'participants'|'shadow'|'policy'|'human'|'frame'>> & {characters?: Partial<Record<PersonaName,Partial<Character>>>};
+import { speakerId } from './identity';
+import type { Store } from './store';
+type Patch = Partial<Pick<State,'system'|'participants'|'shadow'|'policy'|'human'|'frame'|'assemblyVersion'>> & {characters?: Record<string,Partial<Character>>};
 export interface Condition { key: string; label: string; control?: boolean; patch: Patch }
 interface OutcomeRule { pattern: string; flags?: string; highlight?: Record<string,string> }
-export interface Experiment { id: string; version: string; sequence: number; name: string; createdAt: string; question: string; prediction: string; base: {branch:string;revision:string}; speaker: PersonaName; conditions: Condition[]; outcome?: OutcomeRule; retrospective?: boolean; lockedAt?: string; parent?: string }
+export interface Experiment { id: string; version: string; sequence: number; name: string; createdAt: string; question: string; prediction: string; base: {branch:string;revision:string}; speaker: string; conditions: Condition[]; outcome?: OutcomeRule; retrospective?: boolean; lockedAt?: string; parent?: string }
 interface Trial { id: string; experiment: string; condition: string; index: number; branch: string; turnId: string; at: string; status: string; batch?: string; attached?: boolean; error?: string; sequence?: number }
 const now = () => new Date().toISOString();
 export function applyPatch(base: State, patch: Patch): State {
@@ -19,16 +20,22 @@ export function applyPatch(base: State, patch: Patch): State {
       for(const [name,fields] of Object.entries(value)) {
         if(!Object.prototype.hasOwnProperty.call(next.characters,name) || !fields || typeof fields!=='object' || Array.isArray(fields))throw Error('Invalid character patch');
         for(const [field,v] of Object.entries(fields)) {
-          if(!['prompt','memory','provider','model','temperature','reasoning'].includes(field))throw Error('Unknown character field');
+          // origin is provenance, never patchable. A label patch on a legacy room needs assemblyVersion: 'v2' in the same patch.
+          if(!['prompt','memory','provider','model','temperature','reasoning','label','situation'].includes(field))throw Error('Unknown character field');
           (next.characters as any)[name][field]=v;
         }
       }
     } else {
-      if(!['system','participants','shadow','policy','human','frame'].includes(key))throw Error('Only settings may be patched');
+      if(!['system','participants','shadow','policy','human','frame','assemblyVersion'].includes(key))throw Error('Only settings may be patched');
+      if(key==='assemblyVersion'&&value!=='v2')throw Error('A patch can only switch assembly to v2');
       (next as any)[key]=clone(value);
     }
   }
-  validateState(next);return next;
+  validateState(next,base);return next;
+}
+// People whose effective prompt no longer matches the compiled persona revision they came from.
+export function divergedPeople(store: Store, state: State) {
+  return Object.entries(state.characters).filter(([,c])=>{if(!c.origin)return false;try{return store.get('vault-revisions',c.origin.revision).content.compiled!==c.prompt;}catch{return false;}}).map(([k])=>k);
 }
 export function extractOutcome(text: string, rule?: OutcomeRule): {value:string|null;error?:string} {
   if(!rule)return {value:null};
@@ -125,7 +132,8 @@ export class Experiments {
       ...to.conditions.filter(c=>!from.conditions.some(x=>x.key===c.key)).map(c=>({key:c.key,label:c.label,change:'added'})),
       ...to.conditions.flatMap(c=>{const old=from.conditions.find(x=>x.key===c.key);if(!old)return [];
         const changes=stateChanges(state(from,old),state(to,c)),control=!!old.control!==!!c.control;
-        return changes.settings.length||Object.values(changes.conversation).some(v=>Array.isArray(v)?v.length:typeof v==='object'?Object.keys(v).length:v)||control?[{key:c.key,label:c.label,change:'changed',changes,...(control?{control:{before:!!old.control,after:!!c.control}}:{})}]:[];})];
+        const diverged=divergedPeople(this.store,state(to,c)).filter(p=>!divergedPeople(this.store,state(from,old)).includes(p));
+        return changes.settings.length||Object.values(changes.conversation).some(v=>Array.isArray(v)?v.length:typeof v==='object'?Object.keys(v).length:v)||control?[{key:c.key,label:c.label,change:'changed',changes,...(diverged.length?{diverged}:{}),...(control?{control:{before:!!old.control,after:!!c.control}}:{})}]:[];})];
     return {base:from.base.revision===to.base.revision?null:{before:{...from.base,lastMessage:last(from)},after:{...to.base,lastMessage:last(to)}},
       speaker:from.speaker===to.speaker?null:{before:from.speaker,after:to.speaker},conditions,
       outcome:JSON.stringify(from.outcome||null)===JSON.stringify(to.outcome||null)?null:{before:from.outcome||null,after:to.outcome||null}};
@@ -169,8 +177,8 @@ export class Experiments {
     const b=this.engine.read(input.branch);
     if(b.fork!==e.base.revision&&b.fork!==this.workspaceOf(key)?.revision)throw Error('The trial must start at this experiment’s frozen checkpoint');
     const messages=b.revision.state.messages;
-    const reply=input.turnId?messages.find(m=>m.turnId===input.turnId&&m.source==='generated'): [...messages].reverse().find(m=>m.source==='generated'&&m.speaker===e.speaker);
-    if(!reply?.turnId||reply.speaker!==e.speaker)throw Error('Choose an original generated reply by the measured speaker');
+    const state=b.revision.state,reply=input.turnId?messages.find(m=>m.turnId===input.turnId&&m.source==='generated'): [...messages].reverse().find(m=>m.source==='generated'&&speakerId(state,m)===e.speaker);
+    if(!reply?.turnId||speakerId(state,reply)!==e.speaker)throw Error('Choose an original generated reply by the measured speaker');
     const turn=this.store.get('turns',reply.turnId);
     if(turn.branch!==b.id||turn.status!=='attached')throw Error('That turn was not attached to this trial branch');
     const attempts=this.store.attempts().filter(a=>a.turnId===reply.turnId);
@@ -262,6 +270,6 @@ export class Experiments {
   detail(key:string) {
     const e=this.get(key),base=this.store.get<Revision>('revisions',e.base.revision),control=e.conditions.find(c=>c.control)!,trials=this.results(e),parent=this.parentOf(key),from=parent?this.get(parent):null;
     return {experiment:e,parent:from?{id:from.id,name:from.name,linked:!e.parent}:null,designDiff:from?this.designDiff(from,e):null,lineage:this.lineage(key),base:{...e.base,lastMessage:base.state.messages.at(-1)||null,state:base.state},active:this.active.has(key),
-      conditions:e.conditions.map(c=>({...c,changes:stateChanges(applyPatch(base.state,control.patch),applyPatch(base.state,c.patch)),character:applyPatch(base.state,c.patch).characters[e.speaker],shadow:applyPatch(base.state,c.patch).shadow,policy:applyPatch(base.state,c.patch).policy})),trials,observations:this.store.list('observations').filter(o=>o.experiment===key)};
+      conditions:e.conditions.map(c=>({...c,diverged:divergedPeople(this.store,applyPatch(base.state,c.patch)).filter(p=>!divergedPeople(this.store,base.state).includes(p)),changes:stateChanges(applyPatch(base.state,control.patch),applyPatch(base.state,c.patch)),character:applyPatch(base.state,c.patch).characters[e.speaker],shadow:applyPatch(base.state,c.patch).shadow,policy:applyPatch(base.state,c.patch).policy})),trials,observations:this.store.list('observations').filter(o=>o.experiment===key)};
   }
 }
