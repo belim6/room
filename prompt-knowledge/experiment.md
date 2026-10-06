@@ -34,6 +34,7 @@ A probe that looks exciting becomes a test. It doesn't become a finding ([[The R
 5. **Scope every result** to the model, provider, checkpoint, n and date.
 6. **Evidence is never overwritten.** Corrections are appended with their date, both in the room and in the ledger.
 7. **Deniz starts the spend.** Claude designs and proposes experiments, and states the call count and model. Paid trials run only on Deniz's explicit go-ahead. Test and scratch runs go to a throwaway data directory, never `.room-data/`.
+   - *Amended 2026-10-06:* No dollar budgets, since agents can't see billing directly. Instead, agents lay out the next **cycle** (its experiments, models and rough call counts) and Deniz gives one go-ahead for it. Within an approved cycle, agents use whatever compute it needs. Anything outside the plan needs a new go-ahead. Each cycle report states the token usage Room recorded.
 
 ## Loosened (for practical use)
 
