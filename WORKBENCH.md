@@ -1,5 +1,7 @@
 # Room workbench
 
+For a consolidated, code-audited description of implemented behavior as of 2 October 2026, see [Current capabilities](CURRENT_CAPABILITIES.md). This guide includes older incremental notes; the capabilities specification resolves their known conflicts.
+
 Start from the project directory:
 
 ```sh
