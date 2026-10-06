@@ -3,7 +3,7 @@ import { id } from './store';
 // Run records track today's browser-driven bounded runs. The server never schedules turns itself and never resumes a run.
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'interrupted' | 'failed';
 export interface Run { id: string; branch: string; startedAt: string; startedBy: string; policy: { kind: 'random' | 'alternate' | 'fixed'; speaker?: string }; maxTurns: number;
-  transitions: { at: string; status: RunStatus; reason?: string }[]; turns: string[]; usage: { input: number; output: number; reasoning: number; missing: number }; head: string; updatedAt: string }
+  transitions: { at: string; status: RunStatus; reason?: string; event?: 'human-message'; revision?: string }[]; turns: string[]; uncounted?: string[]; usage: { input: number; output: number; reasoning: number; missing: number }; head: string; updatedAt: string }
 const now = () => new Date().toISOString();
 export const statusOf = (r: Run) => r.transitions.at(-1)!.status;
 export class Runs {
@@ -52,35 +52,51 @@ export class Runs {
     }
     return u;
   }
-  // Only the next consecutive index advances. Resubmitting an index returns the existing turn and never dispatches.
+  private turnRecord(turnId: string) { try { return this.store.get('turns', turnId); } catch { return null; } }
+  // Turns that count toward maxTurns: everything dispatched except turns detached by a human interjection.
+  counted(r: Run) { return r.turns.length - (r.uncounted?.length ?? 0); }
+  // Only the next consecutive index advances. Resubmitting an index returns the existing turn and never dispatches;
+  // any other index is refused while a turn is pending, before the record changes.
   async advance(key: string, index: unknown) {
     if (!Number.isInteger(index) || (index as number) < 1) throw Error('Invalid turn index');
     const n = index as number, pending = this.pending.get(key);
     let r = this.get(key);
     if (n <= r.turns.length) {
-      const turnId = r.turns[n - 1], record = pending?.turnId === turnId ? null : this.store.list('turns').find(t => t.id === turnId);
+      const turnId = r.turns[n - 1], record = pending?.turnId === turnId ? null : this.turnRecord(turnId);
       return { run: r, turnId, status: record?.status ?? 'pending', duplicate: true };
     }
+    if (pending) throw Error(`Turn ${pending.index} of this run is still running`);
     if (statusOf(r) !== 'running') throw Error(`This run is ${statusOf(r)}`);
     if (n !== r.turns.length + 1) throw Error('Runs advance one consecutive turn at a time');
-    if (n > r.maxTurns) throw Error('This run has reached its turn limit');
-    const turnId = id(), alternate = r.policy.kind === 'alternate';
+    if (this.counted(r) >= r.maxTurns) throw Error('This run has reached its turn limit');
+    const turnId = id(), alternate = r.policy.kind === 'alternate', dispatchedHead = r.head;
     r.turns.push(turnId); this.save(r); clearTimeout(this.timers.get(key));
     const forced = r.policy.kind === 'fixed' || (alternate && n === 1) ? r.policy.speaker : undefined;
     const done = this.engine.turn(r.branch, r.head, forced, { id: r.id, index: n, count: r.maxTurns, ...(alternate ? { mode: 'alternate' as const } : {}) }, undefined, { turnId });
-    this.pending.set(key, { index: n, turnId, done }); let error: any = null;
-    try { await done; } catch (e) { error = e; } finally { this.pending.delete(key); }
+    const entry = { index: n, turnId, done }; this.pending.set(key, entry); let error: any = null;
+    try { await done; } catch (e) { error = e; } finally { if (this.pending.get(key) === entry) this.pending.delete(key); }
     r = this.store.get<Run>('runs', key);
-    const turn = this.store.list('turns').find(t => t.id === turnId);
+    const turn = this.turnRecord(turnId);
     r.usage = this.usage(r);
     if (turn?.status === 'attached') {
       r.head = turn.revision;
-      if (n === r.maxTurns) this.transition(r, 'completed'); else { this.save(r); if (statusOf(r) === 'running') this.watch(r); }
+      if (this.counted(r) >= r.maxTurns) this.transition(r, 'completed'); else { this.save(r); if (statusOf(r) === 'running') this.watch(r); }
+    } else if (turn?.status === 'detached' && statusOf(r) === 'running' && r.head !== dispatchedHead && r.transitions.at(-1)?.event === 'human-message') {
+      // A human interjected while this turn was in flight: its reply stays detached evidence and doesn't count; the run continues.
+      r.uncounted = [...(r.uncounted ?? []), turnId]; this.save(r); this.watch(r);
     } else if (turn?.status === 'detached') this.transition(r, 'interrupted', 'The conversation changed while a turn was running');
     else if (turn?.status === 'canceled') this.transition(r, 'stopped', 'Stopped');
     else this.transition(r, 'failed', error?.message || turn?.error || 'The turn failed');
     if (statusOf(r) !== 'running') this.save(r);
     return { run: r, turnId, status: turn?.status ?? 'failed', ...(error ? { error: error.message } : {}) };
+  }
+  // A human message appended to the run's expected head continues the run: it is recorded and becomes the new expected head.
+  humanMessage(branch: string, previous: string, head: string) {
+    const r = this.store.list<Run>('runs').find(x => x.branch === branch && statusOf(x) === 'running');
+    if (!r || r.head !== previous) return null;
+    r.transitions.push({ at: now(), status: 'running', event: 'human-message', revision: head }); r.head = head; this.save(r);
+    if (!this.pending.has(r.id)) this.watch(r);
+    return r;
   }
   // Stop is final: nothing further is dispatched, and a response that arrives later is stored as canceled.
   stop(key: string) {

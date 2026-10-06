@@ -14,7 +14,7 @@ import { stateChanges } from './changes';
 import { Vault } from './vault';
 import { People } from './people';
 import { Runs, statusOf } from './runs';
-import { assemblyOf, resolvedMap, resolveSpeaker, validRef, labelFor, validateLabel } from './identity';
+import { assemblyOf, resolvedMap, resolveSpeaker, validRef, labelFor, validateLabel, generationProvenance, labelOf } from './identity';
 import { EMPTY_FRAME, DEFAULT_FRAME } from '../speakerTurn';
 
 function runInfo(run: any) {
@@ -113,10 +113,16 @@ export function createApp(engine = new Engine(defaultStore())) {
     const current = reactions(), wanted = Object.entries(current).filter(([,v])=>v===value).map(([k])=>k);
     const found = new Map<string, { message: any; revision: Revision }>();
     for (const rev of store.list<Revision>('revisions').sort((a,b)=>a.at.localeCompare(b.at))) for (const m of rev.state.messages) if (wanted.includes(m.id) && !found.has(m.id)) found.set(m.id, { message: m, revision: rev });
-    const history = store.list('reactions'), branches = new Map(store.list('branches').map(b=>[b.id,b]));
+    const history = store.list('reactions'), branches = new Map(store.list('branches').map(b=>[b.id,b])), provenance = generationProvenance(store);
     return wanted.map(key => {
       const records = history.filter(r=>r.message===key).sort((a,b)=>a.sequence-b.sequence), last = records.at(-1), f = found.get(key);
-      return { message: key, value, at: last.at, branch: last.branch, branchName: branches.get(last.branch)?.name ?? null, speaker: f?.message.speaker ?? null, text: f?.message.text ?? null, source: f?.message.source ?? null, turnId: f?.message.turnId ?? last.turnId, history: records };
+      // The written label stays as evidence; identity is the resolved ref, which is only meaningful within its lineage (root conversation).
+      const speakerRef = f ? resolveSpeaker(f.revision.state, f.message, provenance) : null;
+      let root = f ? branches.get(f.revision.branch) : null; const seen = new Set<string>(); while (root?.parent && !seen.has(root.id) && branches.has(root.parent)) { seen.add(root.id); root = branches.get(root.parent); }
+      return { message: key, value, at: last.at, branch: last.branch, branchName: branches.get(last.branch)?.name ?? null, speaker: f?.message.speaker ?? null, speakerRef,
+        speakerLabelAtRevision: speakerRef?.kind === 'person' ? labelOf(f!.revision.state, speakerRef.id) : null,
+        lineage: f ? { branch: f.revision.branch, revision: f.revision.id, root: root?.id ?? null, rootName: root?.name ?? null, comparison: root?.comparison ?? null } : null,
+        text: f?.message.text ?? null, source: f?.message.source ?? null, turnId: f?.message.turnId ?? last.turnId, history: records };
     }).sort((a,b)=>b.at.localeCompare(a.at));
   }
   app.get('/api/reactions/:value', route((req,res) => { if (!['favorite','dislike'].includes(req.params.value)) throw Error('Invalid reaction'); res.json(marked(req.params.value)); }));
@@ -166,7 +172,7 @@ export function createApp(engine = new Engine(defaultStore())) {
   // Every new room is v2: empty, or snapshotted from a room template. Existing rooms keep their assembly.
   app.post('/api/branches', route((req,res) => res.json(people.createRoom(req.body))));
   app.get('/api/branches/:id', route((req,res) => { const e = evidence(req.params.id), s = e.branch.revision.state;
-    res.json({ ...e, active: engine.active.has(req.params.id), identity: resolvedMap(s), people: people.status(s), template: people.templateStatus(s), assemblyVersion: assemblyOf(s), run: runs.active(req.params.id) }); }));
+    res.json({ ...e, active: engine.active.has(req.params.id), identity: resolvedMap(s, generationProvenance(store)), people: people.status(s), template: people.templateStatus(s), assemblyVersion: assemblyOf(s), run: runs.active(req.params.id) }); }));
   // Conversation edits go through the explicit retcon operation; this is a field-level merge.
   app.post('/api/branches/:id/settings', route((req,res) => res.json(people.settings(req.params.id, req.body))));
   app.post('/api/branches/:id/people/preview', route((req,res) => res.json(people.previewAdd(req.params.id, req.body))));
@@ -197,7 +203,7 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.post('/api/vault-kinds', route((req,res) => res.json(vault.createKind(req.body))));
   app.post('/api/vault-kinds/:id/revise', route((req,res) => res.json(vault.reviseKind(req.params.id, req.body))));
   app.post('/api/vault-kinds/:id/archive', route((req,res) => res.json(vault.archiveKind(req.params.id, req.body))));
-  app.post('/api/branches/:id/messages', route((req,res) => res.json(engine.message(req.params.id, req.body.expected, req.body.text || '',req.body.attachments))));
+  app.post('/api/branches/:id/messages', route((req,res) => { const before = engine.read(req.params.id).head, b = engine.message(req.params.id, req.body.expected, req.body.text || '',req.body.attachments); runs.humanMessage(b.id, before, b.head); res.json(b); }));
   app.post('/api/branches/:id/messages/:message/delete', route((req,res) => res.json(engine.deleteMessage(req.params.id,req.body.expected,req.params.message))));
   app.post('/api/branches/:id/messages/restore', route((req,res) => res.json(engine.restoreMessage(req.params.id,req.body.expected,req.body.deletion))));
   app.post('/api/branches/:id/turn', route(async(req,res) => res.json(await engine.turn(req.params.id, req.body.expected, req.body.speaker || undefined, runInfo(req.body.run)))));
@@ -208,16 +214,17 @@ export function createApp(engine = new Engine(defaultStore())) {
     const b = engine.read(req.params.id);
     if (b.head !== req.body.expected) throw Error('Branch changed; reload before retconning');
     if (!Array.isArray(req.body.messages) || !['keep','clear'].includes(req.body.memory)) throw Error('Invalid history retcon');
-    const previous = b.revision.state, state = structuredClone(previous), v2 = assemblyOf(state) === 'v2';
+    const previous = b.revision.state, state = structuredClone(previous), v2 = assemblyOf(state) === 'v2', provenance = generationProvenance(store);
     const originals = new Map(state.messages.map(m => [m.id,m]));
     // Text-only edits keep attribution. Changing it takes an explicit choice; a retyped label never silently reassigns identity.
     state.messages = req.body.messages.map((m: any) => {
       const old = originals.get(m.id), typed = typeof m.speaker === 'string' ? m.speaker.trim() : '';
       if (m.speakerRef !== undefined && !validRef(m.speakerRef)) throw Error('Choose a person, you, the narrator or unbound for each message');
-      const refChanged = m.speakerRef !== undefined && (!old || JSON.stringify(m.speakerRef) !== JSON.stringify(resolveSpeaker(previous, old)));
+      const refChanged = m.speakerRef !== undefined && (!old || JSON.stringify(m.speakerRef) !== JSON.stringify(resolveSpeaker(previous, old, provenance)));
       const speakerChanged = !!old && !refChanged && typed !== old.speaker;
       if (old && old.text === m.text && !refChanged && !speakerChanged) return old;
-      const ref = refChanged ? m.speakerRef : speakerChanged ? { kind: 'unbound' } : old ? old.speakerRef : v2 ? { kind: 'unbound' } : undefined;
+      // Every newly edited line records its resolved attribution; historical records are never touched.
+      const ref = refChanged ? m.speakerRef : speakerChanged ? { kind: 'unbound' } : old ? resolveSpeaker(previous, old, provenance) : v2 ? { kind: 'unbound' } : undefined;
       const speaker = refChanged || (!old && ref) ? labelFor(state, ref, typed) : speakerChanged || !old ? typed : old.speaker;
       if (v2 && ref?.kind === 'unbound' && (speakerChanged || !old || refChanged)) validateLabel(speaker);
       return { id: id(), speaker, ...(ref ? { speakerRef: ref } : {}), text: m.text, source: 'edited', ...(old ? {editedFrom:[old.id,...(old.editedFrom||[])],turnId:old.turnId, ...(old.attachments?{attachments:old.attachments}:{})} : {}) };

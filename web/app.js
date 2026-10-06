@@ -170,7 +170,7 @@ function controlsHtml(key){
   const rec=records.get(key),s=rec.branch.revision.state,d=drafts.get(key)||{},generating=isBusy(key),busy=generating||attachmentBusy(key),run=runs.get(key),remote=!run&&rec.run,empty=!s.participants.length;
   // The run line reflects the server's run record (checked against the branch), not a guess from local state.
   const status=run?(run.stopping?'Stopping…':`Run · turn ${run.index} of ${run.count}${run.usage?' · '+usageText(run.usage):''}`):remote?`A run is active (turn ${remote.turns.length} of ${remote.maxTurns}${remote.usage?' · '+usageText(remote.usage):''})`:generating?'Generating…':'';
-  return `${empty?'<p class="notice">Nobody is in this room yet. Use <button type="button" class="link-button" data-add-person-now="'+key+'">Add person</button> in Characters to begin.</p>':''}<div class="turn-controls"><label>Next voice <select data-speaker><option value="">Random participant</option>${s.participants.map(p=>`<option value="${esc(p)}" ${p===d.speaker?'selected':''}>${esc(labelOf(s,p))}</option>`).join('')}</select></label><label>Turns <input data-count type="number" value="${esc(d.count||1)}" min="1" max="20"></label>${s.participants.length===2?`<label title="Each turn goes to whichever of the two didn't speak last"><input data-alternate type="checkbox" ${(d.alternate??s.flow==='alternate')?'checked':''} style="width:auto"> Back-and-forth</label>`:''}<button data-generate="${key}" class="primary" ${busy||empty?'disabled':''}>Continue ↗</button><button data-stop="${key}" ${generating?'':'hidden'}>Stop</button><span class="muted" role="status">${esc(status)}</span></div>${attachmentComposer(key)}<form data-compose="${key}"><textarea data-text aria-label="Your message" rows="2" placeholder="Say something to this conversation…" ${messageSends.has(key)?'disabled':''}>${esc(d.text||'')}</textarea><button class="primary" type="submit" ${busy?'disabled':''}>Send</button></form>`;
+  return `${empty?'<p class="notice">Nobody is in this room yet. Use <button type="button" class="link-button" data-add-person-now="'+key+'">Add person</button> in Characters to begin.</p>':''}<div class="turn-controls"><label>Next voice <select data-speaker><option value="">Random participant</option>${s.participants.map(p=>`<option value="${esc(p)}" ${p===d.speaker?'selected':''}>${esc(labelOf(s,p))}</option>`).join('')}</select></label><label>Turns <input data-count type="number" value="${esc(d.count||1)}" min="1" max="20"></label>${s.participants.length===2?`<label title="Each turn goes to whichever of the two didn't speak last"><input data-alternate type="checkbox" ${(d.alternate??s.flow==='alternate')?'checked':''} style="width:auto"> Back-and-forth</label>`:''}<button data-generate="${key}" class="primary" ${busy||empty?'disabled':''}>Continue ↗</button><button data-stop="${key}" ${generating?'':'hidden'}>Stop</button><span class="muted" role="status">${esc(status)}</span></div>${attachmentComposer(key)}<form data-compose="${key}"><textarea data-text aria-label="Your message" rows="2" placeholder="Say something to this conversation…" ${messageSends.has(key)?'disabled':''}>${esc(d.text||'')}</textarea><button class="primary" type="submit" ${attachmentBusy(key)?'disabled':''} title="You can speak during a run; the run continues after your message">Send</button></form>`;
 }
 function changesBadge(key){const c=records.get(key)?.changes;if(!c?.fork)return '';const all=RoomChanges.badges(c.changes);return `<button class="changes-badge" data-changes="${key}" title="View changes since fork">${esc(all.slice(0,3).join(' · ')||'No changes since fork')}${all.length>3?' · +'+(all.length-3)+' more':''}</button>`;}
 function render(){
@@ -214,7 +214,7 @@ function render(){
     $('#messages').innerHTML=messagesHtml(s,current);
     const footer=document.querySelector('main > footer');footer.dataset.controls=current;footer.innerHTML=controlsHtml(current)+'<div class="footnote">Sending adds your message. Continue gives a character the floor.</div>';
   }
-  bindControls();renderPanel(false);paintJev();scheduleJevPoll();
+  bindControls();renderPanel(false);paintJev();scheduleJevPoll();scheduleRunPoll();
 }
 function bindControls(){
   document.querySelectorAll('[data-changes]').forEach(b=>b.onclick=()=>{paneChanges=null;focusPane(b.dataset.changes,'changes');});
@@ -238,6 +238,13 @@ function bindControls(){
   bindAttachmentControls();
   document.querySelectorAll('[data-text]').forEach(t=>t.onkeydown=e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))t.closest('form').requestSubmit();});
 }
+// Runs advanced by another tab are polled until they end; focus and reconnect refresh at once.
+let runPollTimer=null;
+function scheduleRunPoll(){
+  clearTimeout(runPollTimer);const visible=comparison?[comparison.left,comparison.right]:current?[current]:[];
+  if(visible.some(k=>records.get(k)?.run&&!runs.has(k)))runPollTimer=setTimeout(()=>{refresh().catch(()=>{});},2000);
+}
+addEventListener('focus',()=>{if(boot)refresh().catch(()=>{});});addEventListener('online',()=>{if(boot)refresh().catch(()=>{});});
 function scrollMessages(key){const pane=document.querySelector(`[data-pane="${key}"] .pane-messages`);const el=pane||(!comparison&&key===current?$('#messages'):null);if(el)el.scrollTop=el.scrollHeight;}
 async function runTurns(key){
   if(isBusy(key)||attachmentBusy(key))return;rememberInputs();const rec=records.get(key),s=rec.branch.revision.state,d=drafts.get(key)||{},count=Number(d.count||1),speaker=d.speaker||'',alternate=!!(d.alternate??s.flow==='alternate')&&s.participants.length===2;
@@ -246,7 +253,8 @@ async function runTurns(key){
   const policy=alternate?{kind:'alternate',...(speaker?{speaker}:{})}:speaker?{kind:'fixed',speaker}:{kind:'random'};
   const record=await api('/branches/'+key+'/runs',{expected:rec.branch.head,maxTurns:count,policy});
   const run={id:record.id,count,index:1,stopping:false,usage:record.usage};runs.set(key,run);render();
-  try{for(let n=1;n<=count&&!run.stopping;n++){run.index=n;render();const out=await api('/runs/'+run.id+'/turns',{index:n});run.usage=out.run.usage;await refresh();scrollMessages(key);if(out.run.status!=='running')break;}}
+  // The server decides when the run is done: a turn detached by your interjection doesn't count toward the limit.
+  try{for(let n=1;n<=count*3&&!run.stopping;n++){const out=await api('/runs/'+run.id+'/turns',{index:n});run.usage=out.run.usage;run.index=out.run.turns.length-(out.run.uncounted?.length||0)+1;await refresh();scrollMessages(key);if(out.run.status!=='running')break;}}
   finally{runs.delete(key);await refresh();}
 }
 function renderPanel(force = true) {
