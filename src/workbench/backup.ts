@@ -85,7 +85,8 @@ export async function backup(o: BackupOptions) {
     return { ok: false, status: dest ? 'INCOMPLETE' : 'failed', dir: dest, reason: e.message };
   } finally {
     if (stopped) { try { await o.service.start(); log('Service reloaded.'); } catch (e: any) { log(`WARNING: could not reload the service: ${e.message}. Reload it manually.`); } }
-    else if (!o.offlineConfirmed) await api(o.apiBase, '/api/admin/quiesce', { on: false }).catch(() => {});
+    // A reloaded service starts unpaused; a server that was never stopped (no service control) is unpaused explicitly.
+    if (!o.offlineConfirmed) await api(o.apiBase, '/api/admin/quiesce', { on: false }).catch(() => {});
   }
 }
 const freePort = () => new Promise<number>((resolve, reject) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as net.AddressInfo).port; s.close(() => resolve(p)); }); s.on('error', reject); });

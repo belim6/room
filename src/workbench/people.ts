@@ -4,6 +4,7 @@ import { clone, id } from './store';
 import { DEFAULT_MODEL } from './generation';
 import { EMPTY_FRAME } from '../speakerTurn';
 import { assemblyOf, labelOf, validateLabel, NARRATOR } from './identity';
+import { lineDiff } from './changes';
 // People in rooms: instantiation, renames, participation and explicit, previewed adoption. Nothing here calls a provider.
 const FIELDS: TemplateField[] = ['system', 'frame', 'flow'];
 const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -23,16 +24,18 @@ export class People {
   originText(c: Character) { try { return c.origin ? this.vault.revision(c.origin.revision).content.compiled as string : null; } catch { return null; } }
   status(s: State) {
     return Object.fromEntries(Object.entries(s.characters).map(([key, c]) => {
-      const compiled = this.originText(c); let head: string | null = null, title: string | null = null;
-      if (c.origin) try { const item = this.vault.item(c.origin.item); head = item.head; title = item.title; } catch {}
+      // "Update available" means the persona's head compiles to different text than the revision this person came from.
+      const compiled = this.originText(c); let latest: string | null = null, title: string | null = null;
+      if (c.origin) try { const item = this.vault.item(c.origin.item); latest = item.head === c.origin.revision ? null : this.vault.revision(item.head).content.compiled; title = item.title; } catch {}
       return [key, { label: labelOf(s, key), active: s.participants.includes(key), origin: c.origin ?? null, originTitle: title,
-        diverged: compiled !== null && compiled !== c.prompt, updateAvailable: !!c.origin && !!head && head !== c.origin.revision }];
+        diverged: compiled !== null && compiled !== c.prompt, updateAvailable: latest !== null && latest !== compiled }];
     }));
   }
   templateStatus(s: State) {
     return Object.fromEntries(FIELDS.filter(f => s.templateFields?.[f]).map(f => {
-      const p = s.templateFields![f]!; let head: string | null = null; try { head = this.vault.item(p.item).head; } catch {}
-      return [f, { ...p, diverged: !same(f === 'flow' ? s.flow ?? 'random' : s[f], p.value), updateAvailable: !!head && head !== p.revision }];
+      // Per field: an update is available only when the template's head sets this field to a different value.
+      const p = s.templateFields![f]!; let latest: unknown; try { const item = this.vault.item(p.item); if (item.head !== p.revision) latest = this.vault.revision(item.head).content[f]; } catch {}
+      return [f, { ...p, diverged: !same(f === 'flow' ? s.flow ?? 'random' : s[f], p.value), updateAvailable: latest !== undefined && !same(latest, p.value) }];
     }));
   }
   private person(input: any): Character {
@@ -92,7 +95,7 @@ export class People {
     const rev = this.revisionOf(input.persona, 'persona');
     if (c.origin && c.origin.item !== input.persona.item) throw Error('This person came from a different persona');
     const compiled = this.originText(c), diverged = c.origin ? compiled !== c.prompt : !!c.prompt.trim();
-    return { person, diverged, fields: { prompt: { before: c.prompt, after: rev.content.compiled }, origin: { before: c.origin ?? null, after: { item: input.persona.item, revision: input.persona.revision } } },
+    return { person, diverged, diff: lineDiff(c.prompt, rev.content.compiled), fields: { prompt: { before: c.prompt, after: rev.content.compiled }, origin: { before: c.origin ?? null, after: { item: input.persona.item, revision: input.persona.revision } } },
       unchanged: ['label', 'situation', 'memory', 'provider', 'model', 'temperature', 'reasoning'] };
   }
   // Adoption touches only the prompt and its origin, on the current branch only. A locally edited prompt needs replace-or-cancel.
@@ -109,8 +112,9 @@ export class People {
     return { fields: Object.fromEntries(FIELDS.map(f => {
       const before = f === 'flow' ? s.flow ?? 'random' : s[f], after = t[f], p = s.templateFields?.[f];
       // Without provenance, or once edited here, the current value counts as local and replacing it needs confirmation.
-      return [f, { before: before ?? null, after: after ?? null, available: after !== undefined, changed: after !== undefined && !same(before, after), local: !p || !same(before, p.value), provenance: p ?? null }];
-    })) as Record<TemplateField, { before: unknown; after: unknown; available: boolean; changed: boolean; local: boolean; provenance: unknown }> };
+      const text = (v: unknown) => typeof v === 'string' ? v : v === undefined ? '' : JSON.stringify(v, null, 2);
+      return [f, { before: before ?? null, after: after ?? null, available: after !== undefined, changed: after !== undefined && !same(before, after), local: !p || !same(before, p.value), provenance: p ?? null, diff: lineDiff(text(before), text(after)) }];
+    })) as Record<TemplateField, { before: unknown; after: unknown; available: boolean; changed: boolean; local: boolean; provenance: unknown; diff: unknown }> };
   }
   // Template → room covers system, frame and flow, each opted in individually. Cast and opening are never re-applied.
   adoptTemplate(branch: string, input: any) {
@@ -138,7 +142,7 @@ export class People {
     if (t.opening) s.messages.push({ id: id(), speaker: t.opening.kind === 'human' ? s.human : NARRATOR, speakerRef: { kind: t.opening.kind }, text: t.opening.text, source: 'template' });
     if (s.flow === 'alternate' && s.participants.length !== 2) s.flow = 'random';
     s.origin = { template: ref };
-    s.templateFields = Object.fromEntries(FIELDS.map(f => [f, { ...ref, value: clone(f === 'flow' ? s.flow : s[f]) }]));
+    s.templateFields = Object.fromEntries(FIELDS.filter(f => t[f] !== undefined).map(f => [f, { ...ref, value: clone(f === 'flow' ? s.flow : s[f]) }]));
     return this.engine.create(name, s, null, null, undefined, undefined, `Room created from template · ${this.vault.item(ref.item).title}`);
   }
   // Settings save is a field-level merge: people are added, renamed and removed through their own actions.
