@@ -936,7 +936,7 @@ test('§9.11 template adoption changes only opted-in fields; locally modified va
 test('§9.12 archived components still compile; wrong items, wrong kinds and mismatched compiled text are rejected',()=>{
   const {vault}=world(),{parts,persona:p}=persona(vault,['  a  ','b']);
   const blank=vault.create({type:'component',title:'blank',content:{text:'   '}});
-  vault.archive(parts[0].item.id,{expected:parts[0].item.head,archived:true});
+  vault.archive(parts[0].item.id,{expected:parts[0].item.version,archived:true});
   const p2=vault.create({type:'persona',title:'again',content:{components:[ref(parts[0]),ref(blank),ref(parts[1])],extra:' x '}});
   assert.equal(p2.current.content.compiled,'a\n\nb\n\nx');assert.equal(compileV1([],''),'');assert.equal(vault.detail(p2.item.id).item.archived,false);
   assert.equal(vault.create({type:'persona',title:'empty',content:{components:[]}}).current.content.compiled,'');
@@ -978,7 +978,7 @@ test('§9.15 runs: one generation per index, Stop is final, browser loss and res
   runs.timeoutMs=60;b=e.read(b.id);const lost=runs.start(b.id,{expected:b.head,maxTurns:2});await runs.advance(lost.id,1);await new Promise(r=>setTimeout(r,150));
   assert.equal(statusOf(runs.get(lost.id)),'interrupted');assert.match(runs.get(lost.id).transitions.at(-1)!.reason!,/browser/);runs.timeoutMs=60000;
   // Head moved outside the run.
-  b=e.read(b.id);const moved=runs.start(b.id,{expected:b.head,maxTurns:2});e.message(b.id,b.head,'Interjection');assert.equal(statusOf(runs.get(moved.id)),'interrupted');
+  b=e.read(b.id);const moved=runs.start(b.id,{expected:b.head,maxTurns:2});people.settings(b.id,{expected:b.head,system:'Changed outside the run'});assert.equal(statusOf(runs.get(moved.id)),'interrupted');
   await assert.rejects(runs.advance(moved.id,1),/interrupted/);
   // Stop while a turn is in flight: the late reply is canceled, never attached.
   const slowRuns=new Runs(slow);b=e.read(b.id);const inflight=slowRuns.start(b.id,{expected:b.head,maxTurns:2,policy:{kind:'fixed',speaker:person(b.revision.state,'A')}});
@@ -1015,3 +1015,104 @@ test('§9.16 creating, revising, composing, previewing, instantiating, adopting,
   }finally{await close();}
 });
 function vault_head(s:Store,item:string){return s.get('vault-items',item).head;}
+
+// ---- Review fixes (coordination/2026-10-06/12) ----
+async function serve(e:ProductionEngine){const {app,base,close}=await listen(e);const call=async(url:string,body?:any)=>{const r=await fetch(base+'/api'+url,body===undefined?{}:json(body));return {status:r.status,value:await r.json() as any};};return {app,base,close,call};}
+function gated(s:Store){let release:()=>void=()=>{};const gates:Promise<void>[]=[];let n=0;const bodies:any[]=[];
+  const e=new ProductionEngine(s,async(_u,opts)=>{bodies.push(JSON.parse(String(opts?.body)));const signal=opts?.signal;const i=n++;if(gates[i])await Promise.race([gates[i],new Promise((_r,rej)=>signal?.addEventListener('abort',()=>rej(new DOMException('Canceled','AbortError')),{once:true}))]);return new Response(JSON.stringify({choices:[{message:{content:'Reply '+i+'.'},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1}}));});
+  return {e,bodies,hold:(i:number)=>{gates[i]=new Promise<void>(r=>release=r);},release:()=>release()};}
+const tick=(ms=20)=>new Promise(r=>setTimeout(r,ms));
+test('fix 1: while a turn is pending, another index is refused before the record changes, and Stop still aborts the pending turn',async()=>{
+  const s=store(),g=gated(s),people=new People(g.e,new Vault(s)),runs=new Runs(g.e);
+  let b=people.createRoom({name:'Pending'});b=people.add(b.id,{expected:b.head,label:'A'});
+  const r=runs.start(b.id,{expected:b.head,maxTurns:3});g.hold(0);const first=runs.advance(r.id,1);await tick();
+  await assert.rejects(runs.advance(r.id,2),/still running/);
+  const rec=s.get('runs',r.id);assert.equal(rec.turns.length,1);assert.equal(statusOf(rec),'running');assert.equal((await runs.advance(r.id,1)).status,'pending');
+  runs.stop(r.id);const out=await first;assert.equal(out.status,'canceled');
+  assert.equal(g.e.read(b.id).revision.state.messages.length,0,'the aborted reply never attaches');assert.equal(statusOf(runs.get(r.id)),'stopped');
+});
+test('fix 2: text-only edits keep legacy attribution when the human name equals a character name',async()=>{
+  const {s}=world(),e=new Engine(s,recorder('Character line.').transport),{close,call}=await serve(e);
+  try{
+    const st=initialState();delete st.frame;st.human='Boris';let b=e.create('Collision',st);
+    b=e.message(b.id,b.head,'Human line');b=await e.turn(b.id,b.head,'Boris');
+    const [human,generated]=b.revision.state.messages;
+    const retconned=e.retcon(b.id,b.head,generated.id,'Character line, edited.','keep','keep');
+    assert.deepEqual(retconned.revision.state.messages[1].speakerRef,{kind:'person',id:'Boris'});
+    assert.deepEqual(s.get('revisions',b.head).state.messages[1].speakerRef,undefined,'historical records are untouched');
+    const edited=(await call('/branches/'+b.id+'/history',{expected:retconned.head,memory:'keep',messages:retconned.revision.state.messages.map((m:any,i:number)=>({id:m.id,speaker:m.speaker,text:i===0?'Human line, edited.':m.text}))})).value;
+    assert.deepEqual(edited.revision.state.messages[0].speakerRef,{kind:'human'});assert.deepEqual(edited.revision.state.messages[1].speakerRef,{kind:'person',id:'Boris'});
+    // An edit saved before this fix (no speakerRef) is rescued by its generation link.
+    const old=clone(b.revision.state);old.messages[1]={...generated,id:'legacy-edit',source:'edited',text:'Edited long ago'};const legacy=e.create('Old edit',old);
+    assert.deepEqual((await call('/branches/'+legacy.id)).value.identity['legacy-edit'],{kind:'person',id:'Boris'});
+    assert.deepEqual(resolveSpeaker(old,old.messages[1]),{kind:'unbound'},'without provenance it stays unbound');void human;
+  }finally{await close();}
+});
+test('fix 3: archive and restore expect a metadata version, so a stale token is rejected for items and kinds',()=>{
+  const {vault}=world(),{parts}=persona(vault,['x']),item=parts[0].item;
+  const archived=vault.archive(item.id,{expected:item.version,archived:true});assert.notEqual(archived.item.version,item.version);
+  assert.throws(()=>vault.archive(item.id,{expected:item.version,archived:false}),/changed/);assert.equal(vault.item(item.id).archived,true);
+  vault.archive(item.id,{expected:archived.item.version,archived:false});
+  const k=vault.kinds()[0],k2=vault.archiveKind(k.id,{expected:k.version,archived:true});
+  assert.throws(()=>vault.archiveKind(k.id,{expected:k.version,archived:false}),/changed/);assert.equal(vault.kinds().find(x=>x.id===k.id)!.archived,true);
+  vault.archiveKind(k.id,{expected:k2.version,archived:false});
+  const revised=vault.reviseKind(k.id,{expected:k.head,name:'renamed'});assert.throws(()=>vault.archiveKind(k.id,{expected:k2.version,archived:true}),/changed/);void revised;
+});
+test('fix 4: empty room → add person → Continue works without a human message, with an inspectable request',async()=>{
+  const {e,calls}=world('First words.'),{close,call}=await serve(e);
+  try{
+    let b=(await call('/branches',{name:'Empty'})).value;assert.equal(b.revision.state.system,'');assert.deepEqual(b.revision.state.frame,DEFAULT_FRAME);
+    b=(await call('/branches/'+b.id+'/people',{expected:b.head,label:'the host',prompt:'You host.'})).value;
+    const run=(await call('/branches/'+b.id+'/runs',{expected:b.head,maxTurns:1})).value,out=(await call('/runs/'+run.id+'/turns',{index:1})).value;
+    assert.equal(out.status,'attached');assert.equal(calls.length,1);
+    const user=calls[0].messages.at(-1).content;assert(user.startsWith('The conversation has not started yet.'));assert(!calls[0].messages[0].content.includes('group conversation'),'no legacy room instructions');
+    const inspect=(await call('/branches/'+b.id)).value;assert.equal(inspect.attempts.length,1);assert.equal(inspect.attempts[0].body.messages.at(-1).content,user);
+  }finally{await close();}
+});
+test('fix 6: reaction views and exports carry the resolved identity and lineage beside the written label',async()=>{
+  const {e,people}=world('Hello.'),{base,close,call}=await serve(e);
+  try{
+    let b=people.createRoom({name:'Marked'});b=people.add(b.id,{expected:b.head,label:'Velric'});const v=person(b.revision.state,'Velric');
+    b=e.message(b.id,b.head,'Hi');b=await e.turn(b.id,b.head,v);const m=b.revision.state.messages[1];const child=e.fork(b.id,b.head,'Child');
+    people.rename(child.id,v,{expected:child.head,label:'the judge'});await call('/reactions',{branch:child.id,message:m.id,value:'favorite'});
+    const [item]=(await call('/reactions/favorite')).value;
+    assert.equal(item.speaker,'Velric');assert.deepEqual(item.speakerRef,{kind:'person',id:v});assert.equal(item.lineage.root,b.id);assert.equal(item.lineage.rootName,'Marked');
+    const exported:any=await (await fetch(base+'/api/reactions/favorite/export')).json();assert.deepEqual(exported.items[0].speakerRef,{kind:'person',id:v});assert.equal(exported.items[0].lineage.root,b.id);
+  }finally{await close();}
+});
+test('decision B: a human message continues a run, between turns and during an in-flight turn',async()=>{
+  const s=store(),g=gated(s),{app,close,call}=await serve(g.e),people:People=app.locals.people;
+  try{
+    let b=people.createRoom({name:'Interject'});b=people.add(b.id,{expected:b.head,label:'A'});b=people.add(b.id,{expected:b.head,label:'B'});
+    // Between turns.
+    let run=(await call('/branches/'+b.id+'/runs',{expected:b.head,maxTurns:2})).value;await call('/runs/'+run.id+'/turns',{index:1});
+    let head=g.e.read(b.id).head;assert.equal((await call('/branches/'+b.id+'/messages',{expected:head,text:'Wait, me first.'})).status,200);
+    let out=(await call('/runs/'+run.id+'/turns',{index:2})).value;assert.equal(out.status,'attached');assert.equal(out.run.status,'completed');
+    assert(out.run.transitions.some((t:any)=>t.event==='human-message'));assert(JSON.stringify(g.bodies.at(-1)).includes('Wait, me first.'));
+    // During an in-flight turn: the old-head reply is detached, doesn't count, and the next turn uses the new head.
+    head=g.e.read(b.id).head;run=(await call('/branches/'+b.id+'/runs',{expected:head,maxTurns:1})).value;
+    g.hold(g.bodies.length);const pending=call('/runs/'+run.id+'/turns',{index:1});await tick(50);
+    assert.equal((await call('/branches/'+b.id+'/messages',{expected:head,text:'Interrupting.'})).status,200);g.release();
+    out=(await pending).value;assert.equal(out.status,'detached');assert.equal(out.run.status,'running');assert.equal(out.run.uncounted.length,1);
+    out=(await call('/runs/'+run.id+'/turns',{index:2})).value;assert.equal(out.status,'attached');assert.equal(out.run.status,'completed');
+    const texts=g.e.read(b.id).revision.state.messages.map(m=>m.text);assert.equal(texts.at(-2),'Interrupting.');assert(!texts.includes('Reply 2.'),'the detached reply is not attached');assert.equal(texts.at(-1),'Reply 3.');
+    assert(JSON.stringify(g.bodies.at(-1)).includes('Interrupting.'));
+    // Any other head change still interrupts.
+    head=g.e.read(b.id).head;run=(await call('/branches/'+b.id+'/runs',{expected:head,maxTurns:1})).value;people.settings(b.id,{expected:head,system:'x'});
+    assert.equal((await call('/runs/'+run.id)).value.status,'interrupted');
+  }finally{await close();}
+});
+test('decision D: kind seeding finishes an interrupted starter set without duplicates',()=>{
+  const s=store(),vault=new Vault(s);vault.createKind({name:'archetype',description:'partial'},'starter-archetype');
+  vault.seedKinds();assert.equal(vault.kinds().length,8);assert.equal(vault.kinds().filter(k=>k.name==='archetype').length,1);
+  vault.seedKinds();assert.equal(vault.kinds().length,8);assert(fs.existsSync(s.file('vault-meta','starter-kinds')));
+});
+test('decision E: an already-stopped service stays stopped; restore verification labels matching-version vs newer-code checks',async()=>{
+  const data=store(),e=new ProductionEngine(data);e.create('Room');
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'room-backups-'));roots.push(root);const calls:string[]=[];
+  const out=await backup({dataDir:data.root,backupRoot:root,apiBase:'',service:{async stop(){calls.push('stop');return false;},async start(){calls.push('start');}},appDir:process.cwd(),offlineConfirmed:true,holders:()=>[]});
+  assert(out.ok);assert.deepEqual(calls,['stop'],'never started when it was not running');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(out.dir!,'metadata.json'),'utf8')).appDir,process.cwd());
+  const newer=await verifyRestore({backup:out.dir!,appDir:process.cwd()});assert(newer.ok,newer.reason);assert.equal(newer.mode,'compatibility with newer code');
+  const matching=await verifyRestore({backup:out.dir!});assert(matching.ok,matching.reason);assert.equal(matching.mode,'matching-version restore');
+});

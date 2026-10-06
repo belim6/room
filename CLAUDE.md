@@ -41,8 +41,14 @@ Node 22, run through `tsx`; no build step and no auto-reload. Server code change
   - `generation.ts` — provider calls (`opengateway`, `together`, and local `demo`, which only generates when `ROOM_DEMO=1`); persists the request before dispatch and the outcome after.
   - `jev.ts` — nonblocking shadow Jev call per turn.
   - `comparisons.ts` — saved side-by-side comparisons of live branches.
-  - `server.ts` — Express API, loopback-only.
-- `web/` — vanilla JS/CSS frontend (`app.js` holds all UI state).
+  - `identity.ts` — speakerRef, the compatibility resolver for legacy messages, label rules, validation rosters (legacy-v1 vs v2).
+  - `vault.ts` — components, personas (compiler v1), room templates, kinds; mutable metadata with immutable revisions.
+  - `people.ts` — people in rooms: add, rename, participation, previewed persona/template adoption, room creation, field-level settings merge.
+  - `runs.ts` — run records for browser-driven bounded runs (consecutive indexes, Stop, interjections, interruption, usage).
+  - `backup.ts` — offline backup with manifest and restore verification (`npm run backup`, `npm run backup:verify-restore`); `scripts/backup.ts` is the CLI.
+  - `alternatives.ts`, `experiments.ts`, `attachments.ts`, `changes.ts`, `transcriptExport.ts` — Revise, experiments, files, change views, print export.
+  - `server.ts` — Express API, loopback-only. `ROOM_READONLY=1` makes an instance read-only.
+- `web/` — vanilla JS/CSS frontend (`app.js` holds all UI state; `vault.js` is the Vault area).
 - Shared with the workbench: `src/personas/personas.ts` (the cast), `src/speakerTurn.ts` (speaker input + wrong-speaker check), `src/replyLimit.ts` (2,000-char cap), `GLOBAL_SYSTEM` from `src/modelRouter.ts`.
 - Legacy, not used by the workbench: `src/discord.ts`, `jevLog.ts`, `jevSpeaker.ts`, `research.ts`, `webhooks.ts`, `personaWebhooks.ts`, `participants.ts`, and the Letta leftovers `src/server.ts`, `src/messages.ts`, `setup.sh`. `scripts/jevEval.ts` holds the Jev measurements cited in JEV_SPEC §3.
 
