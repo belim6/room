@@ -1116,3 +1116,18 @@ test('decision E: an already-stopped service stays stopped; restore verification
   const newer=await verifyRestore({backup:out.dir!,appDir:process.cwd()});assert(newer.ok,newer.reason);assert.equal(newer.mode,'compatibility with newer code');
   const matching=await verifyRestore({backup:out.dir!});assert(matching.ok,matching.reason);assert.equal(matching.mode,'matching-version restore');
 });
+test('client run driver continues until the server ends the run; polling backs off and survives failures',async()=>{
+  const R=require('../web/runs-view.js');const statuses=['running','running','running','completed'];const asked:number[]=[];
+  const out=await R.drive(async(n:number)=>{asked.push(n);return {run:{status:statuses[n-1]}};},async()=>{},()=>false);
+  assert.deepEqual(asked,[1,2,3,4],'three detached interjection turns, then the counted one');assert.equal(out.run.status,'completed');
+  let stop=false;const seen:number[]=[];await R.drive(async(n:number)=>{seen.push(n);if(n===2)stop=true;return {run:{status:'running'}};},async()=>{},()=>stop);assert.deepEqual(seen,[1,2]);
+  assert.deepEqual([0,1,2,3,10].map(R.pollDelay),[2000,4000,8000,16000,30000]);
+  const rec=(id:string,run:any)=>({branch:{id},run});
+  assert.equal(R.shouldPoll([rec('a',{id:'r'})],()=>false),true);assert.equal(R.shouldPoll([rec('a',{id:'r'})],(k:string)=>k==='a'),false);assert.equal(R.shouldPoll([rec('a',null),undefined],()=>false),false);
+  // The real client scheduler: a failed refresh leaves a retry timer behind.
+  const {runInNewContext}=require('node:vm');const src=fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8');
+  const fn=src.slice(src.indexOf('function scheduleRunPoll'),src.indexOf('addEventListener(\'focus\''));
+  const timers:any[]=[];const ctx:any={RoomRuns:R,records:new Map([['a',rec('a',{id:'r'})]]),runs:new Map(),comparison:null,current:'a',runPollTimer:null,clearTimeout(){},setTimeout(f:any,ms:number){timers.push({f,ms});return timers.length;},refresh:()=>Promise.reject(Error('offline'))};
+  runInNewContext(fn+';scheduleRunPoll();',ctx);assert.equal(timers.length,1);timers[0].f();await tick();
+  assert.equal(timers.length,2,'a failed poll reschedules');assert.equal(timers[1].ms,4000);
+});

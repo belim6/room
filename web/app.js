@@ -240,9 +240,10 @@ function bindControls(){
 }
 // Runs advanced by another tab are polled until they end; focus and reconnect refresh at once.
 let runPollTimer=null;
-function scheduleRunPoll(){
-  clearTimeout(runPollTimer);const visible=comparison?[comparison.left,comparison.right]:current?[current]:[];
-  if(visible.some(k=>records.get(k)?.run&&!runs.has(k)))runPollTimer=setTimeout(()=>{refresh().catch(()=>{});},2000);
+// A failed refresh reschedules itself with backoff; a successful one re-renders, which reschedules from zero.
+function scheduleRunPoll(failures=0){
+  clearTimeout(runPollTimer);const visible=(comparison?[comparison.left,comparison.right]:current?[current]:[]).map(k=>records.get(k));
+  if(RoomRuns.shouldPoll(visible,k=>runs.has(k)))runPollTimer=setTimeout(()=>{refresh().catch(()=>scheduleRunPoll(failures+1));},RoomRuns.pollDelay(failures));
 }
 addEventListener('focus',()=>{if(boot)refresh().catch(()=>{});});addEventListener('online',()=>{if(boot)refresh().catch(()=>{});});
 function scrollMessages(key){const pane=document.querySelector(`[data-pane="${key}"] .pane-messages`);const el=pane||(!comparison&&key===current?$('#messages'):null);if(el)el.scrollTop=el.scrollHeight;}
@@ -254,7 +255,7 @@ async function runTurns(key){
   const record=await api('/branches/'+key+'/runs',{expected:rec.branch.head,maxTurns:count,policy});
   const run={id:record.id,count,index:1,stopping:false,usage:record.usage};runs.set(key,run);render();
   // The server decides when the run is done: a turn detached by your interjection doesn't count toward the limit.
-  try{for(let n=1;n<=count*3&&!run.stopping;n++){const out=await api('/runs/'+run.id+'/turns',{index:n});run.usage=out.run.usage;run.index=out.run.turns.length-(out.run.uncounted?.length||0)+1;await refresh();scrollMessages(key);if(out.run.status!=='running')break;}}
+  try{await RoomRuns.drive(n=>api('/runs/'+run.id+'/turns',{index:n}),async out=>{run.usage=out.run.usage;run.index=out.run.turns.length-(out.run.uncounted?.length||0)+1;await refresh();scrollMessages(key);},()=>run.stopping);}
   finally{runs.delete(key);await refresh();}
 }
 function renderPanel(force = true) {
