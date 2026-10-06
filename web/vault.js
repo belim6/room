@@ -98,7 +98,7 @@ function bindVaultDetail(){
   $('#vault-form').onsubmit=action(async ev=>{ev.preventDefault();const x=readVaultForm(),body={title:x.title,content:x.content,note:x.note};
     const result=v.open.startsWith('new:')?await api('/vault',{type:x.type,...body}):await api('/vault/'+v.detail.item.id+'/revise',{...body,expected:v.detail.item.head});
     v.open=result.item.id;v.draft=null;v.diff=null;await loadVault();render();});
-  $('#vault-archive')?.addEventListener('click',action(async()=>{await api('/vault/'+v.detail.item.id+'/archive',{expected:v.detail.item.head,archived:!v.detail.item.archived});v.draft=null;await loadVault();render();}));
+  $('#vault-archive')?.addEventListener('click',action(async()=>{await api('/vault/'+v.detail.item.id+'/archive',{expected:v.detail.item.version??v.detail.item.head,archived:!v.detail.item.archived});v.draft=null;await loadVault();render();}));
   document.querySelectorAll('[data-vault-diff]').forEach(b=>b.onclick=action(async()=>{v.diff=await api(`/vault/${v.detail.item.id}/diff?from=${encodeURIComponent(b.dataset.from)}&to=${encodeURIComponent(b.dataset.vaultDiff)}`);readVaultForm();render();}));
   const refs=()=>d.type==='persona'?d.content.components:d.content.cast.map(x=>x.persona);
   document.querySelectorAll('[data-ref-latest]').forEach(b=>b.onclick=action(async()=>{readVaultForm();const r=refs()[b.dataset.refLatest];r.revision=headOf(r.item);await refreshCompiled();render();}));
@@ -115,9 +115,9 @@ async function manageKinds(){
   if(!f)return;
   for(const k of kinds){
     const name=f.get('name-'+k.id),description=f.get('description-'+k.id),examples=f.get('examples-'+k.id).split('\n').map(x=>x.trim()).filter(Boolean),archived=f.get('archived-'+k.id)==='on';
-    let head=k.head;
-    if(name!==k.name||description!==k.description||JSON.stringify(examples)!==JSON.stringify(k.examples))head=(await api('/vault-kinds/'+k.id+'/revise',{expected:k.head,name,description,examples})).head;
-    if(archived!==k.archived)await api('/vault-kinds/'+k.id+'/archive',{expected:head,archived});
+    let version=k.version??k.head;
+    if(name!==k.name||description!==k.description||JSON.stringify(examples)!==JSON.stringify(k.examples))version=(await api('/vault-kinds/'+k.id+'/revise',{expected:k.head,name,description,examples})).version;
+    if(archived!==k.archived)await api('/vault-kinds/'+k.id+'/archive',{expected:version,archived});
   }
   if(f.get('new-name').trim())await api('/vault-kinds',{name:f.get('new-name'),description:f.get('new-description'),examples:[]});
   await loadVault();render();

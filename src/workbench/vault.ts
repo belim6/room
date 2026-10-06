@@ -1,13 +1,14 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import { Store, clone, id } from './store';
 import { lineDiff } from './changes';
 import { validateLabel, labelKey } from './identity';
 // Vault: mutable item metadata (head, archived, title) beside immutable revisions. Content is data; it never gains capabilities.
 export type ItemType = 'component' | 'persona' | 'room-template';
-export interface VaultItem { id: string; type: ItemType; title: string; head: string; createdAt: string; archived: boolean }
+// `version` advances on every metadata change (revision, title, archive); archive and restore expect it.
+export interface VaultItem { id: string; type: ItemType; title: string; head: string; createdAt: string; archived: boolean; version: string }
 export interface VaultRevision { id: string; item: string; parent: string | null; at: string; author: string; note?: string; schema: 1; content: any }
-export interface VaultKind { id: string; name: string; description: string; examples: string[]; archived: boolean; head: string; createdAt: string }
+export interface VaultKind { id: string; name: string; description: string; examples: string[]; archived: boolean; head: string; createdAt: string; version: string }
+const versionOf = (x: { version?: string; head: string }) => x.version ?? x.head;
 const now = () => new Date().toISOString();
 const TYPES: ItemType[] = ['component', 'persona', 'room-template'];
 // Seeded once into a fresh data directory as ordinary editable records.
@@ -27,9 +28,12 @@ const only = (o: any, keys: string[], what: string) => { if (!o || typeof o !== 
 const isRef = (r: any) => !!r && typeof r === 'object' && typeof r.item === 'string' && typeof r.revision === 'string' && Object.keys(r).length === 2;
 export class Vault {
   constructor(public store: Store) {}
+  // Idempotent: starter kinds have fixed IDs, missing ones are created, and a completion marker is written last,
+  // so an interrupted startup finishes the set next time instead of leaving it partial or duplicated.
   seedKinds() {
-    if (this.store.readOnly || fs.existsSync(path.join(this.store.root, 'vault-kinds'))) return;
-    for (const k of STARTER_KINDS) this.createKind({ ...k, note: 'Starter kind' });
+    if (this.store.readOnly || fs.existsSync(this.store.file('vault-meta', 'starter-kinds'))) return;
+    for (const k of STARTER_KINDS) { const key = 'starter-' + k.name.replace(/[^a-z0-9]+/g, '-'); if (!fs.existsSync(this.store.file('vault-kinds', key))) this.createKind({ ...k, note: 'Starter kind' }, key); }
+    this.store.put('vault-meta', 'starter-kinds', { id: 'starter-kinds', at: now(), kinds: STARTER_KINDS.length });
   }
   kinds() { return this.store.list<VaultKind>('vault-kinds').sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)); }
   private kindContent(input: any) {
@@ -37,10 +41,10 @@ export class Vault {
     if (!Array.isArray(examples) || examples.length > 20 || examples.some((e: unknown) => typeof e !== 'string' || e.length > 2000)) throw Error('Invalid kind examples');
     return { name: str(input.name, 80, 'kind name', false).trim(), description: str(input.description ?? '', 2000, 'kind description'), examples };
   }
-  createKind(input: any) {
-    const content = this.kindContent(input), kind = id(), rev = id(), at = now();
+  createKind(input: any, key?: string) {
+    const content = this.kindContent(input), kind = key ?? id(), rev = id(), at = now();
     this.store.put('vault-kind-revisions', rev, { id: rev, kind, parent: null, at, ...(input.note ? { note: String(input.note).slice(0, 2000) } : {}), content });
-    const value: VaultKind = { id: kind, ...content, archived: false, head: rev, createdAt: at }; this.store.put('vault-kinds', kind, value); return value;
+    const value: VaultKind = { id: kind, ...content, archived: false, head: rev, createdAt: at, version: id() }; this.store.put('vault-kinds', kind, value); return value;
   }
   // Renaming keeps the kind's ID, so components and analyses that refer to it don't break.
   reviseKind(key: string, input: any) {
@@ -48,13 +52,13 @@ export class Vault {
     if (input.expected !== kind.head) throw Error('This kind changed. Reload before editing it.');
     const content = this.kindContent(input), rev = id();
     this.store.put('vault-kind-revisions', rev, { id: rev, kind: key, parent: kind.head, at: now(), content });
-    const value = { ...kind, ...content, head: rev }; this.store.put('vault-kinds', key, value); return value;
+    const value = { ...kind, ...content, head: rev, version: id() }; this.store.put('vault-kinds', key, value); return value;
   }
   archiveKind(key: string, input: any) {
     const kind = this.store.get<VaultKind>('vault-kinds', key);
-    if (input.expected !== kind.head) throw Error('This kind changed. Reload before archiving it.');
+    if (input.expected !== versionOf(kind)) throw Error('This kind changed. Reload before archiving it.');
     if (typeof input.archived !== 'boolean') throw Error('Choose archive or restore');
-    const value = { ...kind, archived: input.archived }; this.store.put('vault-kinds', key, value); return value;
+    const value = { ...kind, archived: input.archived, version: id() }; this.store.put('vault-kinds', key, value); return value;
   }
   item(key: string) { const item = this.store.get<VaultItem>('vault-items', key); return item; }
   revision(key: string) { return this.store.get<VaultRevision>('vault-revisions', key); }
@@ -117,7 +121,7 @@ export class Vault {
   }
   create(input: any) {
     if (!TYPES.includes(input.type)) throw Error('Choose component, persona or room-template');
-    const content = this.validate(input.type, input.content), title = str(input.title, 120, 'title', false).trim(), item: VaultItem = { id: id(), type: input.type, title, head: '', createdAt: now(), archived: false };
+    const content = this.validate(input.type, input.content), title = str(input.title, 120, 'title', false).trim(), item: VaultItem = { id: id(), type: input.type, title, head: '', createdAt: now(), archived: false, version: id() };
     const rev: VaultRevision = { id: id(), item: item.id, parent: null, at: item.createdAt, ...this.meta(input), schema: 1, content };
     item.head = rev.id; this.store.put('vault-revisions', rev.id, rev); this.store.put('vault-items', item.id, item);
     return this.detail(item.id);
@@ -128,14 +132,14 @@ export class Vault {
     const content = this.validate(item.type, input.content);
     const rev: VaultRevision = { id: id(), item: key, parent: item.head, at: now(), ...this.meta(input), schema: 1, content };
     this.store.put('vault-revisions', rev.id, rev);
-    this.store.put('vault-items', key, { ...item, head: rev.id, ...(input.title !== undefined ? { title: str(input.title, 120, 'title', false).trim() } : {}) });
+    this.store.put('vault-items', key, { ...item, head: rev.id, version: id(), ...(input.title !== undefined ? { title: str(input.title, 120, 'title', false).trim() } : {}) });
     return this.detail(key);
   }
   archive(key: string, input: any) {
     const item = this.item(key);
-    if (input.expected !== item.head) throw Error('This vault item changed. Reload before archiving it.');
+    if (input.expected !== versionOf(item)) throw Error('This vault item changed. Reload before archiving it.');
     if (typeof input.archived !== 'boolean') throw Error('Choose archive or restore');
-    this.store.put('vault-items', key, { ...item, archived: input.archived }); return this.detail(key);
+    this.store.put('vault-items', key, { ...item, archived: input.archived, version: id() }); return this.detail(key);
   }
   // A preview: validated content with its compiled text, nothing written.
   compile(input: any) { if (!TYPES.includes(input.type)) throw Error('Unknown vault item type'); return this.validate(input.type, clone(input.content)); }

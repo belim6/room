@@ -2,7 +2,7 @@ import { Engine, emptyRoomState, assemble, validateState, type State, type Chara
 import { Vault, type VaultRevision } from './vault';
 import { clone, id } from './store';
 import { DEFAULT_MODEL } from './generation';
-import { EMPTY_FRAME } from '../speakerTurn';
+import { DEFAULT_FRAME } from '../speakerTurn';
 import { assemblyOf, labelOf, validateLabel, NARRATOR } from './identity';
 import { lineDiff } from './changes';
 // People in rooms: instantiation, renames, participation and explicit, previewed adoption. Nothing here calls a provider.
@@ -137,7 +137,7 @@ export class People {
     const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim() : 'New room', s = emptyRoomState();
     if (!input.template) return this.engine.create(name, s, null, null, undefined, undefined, 'Room created (empty)');
     const rev = this.revisionOf(input.template, 'room-template'), t = rev.content, ref = { item: input.template.item, revision: input.template.revision };
-    s.system = t.system; s.frame = t.frame ? { ...t.frame } : { ...EMPTY_FRAME }; s.flow = t.flow;
+    s.system = t.system; s.frame = t.frame ? { ...t.frame } : { ...DEFAULT_FRAME }; s.flow = t.flow;
     for (const entry of t.cast) { const c = this.person({ label: entry.label, situation: entry.situation, persona: entry.persona }); const key = id(); s.characters[key] = c; s.participants.push(key); }
     if (t.opening) s.messages.push({ id: id(), speaker: t.opening.kind === 'human' ? s.human : NARRATOR, speakerRef: { kind: t.opening.kind }, text: t.opening.text, source: 'template' });
     if (s.flow === 'alternate' && s.participants.length !== 2) s.flow = 'random';
