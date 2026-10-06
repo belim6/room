@@ -1,7 +1,7 @@
 import { Engine, type Message } from './engine';
 import { clone, id } from './store';
 import { generate, type GenerationInput } from './generation';
-import { LEGACY_NAMES } from './identity';
+import { LEGACY_NAMES, resolveSpeaker, generationProvenance } from './identity';
 const now=()=>new Date().toISOString();
 // A revision speaks as the original attempt did: its person, label, roster and assembly, never the room's current ones.
 // Attempts recorded before identities were split fall back to the persona name as ID and label and the 8 legacy names.
@@ -74,7 +74,7 @@ export class Alternatives {
     if(this.engine.active.has(review.branch))throw Error('Stop conversation generation before replacing a reply');
     const b=this.engine.read(review.branch),state=clone(b.revision.state),index=state.messages.findIndex(m=>m.id===review.message.id||m.review===review.id);
     if(index<0)throw Error('The original reply has been removed or retconned. The candidate remains in the research record.');
-    const previous=state.messages[index],next:Message={...previous,id:id(),text:judgment.text,source:'edited',turnId:candidate.turnId,review:review.id,editedFrom:[previous.id,...(previous.editedFrom||[])]};
+    const previous=state.messages[index],next:Message={...previous,speakerRef:resolveSpeaker(state,previous,generationProvenance(this.store)),id:id(),text:judgment.text,source:'edited',turnId:candidate.turnId,review:review.id,editedFrom:[previous.id,...(previous.editedFrom||[])]};
     state.messages[index]=next;
     // Provenance lives in the same immutable revision as the replacement.
     const result=this.engine.commit(b.id,input.expected,state,'Approved reply alternative applied',{kind:'replace-message',message:previous,index,candidate:key,judgment:judgment.id});

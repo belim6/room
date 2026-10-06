@@ -3,7 +3,7 @@ import { Engine, validateState, type State, type Character, type Revision } from
 import { clone, id } from './store';
 import { reasoningOf } from './generation';
 import { stateChanges } from './changes';
-import { speakerId } from './identity';
+import { speakerId, generationProvenance } from './identity';
 import type { Store } from './store';
 type Patch = Partial<Pick<State,'system'|'participants'|'shadow'|'policy'|'human'|'frame'|'assemblyVersion'>> & {characters?: Record<string,Partial<Character>>};
 export interface Condition { key: string; label: string; control?: boolean; patch: Patch }
@@ -177,8 +177,8 @@ export class Experiments {
     const b=this.engine.read(input.branch);
     if(b.fork!==e.base.revision&&b.fork!==this.workspaceOf(key)?.revision)throw Error('The trial must start at this experiment’s frozen checkpoint');
     const messages=b.revision.state.messages;
-    const state=b.revision.state,reply=input.turnId?messages.find(m=>m.turnId===input.turnId&&m.source==='generated'): [...messages].reverse().find(m=>m.source==='generated'&&speakerId(state,m)===e.speaker);
-    if(!reply?.turnId||speakerId(state,reply)!==e.speaker)throw Error('Choose an original generated reply by the measured speaker');
+    const state=b.revision.state,p=generationProvenance(this.store),reply=input.turnId?messages.find(m=>m.turnId===input.turnId&&m.source==='generated'): [...messages].reverse().find(m=>m.source==='generated'&&speakerId(state,m,p)===e.speaker);
+    if(!reply?.turnId||speakerId(state,reply,p)!==e.speaker)throw Error('Choose an original generated reply by the measured speaker');
     const turn=this.store.get('turns',reply.turnId);
     if(turn.branch!==b.id||turn.status!=='attached')throw Error('That turn was not attached to this trial branch');
     const attempts=this.store.attempts().filter(a=>a.turnId===reply.turnId);

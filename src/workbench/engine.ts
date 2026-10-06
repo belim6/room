@@ -3,7 +3,7 @@ import { generate, reasoningSwitchVerified, DEFAULT_MODEL, type Provider } from 
 import { PERSONAS, type PersonaName } from '../personas/personas';
 import { GLOBAL_SYSTEM } from '../modelRouter';
 import { buildSpeakerInput, fillFrame, EMPTY_FRAME, DEFAULT_FRAME, type Frame } from '../speakerTurn';
-import { assemblyOf, labelOf, labelKey, validateLabel, validRef, lastPerson, humanPresent, rosterOf, LEGACY_NAMES, type SpeakerRef, type Assembly } from './identity';
+import { assemblyOf, labelOf, labelKey, validateLabel, validRef, lastPerson, humanPresent, rosterOf, resolveSpeaker, generationProvenance, LEGACY_NAMES, type SpeakerRef, type Assembly } from './identity';
 import { shadowJev } from './jev';
 import { getAttachments, attachmentTranscript } from './attachments';
 
@@ -28,9 +28,10 @@ export function initialState(): State {
     characters: Object.fromEntries(names.map(name => [name, { prompt: PERSONAS[name].systemPrompt,
       memory: '', provider: 'opengateway', model: DEFAULT_MODEL, temperature: 0.7 }])) as State['characters'] };
 }
-// A new room starts from scratch: v2 assembly, no cast, transcript-only framing.
+// A new room starts from scratch: v2 assembly, no cast, no room instructions, and the default framing, so a first turn
+// with an empty transcript still sends an explicit opening line.
 export function emptyRoomState(): State {
-  return { frame: { ...EMPTY_FRAME }, system: GLOBAL_SYSTEM, participants: [], characters: {}, messages: [], shadow: false, policy: 'protected', human: 'Dennis', assemblyVersion: 'v2' };
+  return { frame: { ...DEFAULT_FRAME }, system: '', participants: [], characters: {}, messages: [], shadow: false, policy: 'protected', human: 'Dennis', assemblyVersion: 'v2' };
 }
 const isRef = (r: any) => !!r && typeof r === 'object' && typeof r.item === 'string' && !!r.item && typeof r.revision === 'string' && !!r.revision;
 // Strict identity checks apply only to identities that are new or changed relative to `previous`; history stays readable.
@@ -228,7 +229,8 @@ export class Engine {
     const source = (memory === 'restore' ? historical : b.revision).state;
     for (const person of Object.keys(s.characters)) if (Object.prototype.hasOwnProperty.call(source.characters, person)) s.characters[person].memory = source.characters[person].memory;
     if (mode === 'regenerate') s.messages = s.messages.slice(0, index + 1);
-    if (text.trim()) s.messages[index] = { ...s.messages[index], id: id(), text, source: 'edited', editedFrom: [s.messages[index].id, ...(s.messages[index].editedFrom || [])] };
+    // A retconned line carries its resolved attribution explicitly, so losing source 'generated'/'human' can't lose who said it.
+    if (text.trim()) s.messages[index] = { ...s.messages[index], speakerRef: resolveSpeaker(s, s.messages[index], generationProvenance(this.store)), id: id(), text, source: 'edited', editedFrom: [s.messages[index].id, ...(s.messages[index].editedFrom || [])] };
     else s.messages.splice(index, 1);
     const fork = this.commit(b.id, expected, s, 'History retconned');
     this.store.add('edits', { branch: fork.id, sourceRevision: b.head, messageId, text, mode, memory, at: new Date().toISOString() });
@@ -244,7 +246,7 @@ export class Engine {
     if (forced && !s.participants.includes(forced)) throw Error('Selected character is not participating');
     // Back-and-forth: after the opening pick, the only eligible speaker is whichever of the two didn't speak last.
     if (run?.mode === 'alternate' && (s.participants.length !== 2 || (forced && run.index > 1))) throw Error('Back-and-forth needs exactly two participants and no fixed speaker after the first turn');
-    const last = lastPerson(s);
+    const last = lastPerson(s, generationProvenance(this.store));
     const eligible = s.participants.filter(p => p !== last);
     const pool = eligible.length ? eligible : s.participants;
     const speaker = forced || pool[Math.floor(Math.random() * pool.length)];
