@@ -11,10 +11,10 @@ Open http://127.0.0.1:4317. Requires Node 22 and the project's installed depende
 
 ## First conversation
 
-1. Create a room. New rooms use **OpenGateway** with `deepseek/deepseek-flash` for every character, so Continue makes a real, paid request. **Local demo** (placeholder replies, no model calls) is only offered on instances started with `ROOM_DEMO=1`, meant for throwaway test instances. Elsewhere, rooms saved with demo characters stay readable and editable, and their Characters panel says to pick a provider; a demo character cannot generate there until switched.
-2. In Characters, choose a provider and exact model ID, then save. “Apply provider/model/reasoning to all characters” applies these settings, temperature and the reasoning setting across the cast while preserving their different prompts and memories.
+1. Create a room, empty or from a room template (see **People and the vault** below). An empty room has nobody in it: use **Add person** in Characters, then Continue. People are added with **OpenGateway** and `deepseek/deepseek-flash` by default, so Continue makes a real, paid request. **Local demo** (placeholder replies, no model calls) is only offered on instances started with `ROOM_DEMO=1`, meant for throwaway test instances. Elsewhere, rooms saved with demo characters stay readable and editable, and their Characters panel says to pick a provider; a demo character cannot generate there until switched.
+2. In Characters, select a person, choose a provider and exact model ID, then save. “Apply provider/model/reasoning to all characters” applies these settings, temperature and the reasoning setting across the cast while preserving their different prompts and memories.
 3. For OpenGateway, the existing `.env` key and Kimi model are supported. For Together, add `TOGETHER_API_KEY=...` to `.env`, restart, and enter an available model ID. Credentials are never entered in the browser.
-4. Send your message, then Continue. Select a character or random selection; optionally request up to 20 turns. Stop cancels the active request and remaining turns. Aborting locally cannot guarantee the provider stops processing or charging.
+4. Send your message, then Continue. Select a person or random selection; optionally request up to 20 turns. Every Continue is a recorded run (see **Runs**). Stop ends the run for good and cancels the active request. Aborting locally cannot guarantee the provider stops processing or charging.
 5. Inspect any reply to see its request, raw response, processing, and selection. All attempts also includes failures and rejected replies.
 
 Together's chat integration follows its [official chat completions API](https://docs.together.ai/reference/chat-completions), checked 22 September 2026. Inference integration has been tested with mocked responses, not a live Together key. No training or hosting jobs are submitted by this version.
@@ -38,7 +38,7 @@ The original Discord Jev modes are unchanged. Browser advisory/control modes, ca
 
 ## Evidence, memory, and storage
 
-`.room-data/` contains local JSON records and is ignored by Git. Set `ROOM_DATA_DIR` to use another directory and `ROOM_PORT` to choose another port. Run one workbench process per data directory. Back up the entire directory while stopped.
+`.room-data/` contains local JSON records and is ignored by Git. Set `ROOM_DATA_DIR` to use another directory and `ROOM_PORT` to choose another port. Run one workbench process per data directory. Use `npm run backup` (see **Backup and restore**) rather than copying the directory by hand.
 
 - State revisions and requests are immutable records; branch head files point to the current effective state.
 - Each request is persisted before dispatch. A separate outcome records raw response, transformations, validation, usage, finish reason, timing, and errors.
@@ -186,3 +186,64 @@ Export now offers **PDF · transcript & prompts** alongside the existing researc
 The layout uses a restrained green accent, serif body text, numbered speaker headings and A4 print margins. The transcript comes first; current shared instructions, active characters' personality prompts and retained memories, and harness templates follow on a new page. These are current settings, not a reconstruction of historical requests. Research notes, raw API responses, and file contents are excluded (attachment counts remain visible). Exact historical evidence stays available in JSON. Long messages can flow across pages; speaker headings stay with the following text.
 
 The Compare conversation picker includes a live name search across conversation titles and branch names. Search terms are case-insensitive and can match different parts of the title; a result count and empty state make filtering explicit. The selected result stays selected while it still matches.
+
+## People and the vault
+
+Rooms hold **people**: instances with a label ("the judge", "movie star #1"), a personality prompt, an optional **situation**, memory and provider settings. The **vault** holds reusable material with no names. Nothing in the vault, and no people action, makes a model call.
+
+**Vault** (sidebar → Vault). Three kinds of item, each with mutable metadata (working title, archived) and immutable revisions:
+
+- **Components**: one portable piece of a person, as free text. A component can have a kind and tags (archetype, trait, voice/form, belief, want, habit, tension/contradiction, example lines). Kinds are data: **Manage kinds** renames, describes, archives or adds them, and a rename keeps the kind's identity. Kinds and tags are for browsing only; they never change how anything compiles. Example lines are plain text, not chat messages.
+- **Personas**: an ordered list of component revisions plus extra text. Compiler v1 trims each part, skips blank ones, and joins them with one blank line. No headers, kind labels or names are added. The server computes the compiled text (a client-sent `compiled` that doesn't match is rejected). A persona can reference archived components and can have none.
+- **Room templates**: room instructions, optional framing, flow (random or back-and-forth), an optional opening (spoken by you or a narrator), and a cast of persona revisions with labels and situations.
+
+Each item page shows its revision history with a diff against the previous revision. Revising a component changes nothing downstream: a persona referencing it shows "newer revision available · use it" on that row, and saving the persona is the adoption. Working titles never reach a model. A fresh data directory starts with an empty vault (the starter kinds are seeded once, as editable records). Records: `vault-items`, `vault-revisions`, `vault-kinds`, `vault-kind-revisions`.
+
+Placement follows scope: a portable want goes in a component; a want for one evening or one relationship goes in the person's situation.
+
+**New rooms** are always v2 (see below), either empty or from a template. A template room copies the template's instructions, framing, flow, opening and cast once, and records the template as its origin. The opening is inserted once, at creation, as a `template` message attributed to you or the narrator.
+
+**Characters panel.** People are listed by label with badges: *from <persona>*, *diverged* (the prompt was edited here and no longer matches its persona revision), *update available* (the persona's latest revision compiles to different text), *inactive*, and *review situation* (a situation still mentions someone's former label). Actions:
+
+- **Add person**: label, persona (or blank), situation, provider, model, temperature and reasoning. A preview shows the assembled system message before anything is saved. Two people from one persona are independent.
+- **Rename**: changes the label from now on. Earlier lines keep the label they were written under (the transcript sent to models too), and a "now …" note appears beside them. Situations that name the old label are flagged, never rewritten.
+- **Adopt…**: shows a line diff of the prompt and the origin change, on this branch only. Label, situation, memory and provider settings never change. If the prompt was edited here, the only choices are Replace or Cancel; there is no merge.
+- **Deactivate / Activate**: a deactivated person leaves the room but stays in its cast, so history, label and attribution survive. People are never deleted.
+- **Assembled**: the exact system message the next request would send.
+
+Labels are 1–80 characters on one line, without `:` (transcripts use `Label: text`). Spaces, digits, `#` and Unicode are fine. Labels must be unique within a room (compared after NFC normalization and lowercasing) and may not equal your name. The Characters settings save is a field-level merge: it only sends the shown person's fields and the shared settings.
+
+**Template adoption** (Characters → Room template → Adopt from template…) offers room instructions, framing and flow separately, each with a diff. A field changed in this room needs "Replace values that were changed here". Provenance is tracked per field, so adopting only the framing doesn't mark the instructions as up to date. The cast and opening are never re-applied; add and remove people by hand.
+
+**Flow.** Back-and-forth (Characters → Flow) needs exactly two active people. When the cast changes so that's no longer true, the flow resets to random and the revision reason says so.
+
+## Assembly versions and the validation policy
+
+Existing rooms are **legacy-v1**: their requests are byte-identical to before (checked against golden fixtures in `tests/fixtures/legacy-requests.json`), and replies are checked against **all 8 legacy names**, including inactive ones, and not your name. New rooms are **v2**:
+
+- System message: persona prompt → situation → room instructions → retained memory → identity line, with empty parts dropped. A v2 room without saved framing uses the default framing text.
+- Replies are checked against the room's **full cast (active and inactive) plus your name**. A reply that starts with another person's label (any label format) is rejected and retried, as before.
+
+This difference is intentional. A legacy room switches to v2 only when you add a person or rename someone, after a preview listing the consequences, and the switch is recorded in the same revision. Earlier revisions, and any replay of them, keep legacy behavior. Every attempt records `personId`, `labelAtDispatch`, `validationRoster`, `assemblyVersion` and, for people from a persona, `origin` (persona item and revision). Inspect shows these as **Identity at dispatch**, with a link to the persona revision that ran. **Revise** always speaks as the original attempt did; attempts recorded before this change use the persona name as ID and label and the 8 legacy names.
+
+**Attribution.** Messages in v2 rooms carry `speakerRef` (a person, you, the narrator, or unbound). Legacy messages are read through their own state's names: your messages are you, generated lines are their character, and anything ambiguous (for example a retconned line under a name that is both yours and a character's) or unknown (imported speakers) stays **unbound** and is shown that way. Narrator lines never put you in the roster. **Edit history** has a "who said this" selector per row: text-only edits keep attribution, and typing a different label without choosing a person makes the line unbound rather than reassigning it. Jev sees labels, never person IDs.
+
+Retcons choose the target state first (historical for regenerate, current for keep), which decides who exists and participates; memory then comes from the chosen source for each person who exists in both. Experiments can patch `characters.<person id>.label` and `.situation` (origin is not patchable); a label patch on a legacy room also needs `"assemblyVersion": "v2"`. Patching a person's prompt marks them diverged in the design diff. The measured speaker can be any person.
+
+## Runs
+
+Every Continue creates a run record (`runs/`) before its first request: branch, policy (random, back-and-forth or a fixed person), turn limit (at most 20), status transitions, turn IDs and usage. The browser then asks for turn 1, 2, … in order. The server accepts only the next index; asking for an index again returns the existing turn and never sends another request. Only one run can advance per branch, so a second tab is refused while one is running.
+
+A run ends as **completed** after its last attached turn, **stopped** when you press Stop (nothing further is sent, and a response arriving later is stored as canceled), **failed** when a turn fails, or **interrupted** when the conversation changes outside the run, when no next turn arrives within 60 seconds of the previous one (`ROOM_RUN_TIMEOUT_MS`; the browser is assumed gone), or when the server restarts. Runs are never resumed. Usage counts retries; attempts whose provider reported no usage are counted as missing, not as zero. The turn bar shows the active run and its usage, including a run started in another tab, which Stop can also end.
+
+## Backup and restore
+
+```sh
+npm run backup                         # stable data → ~/dev/room-backups/<timestamp>/
+npm run backup -- --offline-confirmed  # only when you know the server is down and nothing is running
+npm run backup:verify-restore -- ~/dev/room-backups/<timestamp>
+```
+
+`npm run backup` first asks the running server (port 4317) whether anything is active: turns, experiment batches, Revise generations or pending Jev observations. If so, it stops. Otherwise it pauses all changes on the server (`POST /api/admin/quiesce`; writes then return 503). An unreachable server counts as a failed preflight, not as proof that nothing is running. It then unloads the launchd job with `launchctl bootout` (never `kill`), waits until no process holds the data directory, copies it with 700 permissions, writes `manifest.json` (path, size, sha256 per file) and `metadata.json` (time, source, app git revision, uncommitted-changes flag), verifies the copy, and reloads the job. A copy that fails verification keeps an `INCOMPLETE` marker and is never reported as a success. Defaults: `ROOM_DATA_DIR=~/dev/room/.room-data`, `ROOM_BACKUP_DIR=~/dev/room-backups`, `ROOM_SERVICE_LABEL=com.deniz.room` (`none` skips service control, for scratch instances), app revision from the current directory (`ROOM_APP_DIR`).
+
+`backup:verify-restore` checks the backup against its manifest, restores it into a temporary directory, extracts the recorded app revision with `git archive`, starts it read-only on a free port, opens a sample of rooms, comparisons and experiments, stops it, and confirms the restored copy is byte-identical afterwards. **Read-only mode** (`ROOM_READONLY=1`) refuses every write, skips startup recovery and doesn't convert legacy comparisons. App revisions from before read-only mode existed are refused.
