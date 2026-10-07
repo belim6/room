@@ -1250,3 +1250,9 @@ test('§1.5a.4.7 HTTP request preview is read-only, reflects draft settings, and
     const saved=await (await fetch(url+'/settings',json(settings))).json() as any;await e.turn(b.id,saved.head,'alpha');assert.deepEqual(s.attempts()[0].body.messages,preview.messages);
   } finally {await close();}
 });
+test('§1.5a review P2: Add-person preview works in a perspective room with custom framing, with no calls',()=>{
+  const s=store();let calls=0;const e=new ProductionEngine(s,async()=>{calls++;throw Error('No calls');});
+  const state=perspectiveState(s,'own-first');state.frame={...DEFAULT_FRAME,context:''};const b=e.create('custom',state);
+  const p=new People(e,new Vault(s)).previewAdd(b.id,{label:'Newcomer',prompt:'Plain.'});
+  assert.match(p.assembled,/Plain\./);assert.equal(calls,0);
+});

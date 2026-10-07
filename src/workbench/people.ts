@@ -58,11 +58,12 @@ export class People {
     s.characters[key] = c; s.participants.push(key);
     return { b, s, key, c, legacy };
   }
+  // The system message doesn't depend on history mode, so the preview skips perspective preflight.
   previewAdd(branch: string, input: any) {
     const { b, s, key, legacy } = this.planAdd(branch, { ...input, label: input.label || 'New person' });
     if (legacy) s.assemblyVersion = 'v2';
     validateState(s, b.revision.state);
-    return { person: key, assembled: assemble(this.store, s, key, false).system, switchRequired: legacy, ...(legacy ? { switchNotes: SWITCH_NOTES } : {}) };
+    return { person: key, assembled: assemble(this.store, { ...s, assembly: undefined }, key, false).system, switchRequired: legacy, ...(legacy ? { switchNotes: SWITCH_NOTES } : {}) };
   }
   add(branch: string, input: any) {
     const { b, s, c } = this.planAdd(branch, input), reason = this.switchIfNeeded(s, input, `Person added: ${c.label}`);
