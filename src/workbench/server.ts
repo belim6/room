@@ -216,9 +216,9 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.post('/api/branches/:id/locations/places/:place/rename', route((req,res) => res.json(people.renamePlace(req.params.id, req.params.place, req.body))));
   app.post('/api/branches/:id/move/preview', route((req,res) => { const s = engine.read(req.params.id).revision.state, { message } = engine.planMove(s, req.body); res.json({ text: message.text, movement: message.movement, audience: message.audience, tag: scopeTag(message) }); }));
   app.post('/api/branches/:id/move', route((req,res) => { const b = engine.move(req.params.id, req.body.expected, req.body); runs.interrupt(b.id, 'People moved; placement changed'); res.json(b); }));
-  app.post('/api/branches/:id/narration', route((req,res) => { const b = engine.narrate(req.params.id, req.body.expected, req.body.text, req.body.place ?? null); runs.interrupt(b.id, 'Narration interrupts a run'); res.json(b); }));
-  app.post('/api/branches/:id/messages/:message/audience/preview', route((req,res) => res.json(engine.planAudience(engine.read(req.params.id).revision.state, req.params.message, req.body.audience ?? null).change)));
-  app.post('/api/branches/:id/messages/:message/audience', route((req,res) => res.json(engine.setAudience(req.params.id, req.body.expected, req.params.message, req.body.audience ?? null))));
+  app.post('/api/branches/:id/narration', route((req,res) => { const b = engine.narrate(req.params.id, req.body.expected, req.body.text, req.body.place); runs.interrupt(b.id, 'Narration interrupts a run'); res.json(b); }));
+  app.post('/api/branches/:id/messages/:message/audience/preview', route((req,res) => res.json(engine.planAudience(engine.read(req.params.id).revision.state, req.params.message, req.body.audience).change)));
+  app.post('/api/branches/:id/messages/:message/audience', route((req,res) => res.json(engine.setAudience(req.params.id, req.body.expected, req.params.message, req.body.audience))));
   // "As seen by X at revision R": X's next-request history projection, from the same function dispatch uses.
   app.get('/api/branches/:id/seen/:person', route((req,res) => {
     const b = engine.read(req.params.id), at = typeof req.query.revision === 'string' ? req.query.revision : b.head;

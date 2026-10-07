@@ -227,6 +227,8 @@ export class Engine {
     const s = clone(this.read(branchId).revision.state);
     if (assemblyOf(s) !== 'v2') throw Error('Narration needs v2 assembly');
     if (typeof text !== 'string' || !text.trim() || text.length > 20000) throw Error('Write narration under 20,000 characters');
+    // A missing place is never read as public: only an explicit null is.
+    if (place === undefined) throw Error('Choose a place or public (null) for this narration');
     if (place !== null && !knownPlace(s, place)) throw Error(s.locations ? 'Choose a place or public for this narration' : 'This room has no locations; narration is public');
     s.messages.push({ id: id(), speaker: NARRATOR, speakerRef: { kind: 'narrator' }, text: text.trim(), source: 'narration', ...(place !== null ? { audience: stamp(s, place as string) } : {}) });
     return this.commit(branchId, expected, s, place !== null ? `Narration in ${placeName(s, place as string)}` : 'Narration');
@@ -266,6 +268,7 @@ export class Engine {
     const s = clone(state), index = s.messages.findIndex(m => m.id === messageId), everyone = [...Object.keys(s.characters), HUMAN];
     if (!s.locations) throw Error('This room has no locations');
     if (index < 0) throw Error('Message no longer exists');
+    if (input === undefined) throw Error('Choose who heard this line: a place and its listeners, or public (null)');
     let next: Audience | null = null;
     if (input !== null) {
       const a = input as any;

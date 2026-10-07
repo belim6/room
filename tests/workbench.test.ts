@@ -1604,3 +1604,52 @@ test('§1.6 §9 the changes view shows audience-only edits, movement and placeme
   assert.deepEqual(c.locations!.moved,[{key:'marta',label:'Marta',from:'the hall',to:'the table'}]);assert.deepEqual(c.locations!.places.renamed,[{from:'the yard',to:'the garden'}]);
   assert.equal(c.conversation.appended.movement,1);assert.deepEqual(c.conversation.edited,[c.audience[0].id]);
 });
+
+// ---- Stage 1.6 review fixes (coordination/2026-10-07/38) ----
+test('§1.6 review P1: a missing audience or narration place is rejected, never read as public',async()=>{
+  const w=places({gav:'table',marta:'hall'});const {close,call}=await serve(w.e);
+  try{
+    w.say('HIDDEN-FROM-MARTA');const line=w.state().messages[0],b='/branches/'+w.id;
+    for(const body of [{expected:w.head()},{expected:w.head(),audience:undefined}]){
+      const r=await call(b+'/messages/'+line.id+'/audience',body);assert.equal(r.status,400);assert.match(r.value.error,/Choose who heard this line/);
+    }
+    const preview=await call(b+'/messages/'+line.id+'/audience/preview',{});assert.equal(preview.status,400);assert.match(preview.value.error,/Choose who heard this line/);
+    assert.throws(()=>w.e.setAudience(w.id,w.head(),line.id,undefined),/Choose who heard this line/);
+    assert.deepEqual(w.state().messages[0].audience,line.audience);assert(!visibleTo(w.state(),'marta').length);
+    const n=await call(b+'/narration',{expected:w.head(),text:'Where does this go?'});assert.equal(n.status,400);assert.match(n.value.error,/place or public/);
+    assert.throws(()=>w.e.narrate(w.id,w.head(),'Nowhere.',undefined),/place or public/);assert.equal(w.state().messages.length,1);
+    // Explicit null is the only way to say public.
+    assert.equal((await call(b+'/narration',{expected:w.head(),text:'Bells.',place:null})).value.revision.state.messages.at(-1).audience,undefined);
+    assert.equal((await call(b+'/messages/'+line.id+'/audience/preview',{audience:null})).status,200);
+    await w.turn('marta','hall');assert(!w.last().includes('HIDDEN-FROM-MARTA'));
+  }finally{await close();}
+});
+test('§1.6 review P2: request preview lists only visible image occurrences, in order and with repetitions',()=>{
+  const w=places({},{},s=>{
+    for(const [id,name] of [['hid','HIDDEN-FILENAME.png'],['vis','visible.png']])s.put('attachments',id,{id,name,kind:'image',mime:'image/png',data:'cGl4ZWw=',size:5,sha256:'x',at:'2026-10-07T00:00:00Z'});
+    const st=locState({gav:'table',marta:'hall'});
+    st.messages=[{id:'h',speaker:'Marta',speakerRef:{kind:'person',id:'marta'},text:'Hidden.',source:'edited',attachments:['hid'],audience:scoped('hall',['marta'])},
+      {id:'v1',speaker:'Dennis',speakerRef:{kind:'human'},text:'One.',source:'edited',attachments:['vis'],audience:scoped('table',['gav','human'])},
+      {id:'v2',speaker:'Dennis',speakerRef:{kind:'human'},text:'Again.',source:'edited',attachments:['vis'],audience:scoped('table',['gav','human'])}];return st;});
+  const p=w.people.previewAssembled(w.id,'gav');
+  assert.deepEqual(p.images.map((i:any)=>i.name),['visible.png','visible.png']);assert(!JSON.stringify(p).includes('HIDDEN-FILENAME'));
+  assert.equal(p.messages.flatMap((m:any)=>Array.isArray(m.content)?m.content.filter((x:any)=>x.type==='image_url'):[]).length,p.images.length);
+  assert.deepEqual(w.people.previewAssembled(w.id,'marta').images.map((i:any)=>i.name),['HIDDEN-FILENAME.png']);
+});
+test('§1.6 review P2: settings cannot change who is active in a room with places; participation must choose a place',()=>{
+  const w=places({gav:'table',marta:'hall'},{active:['gav']});
+  assert.throws(()=>w.people.settings(w.id,{expected:w.head(),participants:['gav','marta']}),/participation/);
+  assert.throws(()=>w.people.settings(w.id,{expected:w.head(),participants:[]}),/participation/);
+  assert.deepEqual(w.state().participants,['gav']);
+  assert.equal(w.people.settings(w.id,{expected:w.head(),participants:['gav'],system:'Same cast.'}).revision.state.system,'Same cast.');
+  const plain=places({},{},()=>{const st=locState({gav:'table',marta:'hall'},{active:['gav']});delete st.locations;return st;});
+  assert.deepEqual(plain.people.settings(plain.id,{expected:plain.head(),participants:['gav','marta']}).revision.state.participants,['gav','marta']);
+});
+test('§1.6 review P3: the Flow setting is gated on local pairs in rooms with places',()=>{
+  const {flowOption}=require('../web/places.js');
+  const pairs=locState({gav:'table',odo:'table',marta:'hall',ilse:'hall'}),none=locState({gav:'table',marta:'hall'}),plain=locState({gav:'table',odo:'table',marta:'hall'});delete plain.locations;
+  assert.equal(flowOption(pairs).enabled,true);assert.match(flowOption(pairs).label,/place/);
+  assert.equal(flowOption(none).enabled,false);
+  assert.equal(flowOption(plain).enabled,false);assert.match(flowOption(plain).label,/exactly two active people/);
+  plain.participants=['gav','odo'];assert.equal(flowOption(plain).enabled,true);
+});

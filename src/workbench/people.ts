@@ -5,7 +5,7 @@ import { clone, id } from './store';
 import { DEFAULT_MODEL } from './generation';
 import { DEFAULT_FRAME } from '../speakerTurn';
 import { assemblyOf, labelOf, labelKey, validateLabel, NARRATOR } from './identity';
-import { knownPlace, placeName, stamp, validatePlaceName, whoLabel, HUMAN, type Locations } from './locations';
+import { knownPlace, placeName, stamp, validatePlaceName, whoLabel, visibleTo, HUMAN, type Locations } from './locations';
 import { lineDiff } from './changes';
 // People in rooms: instantiation, renames, participation and explicit, previewed adoption. Nothing here calls a provider.
 const FIELDS: TemplateField[] = ['system', 'frame', 'flow'];
@@ -79,7 +79,7 @@ export class People {
     const s = settings ? this.settingsState(branch,settings) : this.engine.read(branch).revision.state;
     validateState(s,s); if (!s.characters[person]) throw Error('Unknown person');
     const request=assemble(this.store,s,person);
-    return { person, label: labelOf(s, person), assembled: request.system, messages: request.messages, images: s.messages.flatMap(m=>getAttachments(this.store,m.attachments).filter(a=>a.kind==='image').map(a=>({id:a.id,name:a.name}))), attachments: request.context.attachments, assembly: request.assembly, adapterVersion: request.adapterVersion, assemblyVersion: assemblyOf(s) };
+    return { person, label: labelOf(s, person), assembled: request.system, messages: request.messages, images: visibleTo(s, person).flatMap(m=>getAttachments(this.store,m.attachments).filter(a=>a.kind==='image').map(a=>({id:a.id,name:a.name}))), attachments: request.context.attachments, assembly: request.assembly, adapterVersion: request.adapterVersion, assemblyVersion: assemblyOf(s) };
   }
   rename(branch: string, person: string, input: any) {
     const b = this.engine.read(branch), s = clone(b.revision.state), c = s.characters[person];
@@ -201,6 +201,8 @@ export class People {
   private settingsState(branch: string, body: any) {
     const b = this.engine.read(branch), s = clone(b.revision.state);
     for (const key of ['system', 'human', 'shadow', 'policy'] as const) if (body[key] !== undefined) (s as any)[key] = body[key];
+    // With places, membership changes go through participation, which also confirms or sets a place.
+    if (body.participants !== undefined && s.locations && (!Array.isArray(body.participants) || [...body.participants].sort().join() !== [...s.participants].sort().join())) throw Error('In a room with places, activate or deactivate people with their participation action, which asks where they rejoin');
     if (body.participants !== undefined) s.participants = body.participants;
     if (body.assembly !== undefined) s.assembly = clone(body.assembly);
     if (body.frame === null) delete s.frame; else if (body.frame !== undefined) s.frame = body.frame;

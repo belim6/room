@@ -42,6 +42,11 @@ function placeControlsHtml(key){
   const s=records.get(key).branch.revision.state,place=chosenPlace(key);
   return `<label>Place <select data-place>${placesOf(s).map(p=>`<option value="${esc(p.id)}" ${p.id===place?'selected':''}>${esc(p.name)} · ${localCastOf(s,p.id).length}</option>`).join('')}<option value="rotate" ${place==='rotate'?'selected':''}>Rotate between places</option></select></label>`;
 }
+// Room flow default: with places, back-and-forth is checked against each run's place, so it needs at least one local pair.
+function flowOption(s){
+  if(!s.locations)return {enabled:s.participants.length===2,label:'Back-and-forth (exactly two active people)'};
+  return {enabled:s.locations.places.some(p=>s.participants.filter(k=>s.locations.at[k]===p.id).length===2),label:'Back-and-forth (in a place with exactly two characters; checked when a run starts)'};
+}
 function placeActionsHtml(key){return `<button type="button" data-move-people="${key}">Move people…</button><button type="button" data-narrate="${key}">Narrate…</button>`;}
 function speakingInHtml(key){const s=records.get(key).branch.revision.state;return s.locations?`<div class="speaking-in muted">Speaking in: <strong>${esc(placeNameOf(s,s.locations.at.human))}</strong> · heard by ${esc(localCastOf(s,s.locations.at.human).map(p=>labelOf(s,p)).join(', ')||'nobody else')}</div>`:'';}
 function bindPlaceControls(){
@@ -110,3 +115,4 @@ async function enableLocations(key){
   const ok=await dialog('Add these places?',`${p.switchRequired?`<p class="notice">This room uses legacy assembly. Places need v2, switched in the same revision:</p><ul>${p.switchNotes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`:''}<ul>${p.placement.map(x=>`<li>${esc(x.label)}${x.active?'':' (inactive)'} · ${esc(x.place)}</li>`).join('')}</ul>${p.notes.map(n=>`<p class="muted">${esc(n)}</p>`).join('')}`,p.switchRequired?'Switch to v2 and add places':'Add places');
   if(!ok)return;await api('/branches/'+key+'/locations',{expected:rec.branch.head,places:names,at,switchAssembly:p.switchRequired});$('#panel').dataset.key='';await refresh();
 }
+if(typeof module!=='undefined')module.exports={flowOption};
