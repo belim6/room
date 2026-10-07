@@ -6,7 +6,7 @@ import { LEGACY_NAMES, resolveSpeaker, generationProvenance } from './identity';
 const now=()=>new Date().toISOString();
 // A revision speaks as the original attempt did: its person, label, roster and assembly, never the room's current ones.
 // Attempts recorded before identities were split fall back to the persona name as ID and label and the 8 legacy names.
-export const reviseIdentity=(a:any)=>({personId:a.personId??a.persona,labelAtDispatch:a.labelAtDispatch??a.persona,validationRoster:a.validationRoster??[...LEGACY_NAMES],assemblyVersion:a.assemblyVersion??'legacy-v1',...(a.assemblyVersion==='v2'&&a.assembly?{assembly:a.assembly}:{}),...(a.adapterVersion?{adapterVersion:a.adapterVersion}:{}),...(a.origin?{origin:a.origin}:{})});
+export const reviseIdentity=(a:any)=>({personId:a.personId??a.persona,labelAtDispatch:a.labelAtDispatch??a.persona,validationRoster:a.validationRoster??[...LEGACY_NAMES],assemblyVersion:a.assemblyVersion??'legacy-v1',...(a.assemblyVersion==='v2'&&a.assembly?{assembly:a.assembly}:{}),...(a.adapterVersion?{adapterVersion:a.adapterVersion}:{}),...(a.origin?{origin:a.origin}:{}),...(a.visibility?{visibility:a.visibility}:{})});
 interface Review { id:string; branch:string; revision:string; message:Message; originalAttempt:string; inputAttempt:string; at:string }
 interface Candidate { id:string; review:string; feedback:string; instruction:string; turnId:string; at:string }
 interface Judgment { id:string; candidate:string; review:string; verdict:'accepted'|'rejected'; text:string; note:string; at:string; sequence:number }

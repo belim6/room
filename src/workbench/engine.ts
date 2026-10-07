@@ -3,23 +3,25 @@ import { generate, reasoningSwitchVerified, DEFAULT_MODEL, type Provider } from 
 import { PERSONAS, type PersonaName } from '../personas/personas';
 import { GLOBAL_SYSTEM } from '../modelRouter';
 import { buildSpeakerInput, fillFrame, EMPTY_FRAME, DEFAULT_FRAME, type Frame } from '../speakerTurn';
-import { assemblyOf, labelOf, labelKey, validateLabel, validRef, lastPerson, humanPresent, rosterOf, resolveSpeaker, generationProvenance, LEGACY_NAMES, type SpeakerRef, type Assembly } from './identity';
+import { assemblyOf, labelOf, labelKey, validateLabel, validRef, lastPerson, humanPresent, rosterOf, resolveSpeaker, generationProvenance, LEGACY_NAMES, NARRATOR, type SpeakerRef, type Assembly } from './identity';
 import { shadowJev } from './jev';
 import { getAttachments, attachmentTranscript, type ContentPart } from './attachments';
 import { historyConfig, appendContent, assertPerspective, type HistoryConfig, type RequestMessage } from './history';
+import { validateLocations, visibleTo, visibility, localCast, localLastSpeaker, stamp, snapshot, present, placeName, knownPlace, whoLabel, joinNames, validatePlaceName, audienceChange, HUMAN, type Locations, type Audience, type Movement } from './locations';
 
 export interface VaultRef { item: string; revision: string }
 // Legacy rooms key characters by name with no label; v2 rooms key people by UUID and keep the label as display text.
 export interface Character { label?: string; prompt: string; situation?: string; memory: string; provider: Provider; model: string; temperature: number; reasoning?: 'default' | 'off'; origin?: VaultRef }
 // `speaker` is the label as written at the time (evidence, never rewritten); `speakerRef` is the identity.
-export interface Message { id: string; speaker: string; speakerRef?: SpeakerRef; text: string; source: 'human' | 'generated' | 'imported' | 'edited' | 'template'; turnId?: string; checkpoint?: string; editedFrom?: string[]; attachments?: string[]; review?: string }
+export interface Message { id: string; speaker: string; speakerRef?: SpeakerRef; text: string; source: 'human' | 'generated' | 'imported' | 'edited' | 'template' | 'movement' | 'narration'; turnId?: string; checkpoint?: string; editedFrom?: string[]; attachments?: string[]; review?: string;
+  audience?: Audience; movement?: Movement }
 export type TemplateField = 'system' | 'frame' | 'flow';
 export interface FieldProvenance { item: string; revision: string; value: unknown }
 export interface State { system: string; participants: string[]; characters: Record<string, Character>;
-  messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string; frame?: Frame; flow?: 'random' | 'alternate'; assemblyVersion?: Assembly; assembly?: HistoryConfig;
+  messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string; frame?: Frame; flow?: 'random' | 'alternate'; assemblyVersion?: Assembly; assembly?: HistoryConfig; locations?: Locations;
   origin?: { template: VaultRef }; templateFields?: Partial<Record<TemplateField, FieldProvenance>> }
 export interface Adoption { kind: 'persona' | 'template' | 'switch'; source?: VaultRef; person?: string; fields: string[]; replacedDiverged?: string[] }
-export interface MessageChange { kind: 'delete-message' | 'restore-message' | 'replace-message'; message: Message; index: number; candidate?: string; judgment?: string }
+export interface MessageChange { kind: 'delete-message' | 'restore-message' | 'replace-message' | 'audience-message'; message: Message; index: number; candidate?: string; judgment?: string }
 export interface Revision { id: string; branch: string; parent: string | null; at: string; reason: string; state: State; change?: MessageChange; adoption?: Adoption }
 export interface Branch { id: string; name: string; head: string; parent: string | null; fork: string | null; createdAt: string; comparison?: string; experiment?: string; trial?: string; workspace?: boolean }
 export interface TrashEntry { id: string; branch: string; name: string; branches: string[]; deletedAt: string; restoredAt?: string }
@@ -70,11 +72,13 @@ export function validateState(s: State, previous?: State | null) {
   if (s.frame !== undefined && (!s.frame || typeof s.frame !== 'object' || Object.keys(s.frame).sort().join() !== 'context,identity,opening,turn' || Object.values(s.frame).some(v => typeof v !== 'string' || v.length > 20000))) throw Error('Invalid harness framing');
   if (!Array.isArray(s.messages) || s.messages.length > 10000 || s.messages.some(m => typeof m.id !== 'string' || typeof m.text !== 'string' || m.text.length > 100000 || typeof m.speaker !== 'string' || !m.speaker.trim() || m.speaker.length > 80)) throw Error('Invalid conversation');
   if (s.messages.some(m => m.speakerRef !== undefined && (!validRef(m.speakerRef) || (m.speakerRef.kind === 'person' && !ids.includes(m.speakerRef.id))))) throw Error('Invalid message attribution');
+  validateLocations(s, previous);
   for(const m of s.messages)if(m.attachments!==undefined&&(!Array.isArray(m.attachments)||m.attachments.length>4||new Set(m.attachments).size!==m.attachments.length||m.attachments.some(a=>typeof a!=='string'||!/^[a-zA-Z0-9_-]+$/.test(a))))throw Error('Invalid message attachments');
 }
 // Back-and-forth needs exactly two active participants; otherwise the flow resets visibly, recorded in the revision reason.
 export function normalizeFlow(s: State) {
-  if (s.flow !== 'alternate' || s.participants.length === 2) return '';
+  // With locations, back-and-forth is checked against the run's place when it starts.
+  if (s.flow !== 'alternate' || s.participants.length === 2 || s.locations) return '';
   s.flow = 'random'; return ' · back-and-forth reset to random (it needs exactly two active participants)';
 }
 // Request assembly for one speaker. Legacy rooms keep their exact historical code paths; v2 orders the system message as
@@ -83,11 +87,13 @@ export function assemble(store: Store, s: State, speaker: string, images = true)
   const c = s.characters[speaker], v2 = assemblyOf(s) === 'v2', label = labelOf(s, speaker);
   const assembly=historyConfig(s.assemblyVersion,s.assembly), perspective=assembly.history==='perspective';
   if(perspective&&s.frame!==undefined&&(Object.keys(s.frame).sort().join()!==Object.keys(DEFAULT_FRAME).sort().join()||Object.entries(DEFAULT_FRAME).some(([k,v])=>s.frame![k as keyof Frame]!==v)))throw Error('Perspective history requires the default framing. Reset the framing before generating.');
-  const context=attachmentTranscript(store,s.messages,perspective||images);
+  // Visibility comes first: everything below (transcript, turns, attachments, roster) sees only this projection.
+  const L = s.locations, place = L?.at[speaker], history = L ? visibleTo(s, speaker) : s.messages, view = { ...s, messages: history };
+  const context=attachmentTranscript(store,history,perspective||images);
   const transcript = context.transcript;
-  // The human joins the roster only once they have said something in this conversation.
-  const human = humanPresent(s) ? s.human : null, f = v2 ? s.frame ?? DEFAULT_FRAME : s.frame;
-  const fill = (t: string) => fillFrame(t, { speaker: label, participants: [...(human ? [human] : []), ...s.participants.map(p => labelOf(s, p))].join(', '), transcript: JSON.stringify(transcript) });
+  // The human joins the roster only once they have said something in this conversation; with locations, only if they share the place.
+  const human = humanPresent(view) && (!L || L.at[HUMAN] === place) ? s.human : null, f = v2 ? s.frame ?? DEFAULT_FRAME : s.frame;
+  const fill = (t: string) => fillFrame(t, { speaker: label, participants: [...(human ? [human] : []), ...(L ? localCast(s, place!) : s.participants).map(p => labelOf(s, p))].join(', '), transcript: JSON.stringify(transcript) });
   // A custom frame drops empty parts entirely, so a fully blanked room sends only what is left.
   const system = v2 ? [c.prompt, c.situation || '', s.system, c.memory ? `Your retained memory:\n${c.memory}` : '', fill(f!.identity)].filter(x => x.trim()).join('\n\n')
     : f ? [c.prompt, s.system, c.memory ? `Your retained memory:\n${c.memory}` : '', fill(f.identity)].filter(x => x.trim()).join('\n\n')
@@ -97,7 +103,7 @@ export function assemble(store: Store, s: State, speaker: string, images = true)
   const messages:RequestMessage[]=[...(system.trim()?[{role:'system',content:system}]:[])];
   if(perspective) {
     const provenance=generationProvenance(store);
-    s.messages.forEach((m,index)=>{
+    history.forEach((m,index)=>{
       const ref=resolveSpeaker(s,m,provenance),own=ref.kind==='person'&&ref.id===speaker,files=getAttachments(store,m.attachments);
       if(own&&files.some(a=>a.kind==='image'))throw Error('Perspective history does not support images on the speaking person’s own messages');
       const parts:ContentPart[]=[{type:'text',text:own?m.text:`${m.speaker}: ${m.text}`}];
@@ -109,11 +115,11 @@ export function assemble(store: Store, s: State, speaker: string, images = true)
       if(messages.length===(system.trim()?1:0)&&own)messages.push({role:'user',content:'(The conversation so far.)'});
       if(messages.at(-1)?.role===role)appendContent(messages.at(-1)!,content);else messages.push({role,content});
     });
-    if(!s.messages.length)messages.push({role:'user',content:DEFAULT_FRAME.opening});
+    if(!history.length)messages.push({role:'user',content:DEFAULT_FRAME.opening});
     if(messages.at(-1)?.role==='user')appendContent(messages.at(-1)!,fill(DEFAULT_FRAME.turn));else messages.push({role:'user',content:fill(DEFAULT_FRAME.turn)});
     assertPerspective(messages);
   } else messages.push({role:'user',content:context.parts.length?[{type:'text',text:user},...context.parts]:user});
-  return { system, user, context, label, v2, messages, assembly, ...(perspective?{adapterVersion:'perspective-1' as const}:{}) };
+  return { system, user, context, label, v2, messages, assembly, ...(perspective?{adapterVersion:'perspective-1' as const}:{}), ...(L ? { visibility: visibility(s, speaker) } : {}) };
 }
 export class Engine {
   active = new Map<string, { controller: AbortController; turnId: string }>();
@@ -211,9 +217,74 @@ export class Engine {
     const b = this.read(branchId); const s = clone(b.revision.state);
     const next = id();
     // Legacy rooms keep their message shape; v2 rooms attribute every message explicitly.
-    s.messages.push({ id: next, speaker: s.human, ...(assemblyOf(s) === 'v2' ? { speakerRef: { kind: 'human' as const } } : {}), text: text.trim(), source: 'human', ...(files.length?{attachments:files.map(a=>a.id)}:{}) });
+    s.messages.push({ id: next, speaker: s.human, ...(assemblyOf(s) === 'v2' ? { speakerRef: { kind: 'human' as const } } : {}), text: text.trim(), source: 'human', ...(files.length?{attachments:files.map(a=>a.id)}:{}),
+      ...(s.locations ? { audience: stamp(s, s.locations.at[HUMAN]) } : {}) });
     const result = this.commit(branchId, expected, s, 'Human message');
     return result;
+  }
+  // A narrator line: one place (stamped with who is there now) or public. It never makes anyone present.
+  narrate(branchId: string, expected: string, text: unknown, place: unknown) {
+    const s = clone(this.read(branchId).revision.state);
+    if (assemblyOf(s) !== 'v2') throw Error('Narration needs v2 assembly');
+    if (typeof text !== 'string' || !text.trim() || text.length > 20000) throw Error('Write narration under 20,000 characters');
+    // A missing place is never read as public: only an explicit null is.
+    if (place === undefined) throw Error('Choose a place or public (null) for this narration');
+    if (place !== null && !knownPlace(s, place)) throw Error(s.locations ? 'Choose a place or public for this narration' : 'This room has no locations; narration is public');
+    s.messages.push({ id: id(), speaker: NARRATOR, speakerRef: { kind: 'narrator' }, text: text.trim(), source: 'narration', ...(place !== null ? { audience: stamp(s, place as string) } : {}) });
+    return this.commit(branchId, expected, s, place !== null ? `Narration in ${placeName(s, place as string)}` : 'Narration');
+  }
+  // Move: one origin, one destination (existing, or created in the same revision). Computed from the frozen pre-move state.
+  planMove(state: State, input: any) {
+    const s = clone(state), L = s.locations;
+    if (!L) throw Error('This room has no locations');
+    const movers = input?.movers;
+    if (!Array.isArray(movers) || !movers.length || new Set(movers).size !== movers.length) throw Error('Choose who moves');
+    for (const k of movers) if (k !== HUMAN && !s.participants.includes(k)) throw Error(s.characters[k] ? `${labelOf(s, k)} is inactive; inactive people change place only when they rejoin` : 'Unknown mover');
+    const from = L.at[movers[0]];
+    if (movers.some((k: string) => L.at[k] !== from)) throw Error('Everyone moving together must start in the same place');
+    let to = input.to;
+    if (input.newPlace !== undefined) {
+      if (to !== undefined) throw Error('Choose an existing place or a new one, not both');
+      const name = validatePlaceName(typeof input.newPlace === 'string' ? input.newPlace.trim() : input.newPlace);
+      if (L.places.some(p => labelKey(p.name) === labelKey(name))) throw Error(`There is already a place named ${name}`);
+      to = id(); L.places.push({ id: to, name });
+    } else if (!knownPlace(s, to)) throw Error('Choose where they go');
+    if (to === from) throw Error(`${joinNames(movers.map((k: string) => whoLabel(s, k)))} ${movers.length === 1 ? 'is' : 'are'} already in ${placeName(s, from)}`);
+    const names = movers.map((k: string) => whoLabel(s, k)), witnesses = [...new Set([...present(s, from), ...present(s, to)])];
+    const text = input.text === undefined || input.text === '' ? `${joinNames(names)} ${movers.length === 1 ? 'goes' : 'go'} to ${placeName(s, to)}.` : input.text;
+    if (typeof text !== 'string' || !text.trim() || text.length > 20000) throw Error('Write the movement line under 20,000 characters');
+    const message: Message = { id: id(), speaker: NARRATOR, speakerRef: { kind: 'narrator' }, text: text.trim(), source: 'movement', audience: snapshot(s, to, witnesses),
+      movement: { from, to, movers: [...movers], display: { from: placeName(s, from), to: placeName(s, to), movers: names } } };
+    for (const k of movers) L.at[k] = to;
+    s.messages.push(message);
+    return { state: s, message };
+  }
+  move(branchId: string, expected: string, input: any) {
+    const plan = this.planMove(this.read(branchId).revision.state, input), m = plan.message.movement!;
+    return this.commit(branchId, expected, plan.state, `Moved ${joinNames(m.display.movers)} from ${m.display.from} to ${m.display.to}`);
+  }
+  // Explicit audience edit: a new line object with a fresh snapshot; text, attribution and movement stay as they were.
+  planAudience(state: State, messageId: string, input: unknown) {
+    const s = clone(state), index = s.messages.findIndex(m => m.id === messageId), everyone = [...Object.keys(s.characters), HUMAN];
+    if (!s.locations) throw Error('This room has no locations');
+    if (index < 0) throw Error('Message no longer exists');
+    if (input === undefined) throw Error('Choose who heard this line: a place and its listeners, or public (null)');
+    let next: Audience | null = null;
+    if (input !== null) {
+      const a = input as any;
+      if (!a || typeof a !== 'object' || Object.keys(a).sort().join() !== 'place,present' || !knownPlace(s, a.place) || !Array.isArray(a.present) || new Set(a.present).size !== a.present.length || a.present.some((k: unknown) => typeof k !== 'string' || !everyone.includes(k))) throw Error('Choose a place and who heard this line, or public');
+      next = snapshot(s, a.place, everyone.filter(k => a.present.includes(k)));
+    }
+    const previous = s.messages[index], key = (a?: Audience | null) => JSON.stringify(a ? { place: a.place, present: [...a.present].sort() } : null);
+    if (key(previous.audience) === key(next)) throw Error('That is already who heard this line');
+    const { audience: _old, ...rest } = previous;
+    s.messages[index] = { ...rest, speakerRef: resolveSpeaker(s, previous, generationProvenance(this.store)), id: id(), source: 'edited', editedFrom: [previous.id, ...(previous.editedFrom || [])], ...(next ? { audience: next } : {}) };
+    return { state: s, index, previous, change: audienceChange(s, previous, next) };
+  }
+  setAudience(branchId: string, expected: string, messageId: string, input: unknown) {
+    if (this.active.has(branchId)) throw Error('Stop generation before changing who heard a line.');
+    const plan = this.planAudience(this.read(branchId).revision.state, messageId, input);
+    return this.commit(branchId, expected, plan.state, plan.change.after ? `Audience edited: ${plan.change.after.display.place}` : 'Audience edited: made public', { kind: 'audience-message', message: plan.previous, index: plan.index });
   }
   deleteMessage(branchId: string, expected: string, messageId: string) {
     if (this.active.has(branchId)) throw Error('Stop generation before deleting a message.');
@@ -249,6 +320,11 @@ export class Engine {
     // Regeneration uses the entire historical state, not future settings.
     // The target state's roster decides who exists and participates; memory then follows identity from the chosen source.
     let s = clone(mode === 'regenerate' ? historical.state : b.revision.state);
+    // Regenerate restores the historical placement; places created since stay (they can't be removed), with no one in them.
+    if (mode === 'regenerate' && b.revision.state.locations) {
+      if (!s.locations) throw Error('This line predates locations in this room. Regenerating from it would turn locations off, which this release does not support. Keep later messages, or branch from that point.');
+      s.locations.places.push(...clone(b.revision.state.locations.places.filter(p => !s.locations!.places.some(h => h.id === p.id))));
+    }
     const source = (memory === 'restore' ? historical : b.revision).state;
     for (const person of Object.keys(s.characters)) if (Object.prototype.hasOwnProperty.call(source.characters, person)) s.characters[person].memory = source.characters[person].memory;
     if (mode === 'regenerate') s.messages = s.messages.slice(0, index + 1);
@@ -260,39 +336,47 @@ export class Engine {
     return fork;
   }
   cancel(branch: string) { this.active.get(branch)?.controller.abort(); }
-  async turn(branchId: string, expected: string, forced?: string, run?: { id: string; index: number; count: number; mode?: 'alternate' }, experiment?: { turnId: string }, preset?: { turnId: string }) {
+  async turn(branchId: string, expected: string, forced?: string, run?: { id: string; index: number; count: number; mode?: 'alternate' }, experiment?: { turnId: string }, preset?: { turnId: string }, where?: { place: string; policy?: 'place' | 'rotate'; cursor?: number }) {
     if (this.active.has(branchId)) throw Error('A turn is already running in this branch');
     const b = this.read(branchId);
     if (b.head !== expected) throw Error('Branch changed; reload before generating');
     const s = clone(b.revision.state);
     if (!s.participants.length) throw Error('Add a person to this room before generating');
     if (forced && !s.participants.includes(forced)) throw Error('Selected character is not participating');
+    // With locations every turn happens in one concrete place: only the active characters there are eligible.
+    const L = s.locations, place = where?.place;
+    if (!L && where !== undefined) throw Error('This room has no locations');
+    if (L && !knownPlace(s, place)) throw Error('Choose the place this turn happens in');
+    const local = L ? localCast(s, place!) : s.participants;
+    if (!local.length) throw Error(`Nobody who can speak is in ${placeName(s, place!)}`);
+    if (L && forced && !local.includes(forced)) throw Error(`${labelOf(s, forced)} is not in ${placeName(s, place!)}`);
     // Back-and-forth: after the opening pick, the only eligible speaker is whichever of the two didn't speak last.
-    if (run?.mode === 'alternate' && (s.participants.length !== 2 || (forced && run.index > 1))) throw Error('Back-and-forth needs exactly two participants and no fixed speaker after the first turn');
-    const last = lastPerson(s, generationProvenance(this.store));
-    const eligible = s.participants.filter(p => p !== last);
-    const pool = eligible.length ? eligible : s.participants;
+    if (run?.mode === 'alternate' && (local.length !== 2 || (forced && run.index > 1))) throw Error(L ? `Back-and-forth needs exactly two characters in ${placeName(s, place!)} and no fixed speaker after the first turn` : 'Back-and-forth needs exactly two participants and no fixed speaker after the first turn');
+    const last = L ? localLastSpeaker(s, place!, generationProvenance(this.store)) : lastPerson(s, generationProvenance(this.store));
+    const eligible = local.filter(p => p !== last);
+    const pool = eligible.length ? eligible : local;
     const speaker = forced || pool[Math.floor(Math.random() * pool.length)];
     const turnId = experiment?.turnId || preset?.turnId || id(); const controller = new AbortController();
     this.active.set(branchId, { controller, turnId });
     this.store.put('selections', turnId, { id: turnId, branch: branchId, revision: b.head,
       at: new Date().toISOString(), // One operator pick repeated across a multi-turn run is a single decision: only its first turn is 'forced'.
       method: forced ? (!experiment && run && run.index > 1 ? 'locked' : 'forced') : 'random', run: run ?? null,
-      eligible: forced ? s.participants : pool, chosen: speaker });
+      eligible: forced ? local : pool, chosen: speaker, ...(L ? { place, placePolicy: where!.policy ?? 'place', ...(where!.cursor !== undefined ? { cursor: where!.cursor } : {}) } : {}) });
     try {
       // Validate file inputs before launching any paid observation. Jev receives text and image filenames only.
-      const c = s.characters[speaker], { user, context, label, v2, messages, assembly, adapterVersion } = assemble(this.store, s, speaker);
+      const c = s.characters[speaker], { user, context, label, v2, messages, assembly, adapterVersion, visibility: seen } = assemble(this.store, s, speaker);
       if (!user.trim() && !context.parts.length) throw Error('Nothing to send: the assembled user message is empty. Include {transcript} in the conversation header, or add an opening instruction for an empty conversation.');
-      if (s.shadow) void shadowJev(this.store,s,branchId,b.head,turnId,this.transport).catch(error=>console.error('Jev persistence error:',error.message));
+      if (s.shadow) void shadowJev(this.store,s,branchId,b.head,turnId,this.transport,speaker).catch(error=>console.error('Jev persistence error:',error.message));
       const result = await generate({ provider: c.provider, model: c.model, temperature: c.temperature, reasoning: c.reasoning,
         personId: speaker, labelAtDispatch: label, validationRoster: rosterOf(s), assemblyVersion: assemblyOf(s), ...(c.origin ? { origin: c.origin } : {}),
-        messages, ...(v2?{assembly}:{}), adapterVersion, attachments: context.attachments, branch: branchId, revision: b.head, turnId,
+        messages, ...(v2?{assembly}:{}), adapterVersion, ...(seen ? { visibility: seen } : {}), attachments: context.attachments, branch: branchId, revision: b.head, turnId,
         policy: s.policy, signal: controller.signal }, this.store, this.transport);
       if (controller.signal.aborted || this.read(branchId).head !== b.head) {
         this.store.put('turns', turnId, { id: turnId, branch: branchId, status: controller.signal.aborted ? 'canceled' : 'detached', attempts: result.attempts, ...(run ? { run: run.id } : {}) });
         return this.read(branchId);
       }
-      s.messages.push({ id: id(), speaker: label, ...(v2 ? { speakerRef: { kind: 'person' as const, id: speaker } } : {}), text: result.text, source: 'generated', turnId });
+      // Stamped from the dispatch-time state; a reply that comes back after a move has already been detached above.
+      s.messages.push({ id: id(), speaker: label, ...(v2 ? { speakerRef: { kind: 'person' as const, id: speaker } } : {}), text: result.text, source: 'generated', turnId, ...(L ? { audience: stamp(s, place!) } : {}) });
       // Memory updates are manual in this release. Proposed notes remain in the attempt.
       const next = this.commit(branchId, b.head, s, `${label} replied`);
       this.store.put('turns', turnId, { id: turnId, branch: branchId, status: 'attached', revision: next.head, attempts: result.attempts, ...(run ? { run: run.id } : {}) });

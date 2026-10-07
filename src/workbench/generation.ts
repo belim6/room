@@ -16,6 +16,8 @@ export const demoEnabled = () => process.env.ROOM_DEMO === '1';
 export interface GenerationInput {
   provider: Provider; model: string; persona?: string; personId?: string; labelAtDispatch?: string; validationRoster?: string[];
   assemblyVersion?: Assembly; assembly?: HistoryConfig; adapterVersion?: 'perspective-1'; origin?: { item: string; revision: string };
+  // Locations: whose history this request was assembled from. Evidence only, outside model context.
+  visibility?: { policy: 'audience-1'; person: string; place: string; hidden: number; visibleMessageIds: string[] };
   messages: { role: string; content: string | ContentPart[] }[]; attachments?: unknown[]; temperature: number; reasoning?: 'default' | 'off';
   branch?: string; revision?: string; turnId?: string; purpose?: 'alternative'; review?: string; candidate?: string;
   policy?: 'protected' | 'observe'; signal?: AbortSignal;
@@ -37,7 +39,7 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
   if (assemblyVersion === 'v2' && !roster?.length) throw Error('A v2 generation needs its validation roster');
   const assembly=historyConfig(assemblyVersion,input.assembly),perspective=assembly.history==='perspective';
   if(input.adapterVersion!==undefined&&(!perspective||input.adapterVersion!=='perspective-1'))throw Error('Invalid history adapter version');
-  const identity = { persona: label, personId: input.personId ?? label, labelAtDispatch: label, validationRoster: roster ?? [...LEGACY_NAMES], assemblyVersion, assembly, ...(perspective?{adapterVersion:'perspective-1'}:{}), ...(input.origin ? { origin: input.origin } : {}) };
+  const identity = { persona: label, personId: input.personId ?? label, labelAtDispatch: label, validationRoster: roster ?? [...LEGACY_NAMES], assemblyVersion, assembly, ...(perspective?{adapterVersion:'perspective-1'}:{}), ...(input.origin ? { origin: input.origin } : {}), ...(input.visibility ? { visibility: clone(input.visibility) } : {}) };
   if (input.provider === 'demo' && !demoEnabled()) throw Error(`${label} uses local demo, which is only available on instances started with ROOM_DEMO=1. Choose OpenGateway or Together in Characters.`);
   if (input.reasoning === 'off' && !reasoningSwitchVerified(input.provider)) throw Error(`Turning reasoning off is not verified for ${input.provider}`);
   const attempts: string[] = [];

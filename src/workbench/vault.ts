@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { Store, clone, id } from './store';
 import { lineDiff } from './changes';
 import { validateLabel, labelKey } from './identity';
+import { validatePlaceName } from './locations';
 // Vault: mutable item metadata (head, archived, title) beside immutable revisions. Content is data; it never gains capabilities.
 export type ItemType = 'component' | 'persona' | 'room-template';
 // `version` advances on every metadata change (revision, title, archive); archive and restore expect it.
@@ -96,7 +97,13 @@ export class Vault {
       return { components: content.components.map((c: any) => ({ item: c.item, revision: c.revision })), extra, compiler: 'v1', compiled };
     }
     if (type === 'room-template') {
-      only(content, ['system', 'frame', 'flow', 'opening', 'cast'], 'room template');
+      only(content, ['system', 'frame', 'flow', 'opening', 'cast', 'places', 'humanPlace'], 'room template');
+      // Places are optional; with them, every place reference must resolve. Without them, no references are allowed.
+      const places = content.places;
+      if (places !== undefined && (!Array.isArray(places) || !places.length || places.length > 50)) throw Error('A template with places needs one to 50 places');
+      const placeKeys = new Set<string>(); for (const p of places ?? []) { validatePlaceName(p); if (placeKeys.has(labelKey(p))) throw Error(`Two places are named ${p}`); placeKeys.add(labelKey(p)); }
+      const placeRef = (v: unknown) => { if (v === undefined) return undefined; if (!places?.includes(v)) throw Error(`Unknown place in template: ${String(v)}`); return v as string; };
+      const humanPlace = placeRef(content.humanPlace);
       const f = content.frame;
       if (f !== undefined && (!f || typeof f !== 'object' || Object.keys(f).sort().join() !== 'context,identity,opening,turn' || Object.values(f).some(v => typeof v !== 'string' || (v as string).length > 20000))) throw Error('Invalid template framing');
       if (!['random', 'alternate'].includes(content.flow)) throw Error('Choose random or alternate flow');
@@ -104,15 +111,16 @@ export class Vault {
       if (!Array.isArray(content.cast) || content.cast.length > 50) throw Error('Invalid template cast');
       const keys = new Set<string>();
       const cast = content.cast.map((c: any) => {
-        only(c, ['persona', 'label', 'situation'], 'cast entry');
+        only(c, ['persona', 'label', 'situation', 'place'], 'cast entry');
         if (!isRef(c.persona)) throw Error('Each cast entry needs a persona revision');
         let rev: VaultRevision, item: VaultItem;
         try { rev = this.revision(c.persona.revision); item = this.item(c.persona.item); } catch { throw Error('A cast persona no longer exists'); }
         if (rev.item !== c.persona.item || item.type !== 'persona') throw Error('A cast entry must reference a persona revision');
         const label = validateLabel(c.label); if (keys.has(labelKey(label))) throw Error(`Two cast entries are labeled ${label}`); keys.add(labelKey(label));
-        return { persona: { item: c.persona.item, revision: c.persona.revision }, label, ...(c.situation ? { situation: str(c.situation, 20000, 'situation') } : {}) };
+        const place = placeRef(c.place);
+        return { persona: { item: c.persona.item, revision: c.persona.revision }, label, ...(c.situation ? { situation: str(c.situation, 20000, 'situation') } : {}), ...(place ? { place } : {}) };
       });
-      return { system: str(content.system ?? '', 100000, 'template instructions'), ...(f ? { frame: { ...f } } : {}), flow: content.flow, ...(content.opening ? { opening: { kind: content.opening.kind, text: content.opening.text } } : {}), cast };
+      return { system: str(content.system ?? '', 100000, 'template instructions'), ...(f ? { frame: { ...f } } : {}), flow: content.flow, ...(content.opening ? { opening: { kind: content.opening.kind, text: content.opening.text } } : {}), cast, ...(places ? { places: [...places] } : {}), ...(humanPlace ? { humanPlace } : {}) };
     }
     throw Error('Unknown vault item type');
   }

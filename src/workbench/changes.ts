@@ -1,5 +1,6 @@
 import type { State, Message } from './engine';
 import { labelOf, assemblyOf } from './identity';
+import { whoLabel } from './locations';
 export type LineDiff = { op: 'same' | 'add' | 'del'; text: string }[];
 export interface SettingChange { field: string; character?: string; label?: string; before: unknown; after: unknown; diff?: LineDiff }
 export function lineDiff(a: string, b: string): LineDiff {
@@ -39,7 +40,11 @@ export function stateChanges(from: State, to: State) {
   const old = new Map(from.messages.map(m=>[m.id,m])), now = new Map(to.messages.map(m=>[m.id,m]));
   const original = (m: Message) => old.has(m.id)?m.id:m.editedFrom?.find(key=>old.has(key));
   const represented = new Set(to.messages.map(original).filter(Boolean));
-  const edited = to.messages.filter(m=>{const key=original(m),before=key?old.get(key):null;return before && (before.id!==m.id || before.text!==m.text || before.speaker!==m.speaker || JSON.stringify(before.speakerRef??null)!==JSON.stringify(m.speakerRef??null) || JSON.stringify(before.attachments||[])!==JSON.stringify(m.attachments||[]));}).map(m=>m.id);
+  const scope = (m: Message) => JSON.stringify([m.audience ? [m.audience.place, [...m.audience.present].sort()] : null, m.movement ?? null]);
+  const edited = to.messages.filter(m=>{const key=original(m),before=key?old.get(key):null;return before && (before.id!==m.id || before.text!==m.text || before.speaker!==m.speaker || JSON.stringify(before.speakerRef??null)!==JSON.stringify(m.speakerRef??null) || JSON.stringify(before.attachments||[])!==JSON.stringify(m.attachments||[]) || scope(before)!==scope(m));}).map(m=>m.id);
+  // Audience-only changes: same text, different set of people who heard it (including made public).
+  const audience = to.messages.filter(m=>{const key=original(m),before=key?old.get(key):null;return before && before.text===m.text && scope(before)!==scope(m);}).map(m=>({id:m.id,before:heardBefore(m),after:m.audience?.display??null}));
+  function heardBefore(m: Message){const b=old.get(original(m)!)!;return b.audience?.display??null;}
   // Identity-only changes: same text, different attribution.
   const identity = to.messages.filter(m=>{const key=original(m),before=key?old.get(key):null;return before && before.text===m.text && JSON.stringify(before.speakerRef??null)!==JSON.stringify(m.speakerRef??null);}).map(m=>m.id);
   const removed = from.messages.filter(m=>!represented.has(m.id)).map(m=>m.id);
@@ -48,5 +53,9 @@ export function stateChanges(from: State, to: State) {
   to.messages.forEach((m,i)=>{if(original(m))return;if(i>last)appended[m.source]=(appended[m.source]||0)+1;else inserted.push(m.id);});
   const retainedBefore = from.messages.filter(m=>represented.has(m.id)).map(m=>m.id);
   const retainedAfter = to.messages.map(original).filter(Boolean);
-  return {settings,people,identity,conversation:{appended,edited,removed,inserted,reordered:JSON.stringify(retainedBefore)!==JSON.stringify(retainedAfter)}};
+  // Placement: places added or renamed, and who is where now versus then. Movement lines show up as appended 'movement' messages.
+  const fromL = from.locations, toL = to.locations, name = (s: State, p?: string) => s.locations?.places.find(x => x.id === p)?.name ?? null;
+  const locations = !fromL && !toL ? null : { enabled: !fromL && !!toL, places: { added: (toL?.places ?? []).filter(p => !fromL?.places.some(q => q.id === p.id)).map(p => p.name), renamed: (toL?.places ?? []).flatMap(p => { const q = fromL?.places.find(x => x.id === p.id); return q && q.name !== p.name ? [{ from: q.name, to: p.name }] : []; }) },
+    moved: Object.keys(toL?.at ?? {}).filter(k => fromL && fromL.at[k] !== undefined && fromL.at[k] !== toL!.at[k]).map(k => ({ key: k, label: whoLabel(to, k), from: name(from, fromL!.at[k]), to: name(to, toL!.at[k]) })) };
+  return {settings,people,identity,audience,locations,conversation:{appended,edited,removed,inserted,reordered:JSON.stringify(retainedBefore)!==JSON.stringify(retainedAfter)}};
 }
