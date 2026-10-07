@@ -27,7 +27,7 @@ Node 22, run through `tsx`; no build step and no auto-reload. Server code change
 
 ## Worktrees and data
 
-- `~/dev/room` (`main`) is the working copy. `~/dev/room-stable` (`stable`) is a git worktree Deniz uses on 4317 against the real data (`ROOM_DATA_DIR=~/dev/room/.room-data`). Update it with `git -C ~/dev/room-stable merge main` plus a restart, only when asked.
+- `~/dev/room` (`main`) is the working copy. `~/dev/room-stable` (`stable`) is a git worktree Deniz uses on 4317 against the real data (`ROOM_DATA_DIR=~/dev/room/.room-data`). Update it with `git -C ~/dev/room-stable merge --ff-only main` plus a restart. **Standing permission (Deniz, 2026-10-07): when Deniz asks for a change, implement it and deploy it to stable without asking again.** Before the restart: tests and `tsc` pass on main, and `/api/bootstrap` shows no active turns, runs or queued experiment trials (a restart cancels them). Unrequested changes still need his go-ahead.
 - The 4317 server runs under launchd (`~/Library/LaunchAgents/com.deniz.room.plist`, KeepAlive, starts at login). Restart with `launchctl kickstart -k gui/$(id -u)/com.deniz.room`; never `kill` it or start a second one with `nohup`, since launchd respawns it and a second process on the same data directory is unsafe. Logs: `~/dev/room-stable/.workbench.log`.
 - `.room-data/` holds Deniz's research records. **Never write test turns to it.** To exercise the app, run a second instance on another port with a throwaway `ROOM_DATA_DIR` in the scratchpad, and `ROOM_DEMO=1` to generate without spending. One server process per data directory.
 - `saves/`, `saved/`, `oldsaves/`, `prompt-archive/`, `_dead/` are private transcripts and retired code, gitignored. Don't commit them.
