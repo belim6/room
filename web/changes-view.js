@@ -1,7 +1,7 @@
 /* Derived views only. No diff or research annotation is sent to a model. */
 const RoomChanges=(()=>{
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const titles={system:'Shared instructions',prompt:'Personality instructions',memory:'Retained memory',participants:'Participants',human:'Human name',shadow:'Jev shadow',policy:'Identity checks',reasoning:'Reasoning',frame:'Harness framing',label:'Label',situation:'Situation',origin:'Persona origin',flow:'Flow',assemblyVersion:'Assembly',templateFields:'Template provenance'};
+  const titles={system:'Shared instructions',prompt:'Personality instructions',memory:'Retained memory',participants:'Participants',human:'Human name',shadow:'Jev shadow',policy:'Identity checks',reasoning:'Reasoning',frame:'Harness framing',label:'Label',situation:'Situation',origin:'Persona origin',flow:'Flow',assemblyVersion:'Assembly',assembly:'History',templateFields:'Template provenance'};
   // Characters are shown by label; IDs stay in the data.
   function groups(settings){const result=[];for(const s of settings){const name=s.label||s.character,prior=['model','provider','reasoning'].includes(s.field)&&result.find(r=>r.field===s.field&&r.before===s.before&&r.after===s.after);if(prior)prior.characters.push(name);else result.push({...s,characters:s.character?[name]:[]});}return result;}
   const named=(changes,ids)=>ids.map(id=>changes.people?.labels?.[id]??id);

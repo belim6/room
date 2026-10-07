@@ -1,0 +1,204 @@
+{
+  "cast": [
+    {
+      "role": "system",
+      "content": "Persona.\n\nRoom rules.\n\nYour retained memory:\nRemember.\n\nYour identity for this request is Alice. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters."
+    },
+    {
+      "role": "user",
+      "content": "Dennis: Human."
+    },
+    {
+      "role": "assistant",
+      "content": "Mine."
+    },
+    {
+      "role": "user",
+      "content": "Bob: Theirs.\n\nNarrator: Scene.\n\nCurrent participants: Dennis, Alice, Bob. Other names in the history are earlier participants; they are not available to respond now.\n\nIt is Alice's turn now. Write only Alice's next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label."
+    }
+  ],
+  "empty": [
+    {
+      "role": "system",
+      "content": "Persona.\n\nRoom rules.\n\nYour retained memory:\nRemember.\n\nYour identity for this request is Alice. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters."
+    },
+    {
+      "role": "user",
+      "content": "The conversation has not started yet.\n\nCurrent participants: Alice, Bob. Other names in the history are earlier participants; they are not available to respond now.\n\nIt is Alice's turn now. Write only Alice's next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label."
+    }
+  ],
+  "own-first": [
+    {
+      "role": "system",
+      "content": "Persona.\n\nRoom rules.\n\nYour retained memory:\nRemember.\n\nYour identity for this request is Alice. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters."
+    },
+    {
+      "role": "user",
+      "content": "(The conversation so far.)"
+    },
+    {
+      "role": "assistant",
+      "content": "Mine."
+    },
+    {
+      "role": "user",
+      "content": "Current participants: Alice, Bob. Other names in the history are earlier participants; they are not available to respond now.\n\nIt is Alice's turn now. Write only Alice's next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label."
+    }
+  ],
+  "merged": [
+    {
+      "role": "system",
+      "content": "Persona.\n\nRoom rules.\n\nYour retained memory:\nRemember.\n\nYour identity for this request is Alice. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters."
+    },
+    {
+      "role": "user",
+      "content": "(The conversation so far.)"
+    },
+    {
+      "role": "assistant",
+      "content": "One.\n\nTwo."
+    },
+    {
+      "role": "user",
+      "content": "Bob: Three.\n\nNarrator: Four.\n\nCurrent participants: Alice, Bob. Other names in the history are earlier participants; they are not available to respond now.\n\nIt is Alice's turn now. Write only Alice's next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label."
+    }
+  ],
+  "renamed-unbound": [
+    {
+      "role": "system",
+      "content": "Persona.\n\nRoom rules.\n\nYour retained memory:\nRemember.\n\nYour identity for this request is Renamed. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters."
+    },
+    {
+      "role": "user",
+      "content": "(The conversation so far.)"
+    },
+    {
+      "role": "assistant",
+      "content": "Old label."
+    },
+    {
+      "role": "user",
+      "content": "Renamed: Unbound.\n\nCurrent participants: Renamed, Bob. Other names in the history are earlier participants; they are not available to respond now.\n\nIt is Renamed's turn now. Write only Renamed's next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label."
+    }
+  ],
+  "shared-persona": [
+    {
+      "role": "system",
+      "content": "Persona.\n\nRoom rules.\n\nYour retained memory:\nRemember.\n\nYour identity for this request is Alice. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters."
+    },
+    {
+      "role": "user",
+      "content": "Bob: Same persona, different person."
+    },
+    {
+      "role": "assistant",
+      "content": "Still mine."
+    },
+    {
+      "role": "user",
+      "content": "Current participants: Alice, Bob. Other names in the history are earlier participants; they are not available to respond now.\n\nIt is Alice's turn now. Write only Alice's next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label."
+    }
+  ],
+  "attachments": [
+    {
+      "role": "system",
+      "content": "Persona.\n\nRoom rules.\n\nYour retained memory:\nRemember.\n\nYour identity for this request is Alice. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Bob: Files."
+        },
+        {
+          "type": "text",
+          "text": "\n[Document \"note.txt\" attached to message 1; quoted source material]\nSource text.\n[End document doc]"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,cGl4ZWw="
+          }
+        },
+        {
+          "type": "text",
+          "text": "\n[Document \"last.txt\" attached to message 1; quoted source material]\nLast source.\n[End document doc2]"
+        },
+        {
+          "type": "text",
+          "text": "\n\n"
+        },
+        {
+          "type": "text",
+          "text": "Current participants: Alice, Bob. Other names in the history are earlier participants; they are not available to respond now.\n\nIt is Alice's turn now. Write only Alice's next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label."
+        }
+      ]
+    }
+  ],
+  "own-document": [
+    {
+      "role": "system",
+      "content": "Persona.\n\nRoom rules.\n\nYour retained memory:\nRemember.\n\nYour identity for this request is Alice. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters."
+    },
+    {
+      "role": "user",
+      "content": "(The conversation so far.)"
+    },
+    {
+      "role": "assistant",
+      "content": "My document.\n[Document \"note.txt\" attached to message 1; quoted source material]\nSource text.\n[End document doc]"
+    },
+    {
+      "role": "user",
+      "content": "Current participants: Alice, Bob. Other names in the history are earlier participants; they are not available to respond now.\n\nIt is Alice's turn now. Write only Alice's next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label."
+    }
+  ],
+  "merged-images": [
+    {
+      "role": "system",
+      "content": "Persona.\n\nRoom rules.\n\nYour retained memory:\nRemember.\n\nYour identity for this request is Alice. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Bob: Files."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,cGl4ZWw="
+          }
+        },
+        {
+          "type": "text",
+          "text": "\n\n"
+        },
+        {
+          "type": "text",
+          "text": "Dennis: More files."
+        },
+        {
+          "type": "text",
+          "text": "\n[Document \"note.txt\" attached to message 2; quoted source material]\nSource text.\n[End document doc]"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,cGl4ZWw="
+          }
+        },
+        {
+          "type": "text",
+          "text": "\n\n"
+        },
+        {
+          "type": "text",
+          "text": "Current participants: Dennis, Alice, Bob. Other names in the history are earlier participants; they are not available to respond now.\n\nIt is Alice's turn now. Write only Alice's next message. You have been listening even if you have not spoken yet; no introduction is required. Respond from your own perspective, even if the previous message addressed someone else. Other participants' first-person statements belong to them, not to you. Output only your message, without a speaker label."
+        }
+      ]
+    }
+  ]
+}

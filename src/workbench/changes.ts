@@ -24,6 +24,7 @@ export function stateChanges(from: State, to: State) {
     settings.push({field,...(character?{character,label:labelOf(to.characters[character]?to:from,character)}:{}),before,after,...(typeof before==='string' && typeof after==='string' && (before.includes('\n')||after.includes('\n'))?{diff:lineDiff(before,after)}:{})});
   }
   for(const key of ['system','human','participants','shadow','policy'] as const) field(key,from[key],to[key]);
+  field('assembly',from.assembly??{history:'transcript'},to.assembly??{history:'transcript'});
   field('frame',from.frame??null,to.frame??null);
   field('flow',from.flow??'random',to.flow??'random');field('assemblyVersion',assemblyOf(from),assemblyOf(to));
   field('origin',from.origin??null,to.origin??null);field('templateFields',from.templateFields??null,to.templateFields??null);

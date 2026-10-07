@@ -1131,3 +1131,122 @@ test('client run driver continues until the server ends the run; polling backs o
   runInNewContext(fn+';scheduleRunPoll();',ctx);assert.equal(timers.length,1);timers[0].f();await tick();
   assert.equal(timers.length,2,'a failed poll reschedules');assert.equal(timers[1].ms,4000);
 });
+
+import { assemble, validateState } from '../src/workbench/engine';
+import { assertPerspective } from '../src/workbench/history';
+import { transcriptCases, captureTranscript, perspectiveCases, perspectiveState, historyState } from './historyScenarios';
+// Independent strict transport contract; a malformed perspective sequence must never reach a provider.
+function strictHistory(messages:any[]) {
+  const d=messages[0]?.role==='system'?messages.slice(1):messages;
+  assert(d.length>0);assert.equal(d[0].role,'user');assert.equal(d.at(-1).role,'user');
+  d.forEach((m,i)=>{assert.equal(m.role,i%2?'assistant':'user');assert(typeof m.content==='string'?m.content.trim():m.content.some((p:any)=>p.type==='image_url'||p.text.trim()));if(m.role==='assistant'&&Array.isArray(m.content))assert(!m.content.some((p:any)=>p.type==='image_url'));});
+}
+test('§1.5a.4.1 stage 1 legacy and v2 transcript bodies, custom/blank frames, mixed attachments and retries stay byte-identical',async()=>{
+  const golden=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/transcript-requests.json'),'utf8'));
+  for(const name of transcriptCases)assert.deepEqual(await captureTranscript(store(),name),golden[name],name);
+  const s=store(),state=historyState(s),before=JSON.stringify(state);const absent=assemble(s,state,'Boris').messages;
+  state.assembly={history:'transcript'};assert.deepEqual(assemble(s,state,'Boris').messages,absent);delete state.assembly;assert.equal(JSON.stringify(state),before);
+});
+for(const name of perspectiveCases)test('§1.5a.4.2 perspective golden: '+name,async()=>{
+  const s=store(),state=perspectiveState(s,name),golden=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/perspective-requests.json'),'utf8'))[name];
+  let calls=0;const e=new ProductionEngine(s,async(_u,o)=>{const body=JSON.parse(String(o?.body));strictHistory(body.messages);assert.deepEqual(body,{model:'mock',messages:golden,temperature:.7});const a=s.attempts()[0];assert.deepEqual(a.body,body);assert.deepEqual(a.assembly,{history:'perspective'});assert.equal(a.adapterVersion,'perspective-1');calls++;return response('Fine.');});
+  const b=e.create(name,state),bytes=fs.readFileSync(path.join(s.root,'revisions',b.head+'.json'),'utf8');
+  const preview=new People(e,new Vault(s)).previewAssembled(b.id,'alpha');assert.deepEqual(preview.messages,golden);assert.equal(calls,0);assert.deepEqual(assemble(s,{...state,frame:undefined},'alpha').messages,golden);
+  await e.turn(b.id,b.head,'alpha');assert.equal(calls,1);assert.equal(fs.readFileSync(path.join(s.root,'revisions',b.head+'.json'),'utf8'),bytes);
+});
+test('§1.5a.4.3 invalid configs, custom framing and own images fail before character or shadow dispatch',async()=>{
+  const s=store();let calls=0;const e=new ProductionEngine(s,async()=>{calls++;throw Error('Must not dispatch');});
+  for(const bad of [null,{},[],{history:'unknown'},{history:'perspective',extra:true}]){
+    const state=perspectiveState(s,'empty');(state as any).assembly=bad;assert.throws(()=>e.create('Bad',state),/assembly configuration/);
+  }
+  for(const version of [undefined,'legacy-v1'] as const){const state=initialState();state.assemblyVersion=version;state.assembly={history:'transcript'};assert.throws(()=>e.create('Bad legacy',state),/requires v2/);}
+  for(const kind of ['custom','own-image','missing','limit']){
+    const state=perspectiveState(s,'own-first');state.shadow=true;
+    if(kind==='custom')state.frame={...DEFAULT_FRAME,context:''};
+    if(kind==='own-image')state.messages[0].attachments=['img'];
+    if(kind==='limit'){s.put('attachments','large',{...s.get('attachments','doc'),id:'large',text:'x'.repeat(200001)});state.messages[0].attachments=['large'];}
+    if(kind==='missing')state.messages[0].attachments=['doc'];
+    const b=e.create(kind,state);if(kind==='missing')fs.unlinkSync(s.file('attachments','doc'));
+    await assert.rejects(e.turn(b.id,b.head,'alpha'),/default framing|own messages|missing|200,000/);
+    assert.throws(()=>new People(e,new Vault(s)).previewAssembled(b.id,'alpha'),/default framing|own messages|missing|200,000/);
+  }
+  assert.equal(calls,0);assert.equal(s.attempts().length,0);assert.equal(s.list('jev-requests').length,0);
+  const legacy=initialState(),switched=applyPatch(legacy,{assemblyVersion:'v2',assembly:{history:'perspective'}});assert.deepEqual(switched.assembly,{history:'perspective'});assert.equal(legacy.assembly,undefined);
+  assert.throws(()=>applyPatch(switched,{assembly:{} as any}),/configuration/);assert.throws(()=>applyPatch(switched,{assembly:{history:'transcript',extra:1} as any}),/configuration/);assert.deepEqual(applyPatch(switched,{assembly:{history:'transcript'}}).assembly,{history:'transcript'});
+});
+test('§1.5a.4.4 retry and Revise use saved perspective input after config, prompt, label and vault heads change',async()=>{
+  const {s,e,people,vault}=world(),{persona:p}=persona(vault,['Original.']);let b=people.createRoom({name:'Frozen'});
+  b=people.add(b.id,{expected:b.head,label:'Alice',persona:ref(p)});b=people.add(b.id,{expected:b.head,label:'Bob',persona:ref(p)});const alpha=person(b.revision.state,'Alice');
+  b=people.settings(b.id,{expected:b.head,assembly:{history:'perspective'}});b=e.message(b.id,b.head,'Begin.');
+  const firstHead=b.head;let n=0;const bodies:any[]=[];
+  e.transport=async(_u,o)=>{const body=JSON.parse(String(o?.body));strictHistory(body.messages);bodies.push(body);n++;if(n===1){let cur=e.read(b.id);cur=people.rename(cur.id,alpha,{expected:cur.head,label:'Changed'});people.settings(cur.id,{expected:cur.head,assembly:{history:'transcript'},characters:{[alpha]:{prompt:'Changed prompt.'}}});vault.revise(p.item.id,{expected:p.item.head,content:{components:p.current.content.components,extra:'New vault head.'}});}return response(n%2?'Bob: wrong.':'Good.');};
+  await e.turn(b.id,firstHead,alpha);assert.equal(s.list('turns')[0].status,'detached');
+  const correction="The previous attempt used another participant's label. Write a fresh reply only as Alice, from your own perspective.";
+  const retried=clone(bodies[0]);retried.messages.at(-1).content+='\n\n'+correction;assert.deepEqual(bodies[1],retried);
+  // A fresh branch of the frozen input supplies an attached successful retry to Revise.
+  b=e.fork(b.id,firstHead,'Frozen input');b=await e.turn(b.id,b.head,alpha);const original=s.attempts().find(a=>a.branch===b.id&&!a.retryOf)!;
+  const x=new Alternatives(e),review=x.open(b.id,b.revision.state.messages.at(-1)!.id).review;assert.equal(review.inputAttempt,original.id);
+  b=people.rename(b.id,alpha,{expected:b.head,label:'Later'});b=people.settings(b.id,{expected:b.head,assembly:{history:'transcript'},characters:{[alpha]:{prompt:'Later prompt.'}}});
+  const saved=JSON.stringify(original);const result=await x.propose(review.id,'Be concise.'),candidate=result.candidates[0],attempts=s.attempts().filter(a=>a.purpose==='alternative');
+  assert.equal(candidate.result.status,'completed');assert.equal(attempts.length,2);
+  const base=attempts.find(a=>!a.retryOf)!,retry=attempts.find(a=>a.retryOf)!;const expected=clone(original.body);expected.messages.at(-1).content+='\n\n'+candidate.instruction;
+  assert.deepEqual(base.body,expected);assert(candidate.instruction.includes('Earlier reply: "Good."'));assert(candidate.instruction.includes('Feedback: "Be concise."'));
+  expected.messages.at(-1).content+='\n\n'+correction;assert.deepEqual(retry.body,expected);assert(!JSON.stringify(expected).includes('\\n\\n\\n\\n'));
+  for(const a of attempts){assert.deepEqual(a.assembly,{history:'perspective'});assert.equal(a.adapterVersion,'perspective-1');assert.equal(a.labelAtDispatch,'Alice');assert.deepEqual(a.origin,ref(p));}
+  assert.equal(JSON.stringify(s.attempts().find(a=>a.id===original.id)),saved);
+});
+test('§1.5a.4.5 concurrent transcript and perspective experiment trials record isolated configurations',async()=>{
+  const s=store(),state=perspectiveState(s,'cast');delete state.assembly;let pending=0,peak=0;const releases:(()=>void)[]=[];
+  const e=new ProductionEngine(s,async(_u,o)=>{const body=JSON.parse(String(o?.body));if(body.messages.length>2)strictHistory(body.messages);pending++;peak=Math.max(peak,pending);await new Promise<void>(r=>releases.push(r));pending--;return response('Trial.');});
+  const b=e.create('Base',state),x=new Experiments(e),draft=x.create({name:'Modes',question:'Does attribution matter?',prediction:'It may.',base:{branch:b.id,revision:b.head},speaker:'alpha',conditions:[{key:'T',label:'Transcript',control:true,patch:{assembly:{history:'transcript'}}},{key:'P',label:'Perspective',patch:{assembly:{history:'perspective'}}}]});
+  x.run(draft.id,1,draft.version);assert.equal(peak,2);releases.forEach(r=>r());await x.active.get(draft.id)?.done;
+  const trials=x.trials(draft.id);assert.equal(trials.length,2);assert(trials.every(t=>t.status==='completed'));
+  for(const t of trials){const mode=t.condition==='T'?'transcript':'perspective',a=s.attempts().find(a=>a.turnId===t.turnId);assert.equal(a.assembly.history,mode);assert.equal(e.read(t.branch).revision.state.assembly?.history,mode);}
+  const one=e.read(trials[0].branch);e.commit(one.id,one.head,{...one.revision.state,assembly:{history:'perspective'}},'Only one');assert.equal(e.read(b.id).revision.state.assembly,undefined);assert.equal(e.read(b.id).revision.state.messages.length,state.messages.length);
+});
+test('§1.5a.4.6 Jev payload and stored character criteria are identical across history modes',async()=>{
+  const s=store(),state=perspectiveState(s,'cast');state.shadow=true;const bodies:any[]=[];process.env.TYPESAFE_API_KEY='mock';
+  const e=new ProductionEngine(s,async(url,o)=>{if(String(url).includes('typesafe')){bodies.push(JSON.parse(String(o?.body)));return new Response(JSON.stringify({answers:{next_speaker:{}}}));}return response('Fine.');});
+  for(const history of ['transcript','perspective'] as const){const b=e.create(history,{...state,assembly:{history}});await e.turn(b.id,b.head,'alpha');}
+  assert.equal(bodies.length,2);assert.deepEqual(bodies[0],bodies[1]);assert.equal(bodies[0].questions.next_speaker.criteria.Alice.what,state.characters.alpha.prompt);
+});
+test('§1.5a.4.7 previews and settings make no calls; changes, forks, retcons and restart retain configuration',()=>{
+  const s=store(),state=perspectiveState(s,'cast');delete state.assembly;let calls=0;const e=new ProductionEngine(s,async()=>{calls++;throw Error('No calls');}),people=new People(e,new Vault(s));
+  let b=e.create('Preview',state);const before=b.head,preview=people.previewAssembled(b.id,'alpha',{assembly:{history:'perspective'},characters:{alpha:{prompt:'Draft prompt.'}}});assert(preview.assembled.startsWith('Draft prompt.'));assert.equal(e.read(b.id).head,before);
+  assert.throws(()=>people.previewAssembled(b.id,'alpha',{assembly:{history:'invalid'}}),/configuration/);
+  b=people.settings(b.id,{expected:b.head,assembly:{history:'perspective'}});assert(stateChanges(state,b.revision.state).settings.some(c=>c.field==='assembly'));const saved=b.head;
+  b=people.settings(b.id,{expected:b.head,system:'Updated.'});assert.equal(b.revision.state.assembly?.history,'perspective');assert.throws(()=>people.settings(b.id,{expected:saved,assembly:{history:'transcript'}}),/changed/);
+  const fork=e.fork(b.id,b.head,'Fork');for(const mode of ['keep','regenerate']){const f=e.fork(fork.id,fork.head,mode),r=e.retcon(f.id,f.head,state.messages[0].id,'Edit.',mode,'keep');assert.equal(r.revision.state.assembly?.history,mode==='keep'?'perspective':undefined);}
+  const restarted=new ProductionEngine(new Store(s.root));assert.equal(restarted.read(b.id).revision.state.assembly?.history,'perspective');assert.equal(calls,0);assert.equal(s.attempts().length,0);
+});
+test('§1.5a.4.8 contract assertion, image retry separators, all providers and recorded failures without fallback',async()=>{
+  process.env.TOGETHER_API_KEY='mock';
+  const s=store(),state=perspectiveState(s,'attachments'),assembled=assemble(s,state,'alpha');
+  for(const provider of ['opengateway','together','demo'] as const){let calls=0;process.env.ROOM_DEMO='1';const result=await generate({provider,model:'mock',temperature:.7,personId:'alpha',labelAtDispatch:'Alice',validationRoster:['Alice','Bob'],assemblyVersion:'v2',assembly:{history:'perspective'},messages:assembled.messages},s,async(_u,o)=>{strictHistory(JSON.parse(String(o?.body)).messages);calls++;return response(calls===1?'Bob: wrong.':'Fine.');});assert.equal(result.attempts.length,provider==='demo'?1:2);if(provider!=='demo'){const last=s.get('attempts',result.attempts[1]).body.messages.at(-1).content;assert.deepEqual(last.slice(-2),[{type:'text',text:'\n\n'},{type:'text',text:"The previous attempt used another participant's label. Write a fresh reply only as Alice, from your own perspective."}]);}}
+  const base={provider:'together' as const,model:'mock',temperature:.7,personId:'alpha',labelAtDispatch:'Alice',validationRoster:['Alice','Bob'],assemblyVersion:'v2' as const,assembly:{history:'perspective' as const},messages:assembled.messages};
+  const before=s.attempts().length;await assert.rejects(generate({...base,messages:[{role:'assistant',content:'Bad'}]},s,async()=>{throw Error('Must not dispatch');}),/Invalid perspective/);assert.equal(s.attempts().length,before);
+  let calls=0;await assert.rejects(generate(base,s,async()=>{calls++;return new Response('unsupported',{status:400});}),/HTTP 400/);assert.equal(calls,1);const failed=s.attempts().find(a=>a.outcome.status==='failed');assert.equal(failed.assembly.history,'perspective');assert.equal(failed.outcome.raw,'unsupported');
+});
+test('§1.5a.4.3 perspective rejects empty own turns and resolves edited legacy evidence by person ID',async()=>{
+  const s=store(),state=perspectiveState(s,'own-first');state.messages[0].text='';assert.throws(()=>assemble(s,state,'alpha'),/Invalid perspective/);
+  for(const messages of [[],[{role:'user',content:''}],[{role:'user',content:'A'},{role:'user',content:'B'}],[{role:'user',content:'A'},{role:'assistant',content:[{type:'image_url',image_url:{url:'x'}}]},{role:'user',content:'End'}]])assert.throws(()=>assertPerspective(messages as any),/Invalid perspective/);
+  s.put('attempts','historical',{id:'historical',personId:'alpha',labelAtDispatch:'Old'});s.put('turns','old-turn',{id:'old-turn',attempts:['historical']});
+  state.messages=[{id:'edited',speaker:'Old',text:'Still mine.',source:'edited',turnId:'old-turn'},{id:'unknown',speaker:'Alice',text:'Not mine.',source:'imported'}];
+  const m=assemble(s,state,'alpha').messages;assert.equal(m[2].role,'assistant');assert.equal(m[2].content,'Still mine.');assert.equal(m[3].role,'user');assert(String(m[3].content).startsWith('Alice: Not mine.'));
+});
+test('§1.5a.4.4 Revise keeps image positions, the complete instruction and one separator in saved final user content',async()=>{
+  const s=store(),state=perspectiveState(s,'merged-images');let calls=0;
+  const e=new ProductionEngine(s,async(_u,o)=>{strictHistory(JSON.parse(String(o?.body)).messages);calls++;return response(calls===2?'Bob: wrong.':'Fine.');});
+  let b=e.create('Images',state);b=await e.turn(b.id,b.head,'alpha');const original=s.attempts()[0],x=new Alternatives(e),review=x.open(b.id,b.revision.state.messages.at(-1)!.id).review;
+  const r=await x.propose(review.id,'Keep the source.'),candidate=r.candidates[0],attempts=s.attempts().filter(a=>a.purpose==='alternative');assert.equal(candidate.result.status,'completed');assert.equal(attempts.length,2);
+  const first=attempts.find(a=>!a.retryOf)!,parts=original.body.messages.at(-1).content;assert.deepEqual(first.body.messages.at(-1).content,[...parts,{type:'text',text:'\n\n'},{type:'text',text:candidate.instruction}]);assert.deepEqual(first.attachments,original.attachments);
+});
+test('§1.5a.4.7 HTTP request preview is read-only, reflects draft settings, and equals the dispatched messages',async()=>{
+  const s=store(),state=perspectiveState(s,'cast');delete state.assembly;let calls=0;const e=new ProductionEngine(s,async(_u,o)=>{calls++;strictHistory(JSON.parse(String(o?.body)).messages);return response('Fine.');}),b=e.create('HTTP preview',state),{base,close}=await listen(e);
+  try {
+    const url=base+'/api/branches/'+b.id,settings={expected:b.head,assembly:{history:'perspective'},characters:{alpha:{prompt:'Draft.'}}};
+    const result=await fetch(url+'/people/alpha/assembled',json(settings)),preview=await result.json() as any;assert.equal(result.status,200);assert.equal(calls,0);assert.equal(e.read(b.id).head,b.head);
+    const invalid=await fetch(url+'/people/alpha/assembled',json({assembly:{history:'perspective',extra:1}}));assert.equal(invalid.status,400);assert.equal(calls,0);
+    const saved=await (await fetch(url+'/settings',json(settings))).json() as any;await e.turn(b.id,saved.head,'alpha');assert.deepEqual(s.attempts()[0].body.messages,preview.messages);
+  } finally {await close();}
+});

@@ -5,7 +5,8 @@ import { GLOBAL_SYSTEM } from '../modelRouter';
 import { buildSpeakerInput, fillFrame, EMPTY_FRAME, DEFAULT_FRAME, type Frame } from '../speakerTurn';
 import { assemblyOf, labelOf, labelKey, validateLabel, validRef, lastPerson, humanPresent, rosterOf, resolveSpeaker, generationProvenance, LEGACY_NAMES, type SpeakerRef, type Assembly } from './identity';
 import { shadowJev } from './jev';
-import { getAttachments, attachmentTranscript } from './attachments';
+import { getAttachments, attachmentTranscript, type ContentPart } from './attachments';
+import { historyConfig, appendContent, assertPerspective, type HistoryConfig, type RequestMessage } from './history';
 
 export interface VaultRef { item: string; revision: string }
 // Legacy rooms key characters by name with no label; v2 rooms key people by UUID and keep the label as display text.
@@ -15,7 +16,7 @@ export interface Message { id: string; speaker: string; speakerRef?: SpeakerRef;
 export type TemplateField = 'system' | 'frame' | 'flow';
 export interface FieldProvenance { item: string; revision: string; value: unknown }
 export interface State { system: string; participants: string[]; characters: Record<string, Character>;
-  messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string; frame?: Frame; flow?: 'random' | 'alternate'; assemblyVersion?: Assembly;
+  messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string; frame?: Frame; flow?: 'random' | 'alternate'; assemblyVersion?: Assembly; assembly?: HistoryConfig;
   origin?: { template: VaultRef }; templateFields?: Partial<Record<TemplateField, FieldProvenance>> }
 export interface Adoption { kind: 'persona' | 'template' | 'switch'; source?: VaultRef; person?: string; fields: string[]; replacedDiverged?: string[] }
 export interface MessageChange { kind: 'delete-message' | 'restore-message' | 'replace-message'; message: Message; index: number; candidate?: string; judgment?: string }
@@ -38,6 +39,7 @@ const isRef = (r: any) => !!r && typeof r === 'object' && typeof r.item === 'str
 export function validateState(s: State, previous?: State | null) {
   if (!s || typeof s.system !== 'string' || s.system.length > 100000 || typeof s.human !== 'string' || !s.human.trim() || s.human.length > 80) throw Error('Invalid shared instructions or human name');
   if (s.assemblyVersion !== undefined && !['legacy-v1','v2'].includes(s.assemblyVersion)) throw Error('Invalid assembly version');
+  historyConfig(s.assemblyVersion,s.assembly);
   if (s.flow !== undefined && !['random','alternate'].includes(s.flow)) throw Error('Invalid flow');
   if (!s.characters || typeof s.characters !== 'object' || Array.isArray(s.characters)) throw Error('Invalid cast');
   const ids = Object.keys(s.characters), v2 = assemblyOf(s) === 'v2';
@@ -79,7 +81,9 @@ export function normalizeFlow(s: State) {
 // persona prompt, situation, room instructions, retained memory, identity line, and always uses a frame.
 export function assemble(store: Store, s: State, speaker: string, images = true) {
   const c = s.characters[speaker], v2 = assemblyOf(s) === 'v2', label = labelOf(s, speaker);
-  const context=attachmentTranscript(store,s.messages,images);
+  const assembly=historyConfig(s.assemblyVersion,s.assembly), perspective=assembly.history==='perspective';
+  if(perspective&&s.frame!==undefined&&(Object.keys(s.frame).sort().join()!==Object.keys(DEFAULT_FRAME).sort().join()||Object.entries(DEFAULT_FRAME).some(([k,v])=>s.frame![k as keyof Frame]!==v)))throw Error('Perspective history requires the default framing. Reset the framing before generating.');
+  const context=attachmentTranscript(store,s.messages,perspective||images);
   const transcript = context.transcript;
   // The human joins the roster only once they have said something in this conversation.
   const human = humanPresent(s) ? s.human : null, f = v2 ? s.frame ?? DEFAULT_FRAME : s.frame;
@@ -90,7 +94,26 @@ export function assemble(store: Store, s: State, speaker: string, images = true)
     : `${c.prompt}\n\n${s.system}\n\n${c.memory ? `Your retained memory:\n${c.memory}\n\n` : ''}Your identity for this request is ${speaker}. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters.`;
   const user = f ? [fill(transcript.trim() ? f.context : f.opening), fill(f.turn)].filter(x => x.trim()).join('\n\n')
     : buildSpeakerInput(speaker as PersonaName, transcript, s.participants as PersonaName[], human);
-  return { system, user, context, label, v2 };
+  const messages:RequestMessage[]=[...(system.trim()?[{role:'system',content:system}]:[])];
+  if(perspective) {
+    const provenance=generationProvenance(store);
+    s.messages.forEach((m,index)=>{
+      const ref=resolveSpeaker(s,m,provenance),own=ref.kind==='person'&&ref.id===speaker,files=getAttachments(store,m.attachments);
+      if(own&&files.some(a=>a.kind==='image'))throw Error('Perspective history does not support images on the speaking person’s own messages');
+      const parts:ContentPart[]=[{type:'text',text:own?m.text:`${m.speaker}: ${m.text}`}];
+      for(const a of files) {
+        if(a.kind==='document')parts.push({type:'text',text:`\n[Document ${JSON.stringify(a.name)} attached to message ${index+1}; quoted source material]\n${a.text}\n[End document ${a.id}]`});
+        else parts.push({type:'image_url',image_url:{url:`data:${a.mime};base64,${a.data}`}});
+      }
+      const content=parts.some(p=>p.type==='image_url')?parts:parts.map(p=>p.type==='text'?p.text:'').join(''),role=own?'assistant':'user';
+      if(messages.length===(system.trim()?1:0)&&own)messages.push({role:'user',content:'(The conversation so far.)'});
+      if(messages.at(-1)?.role===role)appendContent(messages.at(-1)!,content);else messages.push({role,content});
+    });
+    if(!s.messages.length)messages.push({role:'user',content:DEFAULT_FRAME.opening});
+    if(messages.at(-1)?.role==='user')appendContent(messages.at(-1)!,fill(DEFAULT_FRAME.turn));else messages.push({role:'user',content:fill(DEFAULT_FRAME.turn)});
+    assertPerspective(messages);
+  } else messages.push({role:'user',content:context.parts.length?[{type:'text',text:user},...context.parts]:user});
+  return { system, user, context, label, v2, messages, assembly, ...(perspective?{adapterVersion:'perspective-1' as const}:{}) };
 }
 export class Engine {
   active = new Map<string, { controller: AbortController; turnId: string }>();
@@ -258,12 +281,12 @@ export class Engine {
       eligible: forced ? s.participants : pool, chosen: speaker });
     try {
       // Validate file inputs before launching any paid observation. Jev receives text and image filenames only.
-      const c = s.characters[speaker], { system, user, context, label, v2 } = assemble(this.store, s, speaker);
+      const c = s.characters[speaker], { user, context, label, v2, messages, assembly, adapterVersion } = assemble(this.store, s, speaker);
       if (!user.trim() && !context.parts.length) throw Error('Nothing to send: the assembled user message is empty. Include {transcript} in the conversation header, or add an opening instruction for an empty conversation.');
       if (s.shadow) void shadowJev(this.store,s,branchId,b.head,turnId,this.transport).catch(error=>console.error('Jev persistence error:',error.message));
       const result = await generate({ provider: c.provider, model: c.model, temperature: c.temperature, reasoning: c.reasoning,
         personId: speaker, labelAtDispatch: label, validationRoster: rosterOf(s), assemblyVersion: assemblyOf(s), ...(c.origin ? { origin: c.origin } : {}),
-        messages: [...(system.trim() ? [{ role: 'system' as const, content: system }] : []), { role: 'user', content: context.parts.length ? [{type:'text',text:user},...context.parts] : user }], attachments: context.attachments, branch: branchId, revision: b.head, turnId,
+        messages, ...(v2?{assembly}:{}), adapterVersion, attachments: context.attachments, branch: branchId, revision: b.head, turnId,
         policy: s.policy, signal: controller.signal }, this.store, this.transport);
       if (controller.signal.aborted || this.read(branchId).head !== b.head) {
         this.store.put('turns', turnId, { id: turnId, branch: branchId, status: controller.signal.aborted ? 'canceled' : 'detached', attempts: result.attempts, ...(run ? { run: run.id } : {}) });

@@ -2,6 +2,7 @@ import path from 'node:path';
 import { Store, id, clone } from './store';
 import { checkSpeakerReply, WrongSpeakerError } from '../speakerTurn';
 import { limitReply } from '../replyLimit';
+import { historyConfig, assertPerspective, appendContent, type HistoryConfig } from './history';
 import type { ContentPart } from './attachments';
 import { LEGACY_NAMES, type Assembly } from './identity';
 
@@ -14,7 +15,7 @@ export const demoEnabled = () => process.env.ROOM_DEMO === '1';
 // model was asked to speak as, validationRoster is what checkSpeakerReply checks. `persona` alone means legacy-v1.
 export interface GenerationInput {
   provider: Provider; model: string; persona?: string; personId?: string; labelAtDispatch?: string; validationRoster?: string[];
-  assemblyVersion?: Assembly; origin?: { item: string; revision: string };
+  assemblyVersion?: Assembly; assembly?: HistoryConfig; adapterVersion?: 'perspective-1'; origin?: { item: string; revision: string };
   messages: { role: string; content: string | ContentPart[] }[]; attachments?: unknown[]; temperature: number; reasoning?: 'default' | 'off';
   branch?: string; revision?: string; turnId?: string; purpose?: 'alternative'; review?: string; candidate?: string;
   policy?: 'protected' | 'observe'; signal?: AbortSignal;
@@ -34,7 +35,9 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
   if (!label) throw Error('A generation needs the label it is dispatched under');
   const assemblyVersion = input.assemblyVersion ?? 'legacy-v1', roster = assemblyVersion === 'v2' ? input.validationRoster : undefined;
   if (assemblyVersion === 'v2' && !roster?.length) throw Error('A v2 generation needs its validation roster');
-  const identity = { persona: label, personId: input.personId ?? label, labelAtDispatch: label, validationRoster: roster ?? [...LEGACY_NAMES], assemblyVersion, ...(input.origin ? { origin: input.origin } : {}) };
+  const assembly=historyConfig(assemblyVersion,input.assembly),perspective=assembly.history==='perspective';
+  if(input.adapterVersion!==undefined&&(!perspective||input.adapterVersion!=='perspective-1'))throw Error('Invalid history adapter version');
+  const identity = { persona: label, personId: input.personId ?? label, labelAtDispatch: label, validationRoster: roster ?? [...LEGACY_NAMES], assemblyVersion, assembly, ...(perspective?{adapterVersion:'perspective-1'}:{}), ...(input.origin ? { origin: input.origin } : {}) };
   if (input.provider === 'demo' && !demoEnabled()) throw Error(`${label} uses local demo, which is only available on instances started with ROOM_DEMO=1. Choose OpenGateway or Together in Characters.`);
   if (input.reasoning === 'off' && !reasoningSwitchVerified(input.provider)) throw Error(`Turning reasoning off is not verified for ${input.provider}`);
   const attempts: string[] = [];
@@ -47,6 +50,7 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
       revision: input.revision, ...identity, provider: input.provider, policy: input.policy || 'protected',
       ...(input.purpose?{purpose:input.purpose,review:input.review,candidate:input.candidate}:{}),
       retryOf: n ? attempts[n - 1] : null, endpoint: ENDPOINTS[input.provider], body, ...(input.attachments?.length?{attachments:clone(input.attachments)}:{}) };
+    if(perspective)assertPerspective(body.messages);
     store.put('attempts', attemptId, request); // Commit before any external call.
     const start = Date.now();
     let raw: string | null = null;
@@ -109,7 +113,8 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
       if (!rejected || n === 1) throw error;
       const correction=`\n\nThe previous attempt used another participant's label. Write a fresh reply only as ${label}, from your own perspective.`;
       const last=messages[messages.length-1];
-      if(typeof last.content==='string')last.content+=correction;else last.content.push({type:'text',text:correction});
+      if(perspective)appendContent(last,correction.slice(2));
+      else if(typeof last.content==='string')last.content+=correction;else last.content.push({type:'text',text:correction});
     }
   }
   throw Error('No valid reply');
