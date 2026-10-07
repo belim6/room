@@ -1256,3 +1256,351 @@ test('§1.5a review P2: Add-person preview works in a perspective room with cust
   const p=new People(e,new Vault(s)).previewAdd(b.id,{label:'Newcomer',prompt:'Plain.'});
   assert.match(p.assembled,/Plain\./);assert.equal(calls,0);
 });
+
+// ---- Stage 1.6 acceptance: locations (coordination/2026-10-07/33, §10 and §11.F) ----
+import { emptyRoomState, type State } from '../src/workbench/engine';
+import { visibleTo, localLastSpeaker } from '../src/workbench/locations';
+import { transcriptExport } from '../src/workbench/transcriptExport';
+const PLACES=[{id:'table',name:'the table'},{id:'hall',name:'the hall'},{id:'yard',name:'the yard'}];
+const cap=(k:string)=>k[0].toUpperCase()+k.slice(1);
+function locState(at:Record<string,string>,o:{history?:'transcript'|'perspective';frame?:any;active?:string[];shadow?:boolean;flow?:'alternate'}={}) {
+  const s=emptyRoomState();s.system='Rules.';const ids=Object.keys(at).filter(k=>k!=='human');
+  for(const k of ids)s.characters[k]={label:cap(k),prompt:`You are ${cap(k)}.`,memory:'',provider:'opengateway',model:'mock',temperature:.7};
+  s.participants=o.active??ids;s.locations={places:clone(PLACES),at:{human:'table',...at}};
+  if(o.history)s.assembly={history:o.history};if(o.frame)s.frame=o.frame;if(o.shadow)s.shadow=true;if(o.flow)s.flow=o.flow;return s;
+}
+// A room with places and a recording transport: replies name their speaker, Jev bodies are kept apart, and a call can be held.
+function places(at:Record<string,string>,o:Parameters<typeof locState>[1]={},prepare?:(s:Store)=>State|void) {
+  const s=store(),calls:any[]=[],jev:any[]=[],gates:Promise<void>[]=[];let release=()=>{},n=0;process.env.TYPESAFE_API_KEY='mock';
+  const w:any={s,calls,jev,script:(who:string,i:number)=>`${who} speaks ${i}.`,hold:(i:number)=>{gates[i]=new Promise<void>(r=>release=r);},release:()=>release()};
+  w.e=new ProductionEngine(s,async(url,opts)=>{const body=JSON.parse(String(opts?.body));if(String(url).includes('typesafe')){jev.push(body);return new Response(JSON.stringify({answers:{next_speaker:{}}}));}
+    calls.push(body);const i=n++,who=/identity for this request is ([^.]+)\./.exec(JSON.stringify(body.messages))?.[1]??'?';if(gates[i])await gates[i];return response(w.script(who,i+1));});
+  const prepared=prepare?.(s);w.people=new People(w.e,new Vault(s));w.runs=new Runs(w.e);w.id=w.e.create('Places',prepared||locState(at,o)).id;
+  w.head=()=>w.e.read(w.id).head;w.state=()=>w.e.read(w.id).revision.state;
+  w.say=(text:string,att?:string[])=>w.e.message(w.id,w.head(),text,att);
+  w.turn=(speaker:string|undefined,place:string)=>w.e.turn(w.id,w.head(),speaker,undefined,undefined,undefined,{place});
+  w.move=(movers:string[],to:string|undefined,extra:any={})=>w.e.move(w.id,w.head(),{movers,to,...extra});
+  w.last=()=>JSON.stringify(calls.at(-1));
+  return w;
+}
+const scoped=(place:string,present:string[])=>({place,present,display:{place:PLACES.find(p=>p.id===place)!.name,present:present.map(k=>k==='human'?'Dennis':cap(k))}});
+function secrets(s:Store){
+  s.put('attachments','sdoc',{id:'sdoc',name:'secret-plan.txt',kind:'document',mime:'text/plain',text:'HIDDEN-DOC-TEXT',data:'SElEREVO',size:8,sha256:'x',at:'2026-10-07T00:00:00Z'});
+  s.put('attachments','simg',{id:'simg',name:'secret-face.png',kind:'image',mime:'image/png',data:'U0VDUkVULVBJWEVMUw==',size:13,sha256:'x',at:'2026-10-07T00:00:00Z'});
+}
+const SECRETS=['XYZZY','HIDDEN-DOC-TEXT','secret-plan','secret-face','U0VDUkVULVBJWEVMUw'];
+const leaks=(value:unknown)=>SECRETS.filter(x=>JSON.stringify(value).includes(x));
+
+test('§1.6.10.1 without locations, legacy, v2 transcript and v2 perspective bodies stay byte-identical and carry no location evidence',async()=>{
+  const golden=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/transcript-requests.json'),'utf8'));
+  for(const name of transcriptCases)assert.deepEqual(await captureTranscript(store(),name),golden[name],name);
+  const pg=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/perspective-requests.json'),'utf8'));process.env.TYPESAFE_API_KEY='mock';
+  for(const name of perspectiveCases){
+    const s=store(),state=perspectiveState(s,name);state.shadow=true;
+    const e=new ProductionEngine(s,async(u,o)=>{const body=JSON.parse(String(o?.body));if(String(u).includes('typesafe'))return new Response('{}');assert.deepEqual(body.messages,pg[name],name);return response('Fine.');});
+    const b=e.create(name,state);await e.turn(b.id,b.head,'alpha');
+    assert.equal(s.attempts()[0].visibility,undefined);const sel=s.list('selections')[0];assert.equal(sel.place,undefined);assert.equal(sel.placePolicy,undefined);
+    assert.equal(s.list('jev-requests')[0].visibility,undefined);assert(!e.read(b.id).revision.state.messages.some(m=>m.audience));
+  }
+});
+test('§1.6.10.2 hidden text, documents, images and filenames are absent from every payload field, including a custom frame with {transcript} in several fields',async()=>{
+  const frame={identity:'You are {speaker}. Log: {transcript}',context:'Context {transcript}',opening:'Open.',turn:'Turn {transcript} for {participants}.'};
+  const w=places({gav:'table',ilse:'hall',human:'hall'},{frame,shadow:true});secrets(w.s);
+  w.say('XYZZY in the hall.',['sdoc','simg']);
+  await w.turn('gav','table');assert.deepEqual(leaks(w.calls[0]),[]);assert.deepEqual(leaks(w.s.attempts()[0]),[]);assert.equal(w.jev.length,1);assert.deepEqual(leaks(w.jev),[]);
+  assert.equal(w.s.attempts()[0].visibility.hidden,1);
+  // Positive control: Ilse was there and receives all of it.
+  await w.turn('ilse','hall');assert.deepEqual(leaks(w.calls[1]),SECRETS);
+});
+test('§1.6.10.2 perspective: a custom frame fails preflight with no calls; a hidden own image is filtered out first; a visible own image still fails',async()=>{
+  const custom=places({gav:'table',marta:'table'},{history:'perspective',frame:{...DEFAULT_FRAME,context:'Custom {transcript}'},shadow:true});
+  await assert.rejects(custom.turn('gav','table'),/default framing/);assert.equal(custom.calls.length,0);assert.equal(custom.jev.length,0);assert.equal(custom.s.list('jev-requests').length,0);
+  for(const hidden of [true,false]){
+    const w=places({},{},s=>{secrets(s);const st=locState({gav:'table',marta:'table'},{history:'perspective',shadow:true});
+      st.messages=[{id:'own',speaker:'Gav',speakerRef:{kind:'person',id:'gav'},text:'My picture.',source:'edited',attachments:['simg'],audience:scoped('table',hidden?['marta']:['gav','marta'])}];return st;});
+    if(hidden){await w.turn('gav','table');assert.equal(w.calls.length,1);assert.deepEqual(leaks(w.calls[0]),[]);strictHistory(w.calls[0].messages);}
+    else{await assert.rejects(w.turn('gav','table'),/own messages/);assert.equal(w.calls.length,0);assert.equal(w.jev.length,0);}
+  }
+});
+test('§1.6.10.3–4 knowledge belongs to people: unequal knowledge in one place, return visits, and Jev from the speaker’s view',async()=>{
+  const w=places({gav:'table',odo:'table',marta:'hall'},{shadow:true});
+  w.say('X-TABLE-SECRET');w.move(['gav'],'hall');
+  await w.turn('gav','hall');assert(w.last().includes('X-TABLE-SECRET'));
+  await w.turn('marta','hall');assert(!w.last().includes('X-TABLE-SECRET'));assert(!JSON.stringify(w.jev.at(-1)).includes('X-TABLE-SECRET'));assert(JSON.stringify(w.jev.at(-2)).includes('X-TABLE-SECRET'));
+  assert.deepEqual(w.jev.at(-1).state.participants,['Gav','Marta']);assert.deepEqual(Object.keys(w.jev.at(-1).questions.next_speaker.criteria),['Gav','Marta']);
+  assert(w.s.list('jev-requests').some((r:any)=>r.visibility?.person==='marta'&&r.visibility.policy==='audience-1'));
+  const hall=w.state().messages.filter((m:any)=>m.audience?.place==='hall'&&m.source==='generated').map((m:any)=>m.text);assert.equal(hall.length,2);
+  await w.turn('odo','table');let body=w.last();assert(hall.every((t:string)=>!body.includes(t)));assert(body.includes('Gav goes to the hall.'));
+  w.move(['gav','marta'],'table');
+  await w.turn('gav','table');body=w.last();assert(body.includes('X-TABLE-SECRET')&&hall.every((t:string)=>body.includes(t)));
+  await w.turn('marta','table');body=w.last();assert(!body.includes('X-TABLE-SECRET')&&hall.every((t:string)=>body.includes(t)));
+  await w.turn('odo','table');body=w.last();assert(body.includes('X-TABLE-SECRET')&&hall.every((t:string)=>!body.includes(t)));assert(body.includes('Gav and Marta go to the table.'));
+});
+test('§1.6.10.5 empty visible history uses the empty-history path while hidden messages exist',async()=>{
+  for(const history of ['transcript','perspective'] as const){
+    const w=places({gav:'table',marta:'hall',human:'hall'},{history});w.say('Hidden hello.');
+    await w.turn('gav','table');const m=w.calls[0].messages;assert.equal(m.length,2,history);assert(!w.last().includes('Hidden hello'));
+    assert(String(m[1].content).startsWith(DEFAULT_FRAME.opening));
+    assert.equal(w.s.attempts()[0].visibility.hidden,1);assert.deepEqual(w.s.attempts()[0].visibility.visibleMessageIds,[]);
+  }
+});
+test('§1.6.10.6 the model roster is local, but a reply labelled as someone in another place is still a wrong-speaker reply',async()=>{
+  const w=places({gav:'table',marta:'hall'});w.script=(_who:string,i:number)=>i===1?'Marta: I am in the hall.':'Fine.';
+  await w.turn('gav','table');const rejected=w.s.attempts().find((a:any)=>a.outcome.status==='rejected');
+  assert(rejected);assert(rejected.validationRoster.includes('Marta'));assert(JSON.stringify(w.calls[0]).includes('Current participants: Gav.'));assert(!JSON.stringify(w.calls[0]).includes('Marta'));
+  assert.equal(w.state().messages.at(-1).text,'Fine.');
+});
+test('§1.6.10.7 edits, audience edits, Revise/Apply, delete/restore, branching, retcons and stale or detached generations never broaden visibility implicitly',async()=>{
+  const w=places({gav:'table',marta:'hall'});const {close,call}=await serve(w.e);
+  try{
+    w.say('PRIVATE-LINE');await w.turn('gav','table');
+    let s=w.state();const [line,reply]=s.messages;assert.deepEqual(line.audience.present,['gav','human']);assert.deepEqual(reply.audience.present,['gav','human']);
+    const marta=()=>visibleTo(w.state(),'marta').map((m:any)=>m.text).join('|');
+    // A text-only history edit keeps the audience even though the client leaves it out.
+    let r=await call('/branches/'+w.id+'/history',{expected:w.head(),memory:'keep',messages:s.messages.map((m:any,i:number)=>({id:m.id,speaker:m.speaker,text:i?m.text:'PRIVATE-LINE, edited'}))});
+    assert.equal(r.status,200);s=w.state();assert.deepEqual(s.messages[0].audience,line.audience);assert.notEqual(s.messages[0].id,line.id);assert.equal(marta(),'');
+    // The history editor never changes an existing audience; each new line needs an explicit place or public.
+    const rows=s.messages.map((m:any)=>({id:m.id,speaker:m.speaker,text:m.text})),hist=(messages:any[])=>call('/branches/'+w.id+'/history',{expected:w.head(),memory:'keep',messages});
+    assert.match((await hist([{...rows[0],audience:null},rows[1]])).value.error,/audience edit/);
+    assert.match((await hist([...rows,{speaker:'Dennis',text:'New.'}])).value.error,/place or public/);
+    assert.match((await hist([...rows,{speaker:'Dennis',speakerRef:{kind:'human'},text:'New.',audience:{place:'hall'}}])).value.error,/not in the hall/);
+    r=await hist([...rows,{speaker:'Narrator',speakerRef:{kind:'narrator'},text:'Rain in the hall.',audience:{place:'hall'}},{speaker:'Narrator',speakerRef:{kind:'narrator'},text:'Thunder everywhere.',audience:null}]);
+    assert.equal(r.status,200);s=w.state();assert.deepEqual(s.messages[2].audience.present,['marta']);assert.equal(s.messages[3].audience,undefined);assert.equal(marta(),'Rain in the hall.|Thunder everywhere.');
+    // Audience-only edits are explicit operations with a preview; the preview writes nothing.
+    const target=s.messages[0];
+    r=await call('/branches/'+w.id+'/messages/'+target.id+'/audience/preview',{audience:null});assert.deepEqual(r.value.gained,['Marta']);assert.equal(w.state().messages[0].id,target.id);
+    assert.match((await call('/branches/'+w.id+'/messages/'+target.id+'/audience',{expected:w.head(),audience:{place:'table',present:['human','gav']}})).value.error,/already/);
+    r=await call('/branches/'+w.id+'/messages/'+target.id+'/audience',{expected:w.head(),audience:{place:'table',present:['human']}});assert.equal(r.status,200);
+    s=w.state();assert.deepEqual(s.messages[0].audience.present,['human']);assert.equal(s.messages[0].text,target.text);assert.equal(s.messages[0].editedFrom[0],target.id);assert.deepEqual(s.messages[0].speakerRef,{kind:'human'});
+    assert(!visibleTo(s,'gav').some((m:any)=>m.id===s.messages[0].id),'an explicit audience edit may leave out the speaker');
+    // Delete/restore and branching preserve the audience exactly; a one-line retcon keeps it too.
+    const g=s.messages[1];let b=w.e.deleteMessage(w.id,w.head(),g.id);const deletion=b.head;b=w.e.restoreMessage(w.id,w.head(),deletion);
+    assert.deepEqual(b.revision.state.messages.find((m:any)=>m.id===g.id).audience,g.audience);
+    const fork=w.e.fork(w.id,w.head(),'Fork');assert.deepEqual(fork.revision.state.messages.map((m:any)=>m.audience??null),w.state().messages.map((m:any)=>m.audience??null));
+    b=w.e.retcon(fork.id,fork.head,g.id,'Gav, retconned.','keep','keep');assert.deepEqual(b.revision.state.messages.find((m:any)=>m.text==='Gav, retconned.').audience,g.audience);
+    // Revise reuses the saved request and its visibility; Apply keeps the audience.
+    const x=new Alternatives(w.e),review=x.open(w.id,g.id).review,original=w.s.get('attempts',review.inputAttempt);assert.equal(original.visibility.person,'gav');
+    const cand=(await x.propose(review.id,'Shorter.')).candidates[0];assert.equal(cand.result.status,'completed');
+    for(const a of w.s.attempts().filter((a:any)=>a.purpose==='alternative'))assert.deepEqual(a.visibility,original.visibility);
+    const judged=x.judge(cand.id,{expected:null,verdict:'accepted',text:'Shorter reply.'});
+    b=x.apply(cand.id,{expected:w.head(),judgment:judged.candidates[0].judgment.id});assert.deepEqual(b.revision.state.messages.find((m:any)=>m.text==='Shorter reply.').audience,g.audience);
+    // A stale head is rejected; a reply that returns after a move is detached and never re-stamped.
+    await assert.rejects(w.e.turn(w.id,deletion,'gav',undefined,undefined,undefined,{place:'table'}),/changed/);
+    w.hold(w.calls.length);const pending=w.turn('gav','table');await tick();w.move(['gav'],'hall');w.release();await pending;
+    const detached=w.s.list('turns').find((t:any)=>t.status==='detached');assert(detached);assert(!w.state().messages.some((m:any)=>m.turnId===detached.id));
+  }finally{await close();}
+});
+test('§1.6.10.8 a move is one revision: the third place does not hear it; stale, same-place, multi-origin and inactive moves are rejected; retcons around a move; a move detaches an in-flight reply',async()=>{
+  const w=places({gav:'table',odo:'table',marta:'hall',ilse:'yard',pia:'table'},{active:['gav','odo','marta','ilse']});
+  w.say('Before the move.');const before=w.head(),said=w.state().messages[0];
+  let b=w.move(['gav'],'hall');const m=b.revision.state.messages.at(-1);
+  assert.equal(b.revision.parent,before);assert.equal(m.source,'movement');assert.deepEqual(m.speakerRef,{kind:'narrator'});assert.equal(m.text,'Gav goes to the hall.');
+  assert.deepEqual(m.audience.present,['gav','odo','human','marta']);assert.equal(m.audience.place,'hall');assert.deepEqual(m.movement,{from:'table',to:'hall',movers:['gav'],display:{from:'the table',to:'the hall',movers:['Gav']}});
+  assert.equal(b.revision.state.locations.at.gav,'hall');assert.deepEqual(visibleTo(b.revision.state,'ilse'),[]);assert(!visibleTo(b.revision.state,'pia').some((x:any)=>x.id===m.id));
+  assert.throws(()=>w.e.move(w.id,before,{movers:['odo'],to:'yard'}),/changed/);
+  assert.throws(()=>w.move(['gav'],'hall'),/already in the hall/);
+  assert.throws(()=>w.move(['gav','odo'],'yard'),/same place/);
+  assert.throws(()=>w.move(['pia'],'hall'),/inactive/);
+  assert.throws(()=>w.move([],'hall'),/who moves/);
+  assert.throws(()=>w.move(['odo'],undefined,{newPlace:'The Hall'}),/already a place/);
+  b=w.move(['odo','human'],undefined,{newPlace:'the cellar',text:'They slip downstairs.'});const cellar=b.revision.state.locations.places.find((p:any)=>p.name==='the cellar').id;
+  assert.equal(b.revision.state.messages.at(-1).text,'They slip downstairs.');assert.deepEqual(b.revision.state.messages.at(-1).audience.present,['odo','human']);assert.equal(b.revision.state.locations.at.human,cellar);
+  // Keep mode keeps the current placement; regenerate restores the historical one, and places created since remain.
+  const keep=w.e.fork(w.id,w.head(),'keep'),kept=w.e.retcon(keep.id,keep.head,said.id,'Before, retconned.','keep','keep');assert.deepEqual(kept.revision.state.locations.at,w.state().locations.at);
+  const regen=w.e.fork(w.id,w.head(),'regen'),again=w.e.retcon(regen.id,regen.head,said.id,'Before, again.','regenerate','keep');
+  assert.equal(again.revision.state.locations.at.gav,'table');assert.equal(again.revision.state.locations.at.human,'table');assert(again.revision.state.locations.places.some((p:any)=>p.id===cellar));assert.equal(again.revision.state.messages.length,1);
+  // A move during generation detaches the in-flight result.
+  w.hold(0);const pending=w.turn('marta','hall');await tick();w.move(['marta'],'yard');w.release();await pending;
+  assert.equal(w.s.list('turns')[0].status,'detached');assert(!w.state().messages.some((x:any)=>x.source==='generated'));
+});
+test('§1.6.10.9 a place run picks only local speakers, using the last speaker in that place',async()=>{
+  const w=places({},{},()=>{const st=locState({gav:'table',odo:'table',marta:'hall',ilse:'hall'});
+    st.messages=[{id:'o',speaker:'Odo',speakerRef:{kind:'person',id:'odo'},text:'Odo at the table.',source:'edited',audience:scoped('table',['gav','odo','human'])},{id:'m',speaker:'Marta',speakerRef:{kind:'person',id:'marta'},text:'Marta in the hall.',source:'edited',audience:scoped('hall',['marta','ilse'])}];return st;});
+  const r=w.runs.start(w.id,{expected:w.head(),maxTurns:4,policy:{kind:'random'},place:'table'});assert.equal(r.place,'table');
+  for(let i=1;i<=4;i++)assert.equal((await w.runs.advance(r.id,i)).status,'attached');
+  const sel=w.s.list('selections').filter((x:any)=>x.run?.id===r.id).sort((a:any,b:any)=>a.run.index-b.run.index);
+  assert.deepEqual(sel.map((x:any)=>x.chosen),['gav','odo','gav','odo']);assert(sel.every((x:any)=>x.place==='table'&&x.placePolicy==='place'&&x.eligible.length===1));
+  assert.equal(statusOf(w.s.get('runs',r.id)),'completed');
+});
+test('§1.6.11.F1 two local pairs in a four-character room: back-and-forth works per place and flow is not reset',async()=>{
+  const w=places({gav:'table',odo:'table',marta:'hall',ilse:'hall'},{flow:'alternate'});assert.equal(w.state().flow,'alternate');
+  for(const [place,pair] of [['table',['gav','odo']],['hall',['marta','ilse']]] as const){
+    const r=w.runs.start(w.id,{expected:w.head(),maxTurns:3,policy:{kind:'alternate',speaker:pair[1]},place});
+    for(let i=1;i<=3;i++)assert.equal((await w.runs.advance(r.id,i)).status,'attached');
+    assert.deepEqual(w.s.list('selections').filter((x:any)=>x.run?.id===r.id).sort((a:any,b:any)=>a.run.index-b.run.index).map((x:any)=>x.chosen),[pair[1],pair[0],pair[1]]);
+  }
+  w.people.settings(w.id,{expected:w.head(),system:'Still alternate.'});assert.equal(w.state().flow,'alternate');
+  assert.throws(()=>w.runs.start(w.id,{expected:w.head(),maxTurns:1,policy:{kind:'alternate'},place:'yard'}),/Nobody/);
+  const plain=locState({gav:'table',odo:'table',marta:'hall',ilse:'hall'},{flow:'alternate'});delete plain.locations;assert.equal(new ProductionEngine(store()).create('Plain',plain).revision.state.flow,'random');
+});
+test('§1.6.11.F2 public lines and a line made public are excluded from the local last speaker',async()=>{
+  const w=places({},{},()=>{const st=locState({gav:'table',odo:'table'});
+    st.messages=[{id:'g',speaker:'Gav',speakerRef:{kind:'person',id:'gav'},text:'Gav, located.',source:'edited',audience:scoped('table',['gav','odo','human'])},{id:'o',speaker:'Odo',speakerRef:{kind:'person',id:'odo'},text:'Odo, public.',source:'edited'}];return st;});
+  assert.equal(localLastSpeaker(w.state(),'table'),'gav');
+  w.e.setAudience(w.id,w.head(),'g',null);assert.equal(localLastSpeaker(w.state(),'table'),null);
+  await w.turn(undefined,'table');assert.deepEqual(w.s.list('selections')[0].eligible,['gav','odo']);
+});
+test('§1.6.10.10 + §10.16 + §11.F5 rotation skips ineligible places, includes one character with you, advances only on attached turns, wraps, is interrupted by moves and restarts, and is not inherited',async()=>{
+  const w=places({gav:'table',odo:'table',marta:'hall',ilse:'yard',human:'hall'});const {close,call}=await serve(w.e);
+  try{
+    const sel=(run:string)=>w.s.list('selections').filter((x:any)=>x.run?.id===run).sort((a:any,b:any)=>a.run.index-b.run.index);
+    let run=(await call('/branches/'+w.id+'/runs',{expected:w.head(),maxTurns:5,policy:{kind:'random'},place:'rotate'})).value;
+    assert.equal(run.place,'rotate');assert.deepEqual(run.rotation,{order:['table','hall'],cursor:0});
+    for(const i of [1,2,3])assert.equal((await call('/runs/'+run.id+'/turns',{index:i})).value.status,'attached');
+    assert.deepEqual(sel(run.id).map((x:any)=>[x.place,x.placePolicy,x.cursor]),[['table','rotate',0],['hall','rotate',1],['table','rotate',0]]);assert.equal(sel(run.id)[1].chosen,'marta');
+    assert.equal(w.s.get('runs',run.id).rotation.cursor,1);
+    // A human interjection detaches the in-flight hall turn; the cursor stays and the next turn retries the hall.
+    w.hold(w.calls.length);const pending=call('/runs/'+run.id+'/turns',{index:4});await tick(50);
+    assert.equal((await call('/branches/'+w.id+'/messages',{expected:w.head(),text:'Wait.'})).status,200);w.release();
+    let out=(await pending).value;assert.equal(out.status,'detached');assert.equal(out.run.status,'running');assert.equal(out.run.rotation.cursor,1);
+    out=(await call('/runs/'+run.id+'/turns',{index:5})).value;assert.equal(out.status,'attached');assert.equal(sel(run.id).at(-1).place,'hall');assert.equal(out.run.rotation.cursor,0);
+    // A move interrupts the run; its final cursor stays as evidence.
+    assert.equal((await call('/branches/'+w.id+'/move',{expected:w.head(),movers:['ilse'],to:'hall'})).status,200);
+    const ended=(await call('/runs/'+run.id)).value;assert.equal(ended.status,'interrupted');assert.equal(ended.rotation.cursor,0);assert.match(ended.transitions.at(-1).reason,/moved/);
+    // Forks don't inherit an active run; a restart interrupts it and never resumes; placement survives.
+    run=(await call('/branches/'+w.id+'/runs',{expected:w.head(),maxTurns:2,policy:{kind:'random'},place:'rotate'})).value;assert.deepEqual(run.rotation.order,['table','hall']);
+    const fork=w.e.fork(w.id,w.head(),'Fork');assert.equal((await call('/branches/'+fork.id)).value.run,null);assert.equal((await call('/branches/'+w.id)).value.run.id,run.id);
+    const s2=new Store(w.s.root),app2=createApp(new ProductionEngine(s2));recoverOnStartup(app2,s2);
+    const restarted=s2.get('runs',run.id);assert.equal(statusOf(restarted),'interrupted');assert.deepEqual(restarted.rotation,{order:['table','hall'],cursor:0});
+    assert.equal(new ProductionEngine(new Store(w.s.root)).read(w.id).revision.state.locations!.at.ilse,'hall');
+  }finally{await close();}
+});
+test('§1.6.10.11 + §11.F3 contradictory combinations are rejected at every entry point; an explicit one-character place authorizes its character',async()=>{
+  const w=places({gav:'table',odo:'table',marta:'hall',human:'hall'});const {close,call}=await serve(w.e);
+  try{
+    const start=(body:any)=>call('/branches/'+w.id+'/runs',{expected:w.head(),maxTurns:1,...body});
+    assert.match((await start({policy:{kind:'fixed',speaker:'marta'},place:'table'})).value.error,/Marta is not in the table/);
+    assert.match((await start({policy:{kind:'fixed',speaker:'gav'},place:'rotate'})).value.error,/cannot rotate/);
+    assert.match((await start({policy:{kind:'alternate'},place:'rotate'})).value.error,/every place it visits \(the hall does not\)/);
+    assert.match((await start({policy:{kind:'random'}})).value.error,/Choose the place/);
+    const turn=(body:any)=>call('/branches/'+w.id+'/turn',{expected:w.head(),...body});
+    assert.match((await turn({speaker:'marta',place:'table'})).value.error,/Marta is not in the table/);
+    assert.match((await turn({speaker:'gav',place:'rotate'})).value.error,/only available in a run/);
+    assert.match((await turn({speaker:'gav'})).value.error,/Choose the place/);
+    assert.match((await turn({place:'yard'})).value.error,/Nobody/);
+    assert.equal(w.calls.length,0);assert.equal(w.s.list('runs').length,0);
+    const r=(await turn({place:'hall'})).value;assert.deepEqual(r.revision.state.messages.at(-1).speakerRef,{kind:'person',id:'marta'});
+    const plain=w.e.create('Plain',(()=>{const st=locState({gav:'table'});delete st.locations;return st;})());
+    assert.match((await call('/branches/'+plain.id+'/turn',{expected:plain.head,place:'table'})).value.error,/no locations/);
+    assert.match((await call('/branches/'+plain.id+'/runs',{expected:plain.head,maxTurns:1,place:'table'})).value.error,/no locations/);
+  }finally{await close();}
+});
+test('§1.6.10.12 inactive people are not present or selectable; rejoining and joining late grant no earlier scoped lines',async()=>{
+  const w=places({gav:'table',marta:'table'});w.say('BEFORE');
+  w.people.participation(w.id,'marta',{expected:w.head(),active:false});w.say('WHILE-AWAY');
+  assert.deepEqual(w.state().messages.at(-1).audience.present,['gav','human']);
+  await assert.rejects(w.turn('marta','table'),/not participating/);await w.turn(undefined,'table');assert.equal(w.s.list('selections')[0].chosen,'gav');
+  assert.throws(()=>w.people.participation(w.id,'marta',{expected:w.head(),active:true}),/Choose where Marta rejoins/);
+  let b=w.people.participation(w.id,'marta',{expected:w.head(),active:true,place:'table'});
+  assert.deepEqual(visibleTo(b.revision.state,'marta').map((m:any)=>m.text),['BEFORE']);
+  assert.throws(()=>w.people.add(w.id,{expected:w.head(),label:'Newt',prompt:'New.',model:'mock'}),/Choose where Newt starts/);
+  b=w.people.add(w.id,{expected:w.head(),label:'Newt',prompt:'New.',model:'mock',place:'table'});const newt=person(b.revision.state,'Newt');
+  assert.deepEqual(visibleTo(b.revision.state,newt),[]);
+  await w.turn(newt,'table');assert(!w.last().includes('BEFORE')&&!w.last().includes('WHILE-AWAY'));
+  await w.turn('marta','table');assert(w.last().includes('BEFORE')&&!w.last().includes('WHILE-AWAY'));
+});
+test('§1.6.10.13 + §11.F8 a split-place template places people and stamps a human opening; a narrator opening is public; place references are validated',()=>{
+  const {vault,people}=world(),{persona:p}=persona(vault,['steady']);
+  const cast=[{persona:ref(p),label:'Gav',place:'the hall'},{persona:ref(p),label:'Marta'},{persona:ref(p),label:'Odo',place:'the table'}];
+  const t=vault.create({type:'room-template',title:'Split',content:{system:'S',flow:'alternate',places:['the table','the hall'],humanPlace:'the hall',opening:{kind:'human',text:'Opening words.'},cast}});
+  const s=people.createRoom({name:'Split',template:ref(t)}).revision.state,L=s.locations!,at=(k:string)=>L.places.find(x=>x.id===L.at[k])!.name;
+  assert.deepEqual([at(person(s,'Gav')),at(person(s,'Marta')),at(person(s,'Odo')),at('human')],['the hall','the table','the table','the hall']);assert.equal(s.flow,'alternate');
+  assert.deepEqual(s.messages[0].audience!.present,[person(s,'Gav'),'human']);assert.deepEqual(s.messages[0].audience!.display,{place:'the hall',present:['Gav','Dennis']});
+  const narrated=people.createRoom({template:ref(vault.create({type:'room-template',title:'Narrated',content:{system:'S',flow:'random',places:['the table'],opening:{kind:'narrator',text:'Once.'},cast:[{persona:ref(p),label:'Gav'}]}}))}).revision.state;
+  assert.equal(narrated.messages[0].audience,undefined);assert.equal(narrated.locations!.at.human,narrated.locations!.places[0].id);
+  assert.equal(people.createRoom({template:ref(vault.create({type:'room-template',title:'Plain',content:{system:'S',flow:'random',cast:[{persona:ref(p),label:'Gav'}]}}))}).revision.state.locations,undefined);
+  for(const bad of [{places:[]},{places:['a','A']},{places:['the table'],humanPlace:'the moon'},{humanPlace:'the hall'},{places:['x:y']}])assert.throws(()=>vault.create({type:'room-template',title:'Bad',content:{system:'',flow:'random',cast:[],...bad}}),/place/i);
+  assert.throws(()=>vault.create({type:'room-template',title:'Bad',content:{system:'',flow:'random',places:['the table'],cast:[{persona:ref(p),label:'Gav',place:'the moon'}]}}),/Unknown place/);
+});
+test('§1.6.10.13 + §11.F4 + §11.F8 concurrent conditions with different placements are isolated and recorded; the place resolves after the patch; places cannot be removed or renamed',async()=>{
+  const w=places({gav:'table',marta:'hall'});w.say('TABLE-ONLY');const base=w.e.read(w.id),st=base.revision.state;
+  const moved={places:clone(PLACES),at:{...st.locations!.at,marta:'table'}};
+  const x=new Experiments(w.e),d=x.create({name:'Placement',question:'Does placement matter?',prediction:'Maybe.',base:{branch:w.id,revision:base.head},speaker:'marta',conditions:[{key:'A',label:'Hall',control:true,patch:{}},{key:'B',label:'Table',patch:{locations:moved}}]});
+  x.run(d.id,1,d.version);await x.active.get(d.id)?.done;
+  const trials=x.trials(d.id);assert(trials.every(t=>t.status==='completed'));
+  const A=trials.find(t=>t.condition==='A')!,B=trials.find(t=>t.condition==='B')!;
+  assert.equal(A.place,'hall');assert.equal(B.place,'table');assert.deepEqual(A.visibleMessageIds,[]);assert.deepEqual(B.visibleMessageIds,[],'a placement intervention grants no retroactive knowledge');
+  for(const t of [A,B]){const a=w.s.attempts().find((a:any)=>a.turnId===t.turnId);assert.equal(a.visibility.place,t.place);assert(!JSON.stringify(a.body).includes('TABLE-ONLY'));assert.equal(w.s.list('selections').find((r:any)=>r.id===t.turnId).place,t.place);}
+  assert(JSON.stringify(w.s.attempts().find((a:any)=>a.turnId===B.turnId).body).includes('Current participants: Gav, Marta.'));
+  assert.equal(w.e.read(w.id).revision.state.locations!.at.marta,'hall');assert.equal(w.e.read(B.branch).revision.state.messages[0].audience!.present.includes('marta'),false);
+  assert.throws(()=>applyPatch(st,{locations:{places:PLACES.filter(p=>p.id!=='table'),at:{...st.locations!.at,gav:'hall',human:'hall'}}}),/keeps every existing place/);
+  assert.throws(()=>applyPatch(st,{locations:{places:PLACES.map(p=>p.id==='hall'?{...p,name:'the parlor'}:p),at:st.locations!.at}}),/keeps every existing place/);
+  assert.equal(applyPatch(st,{locations:{places:[...PLACES,{id:'roof',name:'the roof'}],at:{...st.locations!.at,gav:'roof'}}}).locations!.at.gav,'roof');
+  const plain=locState({gav:'table'});delete plain.locations;assert.throws(()=>applyPatch(plain,{locations:{places:PLACES,at:{gav:'table',human:'table'}}}),/already has locations/);
+});
+test('§1.6.10.14 "as seen by X at revision R" is the history projection X’s next request uses',async()=>{
+  const w=places({gav:'table',marta:'hall'});const {close,call}=await serve(w.e);
+  try{
+    w.say('At the table.');const early=w.head();w.move(['marta'],'table');w.e.narrate(w.id,w.head(),'Hall rain.','hall');w.say('Hello, Marta.');
+    const seen=(await call('/branches/'+w.id+'/seen/marta')).value;assert.equal(seen.placeName,'the table');assert.equal(seen.hidden,2);
+    await w.turn('marta','table');const a=w.s.attempts().find((a:any)=>a.personId==='marta');
+    assert.deepEqual(a.visibility.visibleMessageIds,seen.visibleMessageIds);assert.equal(a.visibility.place,'table');
+    const s=w.e.read(w.id).revision.state,body=JSON.stringify(a.body);for(const m of s.messages.slice(0,-1))assert.equal(body.includes(m.text),seen.visibleMessageIds.includes(m.id),m.text);
+    const then=(await call('/branches/'+w.id+'/seen/marta?revision='+early)).value;assert.equal(then.placeName,'the hall');assert.deepEqual(then.visibleMessageIds,[]);
+    assert.equal((await call('/branches/'+w.id+'/seen/human')).value.hidden,1);
+    assert.equal((await call('/branches/'+w.id+'/seen/marta?revision=nope')).status,400);
+  }finally{await close();}
+});
+test('§1.6.10.15 printable, Markdown and JSON exports mark scoped lines and movement',async()=>{
+  const w=places({gav:'table',marta:'hall'});const {base,close}=await listen(w.e);
+  try{
+    w.say('Hello table.');w.move(['marta'],'table');w.e.narrate(w.id,w.head(),'Everyone hears thunder.',null);
+    const html=await (await fetch(base+'/api/branches/'+w.id+'/transcript')).text(),md=await (await fetch(base+'/api/branches/'+w.id+'/transcript.md')).text(),json:any=await (await fetch(base+'/api/branches/'+w.id+'/export')).json();
+    for(const text of [html,md,JSON.stringify(json.locationTags)]){assert(text.includes('[the table: Gav, Dennis]'));assert(text.includes('[move: Marta · the hall → the table]'));assert(text.includes('[the table: Marta, Gav, Dennis]'));}
+    assert(md.includes('**Narrator**\n\nEveryone hears thunder.'));assert.equal(Object.keys(json.locationTags).length,2);
+  }finally{await close();}
+});
+test('§1.6.10.17 moving, narrating, enabling, renaming, audience edits, previews and views make zero provider calls',async()=>{
+  const w=places({gav:'table',marta:'hall'},{shadow:true});const {close,call}=await serve(w.e);
+  try{
+    const ok=async(url:string,body?:any)=>{const r=await call(url,body);assert.equal(r.status,200,url+' '+JSON.stringify(r.value));return r.value;};const b='/branches/'+w.id;
+    await ok(b+'/move/preview',{movers:['gav'],to:'hall'});await ok(b+'/move',{expected:w.head(),movers:['gav'],to:'hall'});
+    await ok(b+'/narration',{expected:w.head(),text:'Dusk.',place:'hall'});await ok(b+'/narration',{expected:w.head(),text:'Bells.',place:null});
+    const id=w.state().messages[0].id;await ok(b+'/messages/'+id+'/audience/preview',{audience:null});await ok(b+'/messages/'+id+'/audience',{expected:w.head(),audience:null});
+    await ok(b+'/locations/places/yard/rename',{expected:w.head(),name:'the garden'});await ok(b+'/seen/gav');await ok(b);await ok(b+'/people/gav/assembled');await ok(b+'/changes');
+    const other=w.e.create('Other',(()=>{const st=locState({gav:'table'});delete st.locations;return st;})()),at={gav:'the room',human:'the room'};
+    await ok('/branches/'+other.id+'/locations/preview',{places:['the room'],at});await ok('/branches/'+other.id+'/locations',{expected:other.head,places:['the room'],at});
+    assert.equal(w.calls.length,0);assert.equal(w.jev.length,0);assert.equal(w.s.attempts().length,0);assert.equal(w.s.list('jev-requests').length,0);
+  }finally{await close();}
+});
+test('§1.6.11.F6 renaming a place, a character and you: old tags and exports keep old names; new stamps use new ones',()=>{
+  const w=places({gav:'table',marta:'table'});w.say('Before renames.');const old=w.state().messages[0];
+  w.people.renamePlace(w.id,'table',{expected:w.head(),name:'the bench'});w.people.rename(w.id,'gav',{expected:w.head(),label:'Gavin'});w.people.settings(w.id,{expected:w.head(),human:'Deniz'});
+  w.say('After renames.');const s=w.state();
+  assert.deepEqual(s.messages[0].audience,old.audience);assert.deepEqual(s.messages[1].audience!.display,{place:'the bench',present:['Gavin','Marta','Deniz']});
+  const html=transcriptExport('Renames',s);assert(html.includes('[the table: Gav, Marta, Dennis]'));assert(html.includes('[the bench: Gavin, Marta, Deniz]'));
+  assert.throws(()=>w.people.renamePlace(w.id,'hall',{expected:w.head(),name:'the bench'}),/already a place named/);
+  assert.deepEqual(w.move(['marta'],'hall').revision.state.messages.at(-1).movement.display,{from:'the bench',to:'the hall',movers:['Marta']});
+});
+test('§1.6.11.F7 a silent human hears local replies, narration and movement; inactive movers are rejected; hidden human speech does not change another roster',async()=>{
+  const w=places({gav:'table',marta:'hall',ilse:'hall',pia:'table',human:'hall'},{active:['gav','marta','ilse']});
+  w.move(['gav'],'hall');w.e.narrate(w.id,w.head(),'Lamps flicker.','hall');await w.turn('marta','hall');
+  const s=w.state();assert.deepEqual(visibleTo(s,'human').map((m:any)=>m.source),['movement','narration','generated']);assert(s.messages.every((m:any)=>m.audience.present.includes('human')));
+  assert.throws(()=>w.move(['pia'],'hall'),/inactive/);
+  const r=places({ilse:'hall',marta:'table',human:'hall'});r.say('Only Ilse hears this.');r.move(['marta'],'hall');
+  await r.turn('marta','hall');assert(r.last().includes('Current participants: Ilse, Marta.'));assert(!r.last().includes('Dennis'));
+  await r.turn('ilse','hall');assert(r.last().includes('Current participants: Dennis, Ilse, Marta.'));
+});
+test('§1.6.11.F8 enabling locations over existing history keeps it public with no movement line; it cannot be turned off; legacy rooms need the switch',()=>{
+  const w=places({},{},()=>{const st=locState({gav:'table',marta:'table'});delete st.locations;st.messages=[{id:'old',speaker:'Dennis',speakerRef:{kind:'human'},text:'Earlier, public.',source:'human'}];return st;});
+  const at={gav:'the table',marta:'the hall',human:'the hall'};
+  assert.throws(()=>w.people.enableLocations(w.id,{expected:w.head(),places:['the table','the hall'],at:{gav:'the table',human:'the hall'}}),/Place everyone/);
+  assert.equal(w.people.previewLocations(w.id,{places:['the table','the hall'],at}).switchRequired,false);assert.equal(w.state().locations,undefined);
+  const s=w.people.enableLocations(w.id,{expected:w.head(),places:['the table','the hall'],at}).revision.state;
+  assert.equal(s.messages.length,1);assert.equal(s.messages[0].audience,undefined);assert.equal(visibleTo(s,'gav').length,1);
+  assert.throws(()=>w.e.commit(w.id,w.head(),{...s,locations:undefined},'Off'),/cannot be turned off/);
+  assert.throws(()=>w.e.retcon(w.id,w.head(),'old','Earlier, edited.','regenerate','keep'),/predates locations/);
+  assert.throws(()=>w.people.enableLocations(w.id,{expected:w.head(),places:['x'],at:{}}),/already has locations/);
+  const legacy=new ProductionEngine(store()),lb=legacy.create('Legacy',initialState()),lp=new People(legacy,new Vault(legacy.store));
+  const all=Object.fromEntries([...Object.keys(lb.revision.state.characters),'human'].map(k=>[k,'the room']));
+  assert.equal(lp.previewLocations(lb.id,{places:['the room'],at:all}).switchRequired,true);
+  assert.throws(()=>lp.enableLocations(lb.id,{expected:lb.head,places:['the room'],at:all}),/switches it to v2/);
+  assert.equal(lp.enableLocations(lb.id,{expected:lb.head,places:['the room'],at:all,switchAssembly:true}).revision.state.assemblyVersion,'v2');
+});
+test('§1.6 §9 the changes view shows audience-only edits, movement and placement',()=>{
+  const w=places({gav:'table',marta:'hall'});w.say('Line.');const fork=w.state();
+  w.move(['marta'],'table');w.e.setAudience(w.id,w.head(),fork.messages[0].id,null);w.people.renamePlace(w.id,'yard',{expected:w.head(),name:'the garden'});
+  const c=stateChanges(fork,w.state());assert.equal(c.audience.length,1);assert.equal(c.audience[0].after,null);assert.deepEqual(c.audience[0].before,fork.messages[0].audience!.display);
+  assert.deepEqual(c.locations!.moved,[{key:'marta',label:'Marta',from:'the hall',to:'the table'}]);assert.deepEqual(c.locations!.places.renamed,[{from:'the yard',to:'the garden'}]);
+  assert.equal(c.conversation.appended.movement,1);assert.deepEqual(c.conversation.edited,[c.audience[0].id]);
+});
