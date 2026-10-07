@@ -16,6 +16,7 @@ import { People } from './people';
 import { Runs, statusOf } from './runs';
 import { assemblyOf, resolvedMap, resolveSpeaker, validRef, labelFor, validateLabel, generationProvenance, labelOf } from './identity';
 import { EMPTY_FRAME, DEFAULT_FRAME } from '../speakerTurn';
+import { visibility, scopeTag, stamp, knownPlace, placeName, whoLabel, HUMAN } from './locations';
 
 function runInfo(run: any) {
   if (run == null) return undefined;
@@ -207,7 +208,27 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.post('/api/branches/:id/messages', route((req,res) => { const before = engine.read(req.params.id).head, b = engine.message(req.params.id, req.body.expected, req.body.text || '',req.body.attachments); runs.humanMessage(b.id, before, b.head); res.json(b); }));
   app.post('/api/branches/:id/messages/:message/delete', route((req,res) => res.json(engine.deleteMessage(req.params.id,req.body.expected,req.params.message))));
   app.post('/api/branches/:id/messages/restore', route((req,res) => res.json(engine.restoreMessage(req.params.id,req.body.expected,req.body.deletion))));
-  app.post('/api/branches/:id/turn', route(async(req,res) => res.json(await engine.turn(req.params.id, req.body.expected, req.body.speaker || undefined, runInfo(req.body.run)))));
+  // A direct turn in a room with locations names a concrete place; rotation exists only inside a persisted run.
+  app.post('/api/branches/:id/turn', route(async(req,res) => { if (req.body.place === 'rotate') throw Error('Rotation is only available in a run'); res.json(await engine.turn(req.params.id, req.body.expected, req.body.speaker || undefined, runInfo(req.body.run), undefined, undefined, req.body.place !== undefined ? { place: req.body.place } : undefined)); }));
+  // Locations. None of these routes makes a provider call.
+  app.post('/api/branches/:id/locations/preview', route((req,res) => res.json(people.previewLocations(req.params.id, req.body))));
+  app.post('/api/branches/:id/locations', route((req,res) => res.json(people.enableLocations(req.params.id, req.body))));
+  app.post('/api/branches/:id/locations/places/:place/rename', route((req,res) => res.json(people.renamePlace(req.params.id, req.params.place, req.body))));
+  app.post('/api/branches/:id/move/preview', route((req,res) => { const s = engine.read(req.params.id).revision.state, { message } = engine.planMove(s, req.body); res.json({ text: message.text, movement: message.movement, audience: message.audience, tag: scopeTag(message) }); }));
+  app.post('/api/branches/:id/move', route((req,res) => { const b = engine.move(req.params.id, req.body.expected, req.body); runs.interrupt(b.id, 'People moved; placement changed'); res.json(b); }));
+  app.post('/api/branches/:id/narration', route((req,res) => { const b = engine.narrate(req.params.id, req.body.expected, req.body.text, req.body.place ?? null); runs.interrupt(b.id, 'Narration interrupts a run'); res.json(b); }));
+  app.post('/api/branches/:id/messages/:message/audience/preview', route((req,res) => res.json(engine.planAudience(engine.read(req.params.id).revision.state, req.params.message, req.body.audience ?? null).change)));
+  app.post('/api/branches/:id/messages/:message/audience', route((req,res) => res.json(engine.setAudience(req.params.id, req.body.expected, req.params.message, req.body.audience ?? null))));
+  // "As seen by X at revision R": X's next-request history projection, from the same function dispatch uses.
+  app.get('/api/branches/:id/seen/:person', route((req,res) => {
+    const b = engine.read(req.params.id), at = typeof req.query.revision === 'string' ? req.query.revision : b.head;
+    let cursor: string | null = b.head; while (cursor && cursor !== at) cursor = store.get<Revision>('revisions', cursor).parent;
+    if (!cursor) throw Error('That revision is not part of this conversation');
+    const s = store.get<Revision>('revisions', at).state, person = req.params.person;
+    if (!s.locations) throw Error('This revision has no locations');
+    if (person !== HUMAN && !s.characters[person]) throw Error('Unknown person');
+    res.json({ revision: at, label: whoLabel(s, person), placeName: placeName(s, s.locations.at[person]), ...visibility(s, person) });
+  }));
   app.post('/api/branches/:id/stop', route((req,res) => { engine.cancel(req.params.id); res.json({ ok: true }); }));
   app.post('/api/branches/:id/fork', route((req,res) => res.json(engine.fork(req.params.id, req.body.revision, String(req.body.name || 'Alternate continuation'), req.body.messageId))));
   app.post('/api/branches/:id/retcon', route((req,res) => res.json(engine.retcon(req.params.id, req.body.expected, req.body.messageId, String(req.body.text ?? ''), req.body.mode, req.body.memory))));
@@ -217,18 +238,29 @@ export function createApp(engine = new Engine(defaultStore())) {
     if (!Array.isArray(req.body.messages) || !['keep','clear'].includes(req.body.memory)) throw Error('Invalid history retcon');
     const previous = b.revision.state, state = structuredClone(previous), v2 = assemblyOf(state) === 'v2', provenance = generationProvenance(store);
     const originals = new Map(state.messages.map(m => [m.id,m]));
+    // Audience is never edited here: existing lines keep theirs, and each new line in a room with locations needs a place or public.
+    const scoped = (m: any, old: any, ref: any) => {
+      if (old) { if (m.audience !== undefined && JSON.stringify(m.audience) !== JSON.stringify(old.audience ?? null)) throw Error('Change who heard a line with its audience edit, not in the history editor'); return { ...(old.audience ? { audience: old.audience } : {}), ...(old.movement ? { movement: old.movement } : {}) }; }
+      if (!state.locations) { if (m.audience != null) throw Error('This room has no locations'); return {}; }
+      if (m.audience === undefined) throw Error('Choose a place or public for each new line');
+      if (m.audience === null) return {};
+      if (!m.audience || Object.keys(m.audience).join() !== 'place' || !knownPlace(state, m.audience.place)) throw Error('Choose a known place or public for each new line');
+      const audience = stamp(state, m.audience.place), who = ref?.kind === 'person' ? ref.id : ref?.kind === 'human' ? HUMAN : null;
+      if (who && !audience.present.includes(who)) throw Error(`${whoLabel(state, who)} is not in ${placeName(state, m.audience.place)}. Insert the line as public or elsewhere, then use an audience edit.`);
+      return { audience };
+    };
     // Text-only edits keep attribution. Changing it takes an explicit choice; a retyped label never silently reassigns identity.
     state.messages = req.body.messages.map((m: any) => {
       const old = originals.get(m.id), typed = typeof m.speaker === 'string' ? m.speaker.trim() : '';
       if (m.speakerRef !== undefined && !validRef(m.speakerRef)) throw Error('Choose a person, you, the narrator or unbound for each message');
       const refChanged = m.speakerRef !== undefined && (!old || JSON.stringify(m.speakerRef) !== JSON.stringify(resolveSpeaker(previous, old, provenance)));
       const speakerChanged = !!old && !refChanged && typed !== old.speaker;
-      if (old && old.text === m.text && !refChanged && !speakerChanged) return old;
+      if (old && old.text === m.text && !refChanged && !speakerChanged) { scoped(m, old, null); return old; }
       // Every newly edited line records its resolved attribution; historical records are never touched.
       const ref = refChanged ? m.speakerRef : speakerChanged ? { kind: 'unbound' } : old ? resolveSpeaker(previous, old, provenance) : v2 ? { kind: 'unbound' } : undefined;
       const speaker = refChanged || (!old && ref) ? labelFor(state, ref, typed) : speakerChanged || !old ? typed : old.speaker;
       if (v2 && ref?.kind === 'unbound' && (speakerChanged || !old || refChanged)) validateLabel(speaker);
-      return { id: id(), speaker, ...(ref ? { speakerRef: ref } : {}), text: m.text, source: 'edited', ...(old ? {editedFrom:[old.id,...(old.editedFrom||[])],turnId:old.turnId, ...(old.attachments?{attachments:old.attachments}:{})} : {}) };
+      return { id: id(), speaker, ...(ref ? { speakerRef: ref } : {}), text: m.text, source: 'edited', ...(old ? {editedFrom:[old.id,...(old.editedFrom||[])],turnId:old.turnId, ...(old.attachments?{attachments:old.attachments}:{})} : {}), ...scoped(m, old, ref) };
     });
     if (req.body.memory === 'clear') for (const c of Object.values(state.characters)) c.memory = '';
     if (engine.active.has(b.id)) throw Error('Stop generation before editing history');
@@ -243,7 +275,9 @@ export function createApp(engine = new Engine(defaultStore())) {
     store.add('observations',observation); res.json(observation);
   }));
   app.get('/api/branches/:id/transcript', route((req,res) => {const b=engine.read(req.params.id);res.type('html').send(transcriptExport(b.name,b.revision.state));}));
-  app.get('/api/branches/:id/export', route((req,res) => res.attachment('room-research.json').json((()=>{const record=evidence(req.params.id,true);return {format:'room-workbench-v1',...record,attachments:record.attachments.map(a=>store.get<Attachment>('attachments',a.id))};})())));
+  // Markdown transcript: written labels, with location tags from the stamped snapshots. No prompts or research records.
+  app.get('/api/branches/:id/transcript.md', route((req,res) => {const b=engine.read(req.params.id),s=b.revision.state;res.type('text/markdown').attachment('room-transcript.md').send(`# ${b.name}\n\n`+(s.messages.map(m=>`**${m.speaker}**${scopeTag(m)?' '+scopeTag(m):''}\n\n${m.text}`).join('\n\n')||'_No messages yet._')+'\n');}));
+  app.get('/api/branches/:id/export', route((req,res) => res.attachment('room-research.json').json((()=>{const record=evidence(req.params.id,true),s=record.branch.revision.state;return {format:'room-workbench-v1',...record,...(s.locations?{locationTags:Object.fromEntries(s.messages.filter(m=>scopeTag(m)).map(m=>[m.id,scopeTag(m)]))}:{}),attachments:record.attachments.map(a=>store.get<Attachment>('attachments',a.id))};})())));
   app.get('/api/branches/:id/notebook', route((req,res) => {
     const e = evidence(req.params.id);
     res.type('text/markdown').attachment('room-notes.md').send(`# ${e.branch.name}\n\n` + e.observations.map(o => `## ${o.at}\n\nBranch: ${o.branch}\nRevision: ${o.revision}\nMessage: ${o.messageId || '(whole branch)'}\n\n${o.text}`).join('\n\n'));

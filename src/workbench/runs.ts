@@ -1,9 +1,13 @@
 import { Engine } from './engine';
 import { id } from './store';
+import { localCast, rotationOrder, knownPlace, placeName } from './locations';
+import { labelOf } from './identity';
 // Run records track today's browser-driven bounded runs. The server never schedules turns itself and never resumes a run.
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'interrupted' | 'failed';
 export interface Run { id: string; branch: string; startedAt: string; startedBy: string; policy: { kind: 'random' | 'alternate' | 'fixed'; speaker?: string }; maxTurns: number;
-  transitions: { at: string; status: RunStatus; reason?: string; event?: 'human-message'; revision?: string }[]; turns: string[]; uncounted?: string[]; usage: { input: number; output: number; reasoning: number; missing: number }; head: string; updatedAt: string }
+  transitions: { at: string; status: RunStatus; reason?: string; event?: 'human-message'; revision?: string }[]; turns: string[]; uncounted?: string[]; usage: { input: number; output: number; reasoning: number; missing: number }; head: string; updatedAt: string;
+  // Locations: the place resolved at start ('rotate' or a place ID). Rotation state lives only here, never in the room state.
+  place?: string; rotation?: { order: string[]; cursor: number } }
 const now = () => new Date().toISOString();
 export const statusOf = (r: Run) => r.transitions.at(-1)!.status;
 export class Runs {
@@ -37,10 +41,28 @@ export class Runs {
     if (b.head !== input.expected) throw Error('This conversation changed. Reload before continuing.');
     if (!s.participants.length) throw Error('Add a person to this room before generating');
     if (policy.speaker && !s.participants.includes(policy.speaker)) throw Error('Selected character is not participating');
-    if (policy.kind === 'alternate' && s.participants.length !== 2) throw Error('Back-and-forth needs exactly two participants');
+    const L = s.locations, place = input.place;
+    let rotation: Run['rotation'];
+    if (!L) { if (place !== undefined) throw Error('This room has no locations'); if (policy.kind === 'alternate' && s.participants.length !== 2) throw Error('Back-and-forth needs exactly two participants'); }
+    else if (place === 'rotate') {
+      if (policy.kind === 'fixed') throw Error('A fixed speaker cannot rotate between places');
+      const order = rotationOrder(s);
+      if (!order.length) throw Error('No place can take a turn. Rotation needs a place with two active characters, or one character and you.');
+      const odd = order.filter(p => localCast(s, p).length !== 2);
+      if (policy.kind === 'alternate' && odd.length) throw Error(`Back-and-forth rotation needs exactly two characters in every place it visits (${odd.map(p => placeName(s, p)).join(', ')} ${odd.length === 1 ? 'does' : 'do'} not)`);
+      if (policy.speaker && !localCast(s, order[0]).includes(policy.speaker)) throw Error(`${labelOf(s, policy.speaker)} is not in ${placeName(s, order[0])}, where the rotation starts`);
+      rotation = { order, cursor: 0 };
+    } else {
+      if (!knownPlace(s, place)) throw Error('Choose the place this run happens in, or rotate');
+      const local = localCast(s, place);
+      if (!local.length) throw Error(`Nobody who can speak is in ${placeName(s, place)}`);
+      if (policy.speaker && !local.includes(policy.speaker)) throw Error(`${labelOf(s, policy.speaker)} is not in ${placeName(s, place)}`);
+      if (policy.kind === 'alternate' && local.length !== 2) throw Error(`Back-and-forth needs exactly two characters in ${placeName(s, place)}`);
+    }
     if (this.active(branch) || this.engine.active.has(branch)) throw Error('Another run is already advancing in this conversation');
     const at = now(), r: Run = { id: id(), branch, startedAt: at, startedBy: typeof input.startedBy === 'string' ? input.startedBy.slice(0, 40) : 'browser',
-      policy: { kind: policy.kind, ...(policy.speaker ? { speaker: policy.speaker } : {}) }, maxTurns, transitions: [{ at, status: 'running' }], turns: [], usage: { input: 0, output: 0, reasoning: 0, missing: 0 }, head: b.head, updatedAt: at };
+      policy: { kind: policy.kind, ...(policy.speaker ? { speaker: policy.speaker } : {}) }, maxTurns, transitions: [{ at, status: 'running' }], turns: [], usage: { input: 0, output: 0, reasoning: 0, missing: 0 }, head: b.head, updatedAt: at,
+      ...(L ? { place } : {}), ...(rotation ? { rotation } : {}) };
     this.save(r); this.watch(r); return r;
   }
   usage(r: Run) {
@@ -72,7 +94,8 @@ export class Runs {
     const turnId = id(), alternate = r.policy.kind === 'alternate', dispatchedHead = r.head;
     r.turns.push(turnId); this.save(r); clearTimeout(this.timers.get(key));
     const forced = r.policy.kind === 'fixed' || (alternate && n === 1) ? r.policy.speaker : undefined;
-    const done = this.engine.turn(r.branch, r.head, forced, { id: r.id, index: n, count: r.maxTurns, ...(alternate ? { mode: 'alternate' as const } : {}) }, undefined, { turnId });
+    const where = r.rotation ? { place: r.rotation.order[r.rotation.cursor], policy: 'rotate' as const, cursor: r.rotation.cursor } : r.place ? { place: r.place, policy: 'place' as const } : undefined;
+    const done = this.engine.turn(r.branch, r.head, forced, { id: r.id, index: n, count: r.maxTurns, ...(alternate ? { mode: 'alternate' as const } : {}) }, undefined, { turnId }, where);
     const entry = { index: n, turnId, done }; this.pending.set(key, entry); let error: any = null;
     try { await done; } catch (e) { error = e; } finally { if (this.pending.get(key) === entry) this.pending.delete(key); }
     r = this.store.get<Run>('runs', key);
@@ -80,6 +103,8 @@ export class Runs {
     r.usage = this.usage(r);
     if (turn?.status === 'attached') {
       r.head = turn.revision;
+      // Only an attached turn advances the rotation; the cursor wraps.
+      if (r.rotation) r.rotation.cursor = (r.rotation.cursor + 1) % r.rotation.order.length;
       if (this.counted(r) >= r.maxTurns) this.transition(r, 'completed'); else { this.save(r); if (statusOf(r) === 'running') this.watch(r); }
     } else if (turn?.status === 'detached' && statusOf(r) === 'running' && r.head !== dispatchedHead && r.transitions.at(-1)?.event === 'human-message') {
       // A human interjected while this turn was in flight: its reply stays detached evidence and doesn't count; the run continues.
@@ -97,6 +122,11 @@ export class Runs {
     r.transitions.push({ at: now(), status: 'running', event: 'human-message', revision: head }); r.head = head; this.save(r);
     if (!this.pending.has(r.id)) this.watch(r);
     return r;
+  }
+  // Moves and narration interrupt a running run at once; an in-flight reply then detaches under the usual rules.
+  interrupt(branch: string, reason: string) {
+    const r = this.store.list<Run>('runs').find(x => x.branch === branch && statusOf(x) === 'running');
+    return r ? this.transition(r, 'interrupted', reason) : null;
   }
   // Stop is final: nothing further is dispatched, and a response that arrives later is stored as canceled.
   stop(key: string) {

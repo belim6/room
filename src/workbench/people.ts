@@ -4,7 +4,8 @@ import { Vault, type VaultRevision } from './vault';
 import { clone, id } from './store';
 import { DEFAULT_MODEL } from './generation';
 import { DEFAULT_FRAME } from '../speakerTurn';
-import { assemblyOf, labelOf, validateLabel, NARRATOR } from './identity';
+import { assemblyOf, labelOf, labelKey, validateLabel, NARRATOR } from './identity';
+import { knownPlace, placeName, stamp, validatePlaceName, whoLabel, HUMAN, type Locations } from './locations';
 import { lineDiff } from './changes';
 // People in rooms: instantiation, renames, participation and explicit, previewed adoption. Nothing here calls a provider.
 const FIELDS: TemplateField[] = ['system', 'frame', 'flow'];
@@ -53,20 +54,25 @@ export class People {
     if (input.switchAssembly !== true) throw Error('This room uses legacy assembly. This change switches it to v2; preview the switch and confirm it.');
     s.assemblyVersion = 'v2'; return reason + ' · switched to v2 assembly';
   }
-  private planAdd(branch: string, input: any) {
+  private planAdd(branch: string, input: any, preview = false) {
     const b = this.engine.read(branch), s = clone(b.revision.state), key = id(), c = this.person(input), legacy = assemblyOf(s) !== 'v2';
     s.characters[key] = c; s.participants.push(key);
+    // Adding someone to a room with locations requires choosing their place; they hear nothing said before they arrived.
+    if (s.locations) {
+      if (!knownPlace(s, input.place) && !(preview && input.place === undefined)) throw Error(`Choose where ${c.label} starts`);
+      s.locations.at[key] = input.place ?? s.locations.places[0].id;
+    }
     return { b, s, key, c, legacy };
   }
   // The system message doesn't depend on history mode, so the preview skips perspective preflight.
   previewAdd(branch: string, input: any) {
-    const { b, s, key, legacy } = this.planAdd(branch, { ...input, label: input.label || 'New person' });
+    const { b, s, key, legacy } = this.planAdd(branch, { ...input, label: input.label || 'New person' }, true);
     if (legacy) s.assemblyVersion = 'v2';
     validateState(s, b.revision.state);
     return { person: key, assembled: assemble(this.store, { ...s, assembly: undefined }, key, false).system, switchRequired: legacy, ...(legacy ? { switchNotes: SWITCH_NOTES } : {}) };
   }
   add(branch: string, input: any) {
-    const { b, s, c } = this.planAdd(branch, input), reason = this.switchIfNeeded(s, input, `Person added: ${c.label}`);
+    const { s, c } = this.planAdd(branch, input), reason = this.switchIfNeeded(s, input, `Person added: ${c.label}`) + (s.locations ? ` in ${placeName(s, input.place)}` : '');
     return this.engine.commit(branch, input.expected, s, reason);
   }
   previewAssembled(branch: string, person: string, settings?: any) {
@@ -90,8 +96,11 @@ export class People {
     if (!s.characters[person]) throw Error('Unknown person');
     if (typeof input.active !== 'boolean') throw Error('Choose active or inactive');
     // Deactivating keeps the person in the cast, so their history, label and attribution survive.
+    const rejoin = input.active && !s.participants.includes(person);
     s.participants = input.active ? [...new Set([...s.participants, person])] : s.participants.filter(p => p !== person);
-    return this.engine.commit(branch, input.expected, s, `${labelOf(s, person)} ${input.active ? 'rejoined' : 'left'} the room`);
+    // Rejoining a room with locations confirms the old place or sets a new one; neither grants earlier scoped lines.
+    if (rejoin && s.locations) { if (!knownPlace(s, input.place)) throw Error(`Choose where ${labelOf(s, person)} rejoins`); s.locations.at[person] = input.place; }
+    return this.engine.commit(branch, input.expected, s, `${labelOf(s, person)} ${input.active ? 'rejoined' : 'left'} the room${rejoin && s.locations ? ` in ${placeName(s, input.place)}` : ''}`);
   }
   previewPersona(branch: string, person: string, input: any) {
     const s = this.engine.read(branch).revision.state, c = s.characters[person];
@@ -129,7 +138,7 @@ export class People {
       const p = preview.fields[f];
       if (!p.available) throw Error(`This template has no ${f}`);
       if (p.changed && p.local && input.replace !== true) throw Error(`The room's ${f} was changed here. Confirm replacing it, or leave ${f} out.`);
-      if (f === 'flow' && p.after === 'alternate' && s.participants.length !== 2) throw Error('Back-and-forth needs exactly two active participants');
+      if (f === 'flow' && p.after === 'alternate' && s.participants.length !== 2 && !s.locations) throw Error('Back-and-forth needs exactly two active participants');
       (s as any)[f] = clone(p.after);
       s.templateFields = { ...s.templateFields, [f]: { item: input.template.item, revision: input.template.revision, value: clone(p.after) } };
     }
@@ -142,12 +151,51 @@ export class People {
     if (!input.template) return this.engine.create(name, s, null, null, undefined, undefined, 'Room created (empty)');
     const rev = this.revisionOf(input.template, 'room-template'), t = rev.content, ref = { item: input.template.item, revision: input.template.revision };
     s.system = t.system; s.frame = t.frame ? { ...t.frame } : { ...DEFAULT_FRAME }; s.flow = t.flow;
-    for (const entry of t.cast) { const c = this.person({ label: entry.label, situation: entry.situation, persona: entry.persona }); const key = id(); s.characters[key] = c; s.participants.push(key); }
-    if (t.opening) s.messages.push({ id: id(), speaker: t.opening.kind === 'human' ? s.human : NARRATOR, speakerRef: { kind: t.opening.kind }, text: t.opening.text, source: 'template' });
-    if (s.flow === 'alternate' && s.participants.length !== 2) s.flow = 'random';
+    // Template places get fresh IDs; unassigned cast members and the human start in the first place.
+    const places: { id: string; name: string }[] | undefined = t.places?.map((name: string) => ({ id: id(), name })), where = (name?: string) => (places!.find(p => p.name === name) ?? places![0]).id;
+    if (places) s.locations = { places, at: { [HUMAN]: where(t.humanPlace) } };
+    for (const entry of t.cast) { const c = this.person({ label: entry.label, situation: entry.situation, persona: entry.persona }); const key = id(); s.characters[key] = c; s.participants.push(key); if (places) s.locations!.at[key] = where(entry.place); }
+    // A human opening is heard where the human starts; a narrator opening is public in this release.
+    if (t.opening) s.messages.push({ id: id(), speaker: t.opening.kind === 'human' ? s.human : NARRATOR, speakerRef: { kind: t.opening.kind }, text: t.opening.text, source: 'template', ...(places && t.opening.kind === 'human' ? { audience: stamp(s, s.locations!.at[HUMAN]) } : {}) });
+    if (s.flow === 'alternate' && s.participants.length !== 2 && !places) s.flow = 'random';
     s.origin = { template: ref };
     s.templateFields = Object.fromEntries(FIELDS.filter(f => t[f] !== undefined).map(f => [f, { ...ref, value: clone(f === 'flow' ? s.flow : s[f]) }]));
     return this.engine.create(name, s, null, null, undefined, undefined, `Room created from template · ${this.vault.item(ref.item).title}`);
+  }
+  // Enabling locations takes a complete placement: every person, active or not, and you. Earlier history stays public.
+  private planLocations(branch: string, input: any) {
+    const b = this.engine.read(branch), s = clone(b.revision.state), legacy = assemblyOf(s) !== 'v2';
+    if (s.locations) throw Error('This room already has locations');
+    const names = input.places;
+    if (!Array.isArray(names) || !names.length || names.length > 50) throw Error('Name at least one place');
+    const places = names.map((n: unknown) => ({ id: id(), name: validatePlaceName(typeof n === 'string' ? n.trim() : n) }));
+    if (new Set(places.map(p => labelKey(p.name))).size !== places.length) throw Error('Two places have the same name');
+    const keys = [...Object.keys(s.characters), HUMAN], at = input.at;
+    if (!at || typeof at !== 'object' || Object.keys(at).length !== keys.length || keys.some(k => !places.some(p => p.name === at[k]))) throw Error('Place everyone, including inactive people and you');
+    const locations: Locations = { places, at: Object.fromEntries(keys.map(k => [k, places.find(p => p.name === at[k])!.id])) };
+    s.locations = locations;
+    return { b, s, legacy };
+  }
+  previewLocations(branch: string, input: any) {
+    const { b, s, legacy } = this.planLocations(branch, input);
+    if (legacy) s.assemblyVersion = 'v2';
+    validateState(s, b.revision.state);
+    return { places: s.locations!.places.map(p => p.name), placement: Object.entries(s.locations!.at).map(([k, p]) => ({ key: k, label: whoLabel(s, k), place: placeName(s, p), active: k === HUMAN || s.participants.includes(k) })),
+      notes: ['Existing messages stay public. Only lines said after this are scoped to a place.', 'No movement line is written.', 'Locations cannot be turned off again in this release.'], switchRequired: legacy, ...(legacy ? { switchNotes: SWITCH_NOTES } : {}) };
+  }
+  enableLocations(branch: string, input: any) {
+    const { s } = this.planLocations(branch, input), reason = this.switchIfNeeded(s, input, `Locations enabled: ${s.locations!.places.map(p => p.name).join(', ')}`);
+    return this.engine.commit(branch, input.expected, s, reason);
+  }
+  // Renames show from now on; lines already stamped keep the name they were stamped with.
+  renamePlace(branch: string, place: string, input: any) {
+    const s = clone(this.engine.read(branch).revision.state), p = s.locations?.places.find(x => x.id === place);
+    if (!p) throw Error('Unknown place');
+    const before = p.name, name = validatePlaceName(typeof input.name === 'string' ? input.name.trim() : input.name);
+    if (name === before) throw Error('That is already this place\'s name');
+    if (s.locations!.places.some(x => x.id !== place && labelKey(x.name) === labelKey(name))) throw Error(`There is already a place named ${name}`);
+    p.name = name;
+    return this.engine.commit(branch, input.expected, s, `Renamed place ${before} to ${name}`);
   }
   // Settings save is a field-level merge: people are added, renamed and removed through their own actions.
   private settingsState(branch: string, body: any) {

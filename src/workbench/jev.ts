@@ -3,18 +3,22 @@ import { Store, id } from './store';
 import { attachmentTranscript } from './attachments';
 import type { State } from './engine';
 import { labelOf } from './identity';
-export async function shadowJev(store: Store, state: State, branch: string, revision: string, turnId: string, transport: typeof fetch = fetch) {
+import { visibleTo, localCast } from './locations';
+// With locations, Jev observes the selected speaker's visible history and the active people in their place.
+export async function shadowJev(store: Store, state: State, branch: string, revision: string, turnId: string, transport: typeof fetch = fetch, speaker?: string) {
+  const L = state.locations && speaker ? state.locations : undefined, people = L ? localCast(state, L.at[speaker!]) : state.participants, history = L ? visibleTo(state, speaker!) : state.messages;
   const questions = {
     next_speaker: { type: 'choice', instructions: 'Choose the participant whose specific concerns can most advance the latest_message in transcript. Refer to character criteria. Avoid the last speaker when alternatives exist. Do not choose for fairness.',
-      criteria: Object.fromEntries(state.participants.map(p => [labelOf(state, p), { what: state.characters[p].prompt }])) },
+      criteria: Object.fromEntries(people.map(p => [labelOf(state, p), { what: state.characters[p].prompt }])) },
     needs_research: { type: 'noul', instructions: 'Would answering the latest_message materially benefit from looking up a verifiable external fact not already present in transcript? Values, jokes and speculation alone do not require research.' },
   };
-  const transcript = state.messages.slice(-20).map(m => attachmentTranscript(store,[m]).transcript);
+  // Filter first, then take the last 20; latest_message and last_speaker come from the same sequence.
+  const transcript = history.slice(-20).map(m => attachmentTranscript(store,[m]).transcript);
   // Jev sees labels, never person IDs.
-  const body = { model: 'jev-latest', state: { room: state.system, participants: state.participants.map(p => labelOf(state, p)), transcript,
-    latest_message: transcript.at(-1) || '(none)', last_speaker: state.messages.at(-1)?.speaker || '(none)' }, questions };
+  const body = { model: 'jev-latest', state: { room: state.system, participants: people.map(p => labelOf(state, p)), transcript,
+    latest_message: transcript.at(-1) || '(none)', last_speaker: history.at(-1)?.speaker || '(none)' }, questions };
   const key = id(); const start = Date.now();
-  store.put('jev-requests', key, { id: key, branch, revision, turnId, mode: 'shadow', at: new Date().toISOString(),
+  store.put('jev-requests', key, { id: key, branch, revision, turnId, mode: 'shadow', at: new Date().toISOString(), ...(L ? { visibility: { policy: 'audience-1', person: speaker } } : {}),
     endpoint: 'https://api.typesafe.ai/v1/systemone', body,
     instructionVersion: createHash('sha256').update(JSON.stringify(questions)).digest('hex') });
   let raw: string | null = null;

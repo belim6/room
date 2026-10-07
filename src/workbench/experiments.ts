@@ -4,12 +4,13 @@ import { clone, id } from './store';
 import { reasoningOf } from './generation';
 import { stateChanges } from './changes';
 import { speakerId, generationProvenance } from './identity';
+import { visibleTo } from './locations';
 import type { Store } from './store';
-type Patch = Partial<Pick<State,'system'|'participants'|'shadow'|'policy'|'human'|'frame'|'assemblyVersion'|'assembly'>> & {characters?: Record<string,Partial<Character>>};
+type Patch = Partial<Pick<State,'system'|'participants'|'shadow'|'policy'|'human'|'frame'|'assemblyVersion'|'assembly'|'locations'>> & {characters?: Record<string,Partial<Character>>};
 export interface Condition { key: string; label: string; control?: boolean; patch: Patch }
 interface OutcomeRule { pattern: string; flags?: string; highlight?: Record<string,string> }
 export interface Experiment { id: string; version: string; sequence: number; name: string; createdAt: string; question: string; prediction: string; base: {branch:string;revision:string}; speaker: string; conditions: Condition[]; outcome?: OutcomeRule; retrospective?: boolean; lockedAt?: string; parent?: string }
-interface Trial { id: string; experiment: string; condition: string; index: number; branch: string; turnId: string; at: string; status: string; batch?: string; attached?: boolean; error?: string; sequence?: number }
+interface Trial { id: string; experiment: string; condition: string; index: number; branch: string; turnId: string; at: string; status: string; batch?: string; attached?: boolean; error?: string; sequence?: number; place?: string; visibleMessageIds?: string[] }
 const now = () => new Date().toISOString();
 export function applyPatch(base: State, patch: Patch): State {
   if(!patch || typeof patch!=='object' || Array.isArray(patch))throw Error('A condition patch must be an object');
@@ -26,8 +27,14 @@ export function applyPatch(base: State, patch: Patch): State {
         }
       }
     } else {
-      if(!['system','participants','shadow','policy','human','frame','assemblyVersion','assembly'].includes(key))throw Error('Only settings may be patched');
+      if(!['system','participants','shadow','policy','human','frame','assemblyVersion','assembly','locations'].includes(key))throw Error('Only settings may be patched');
       if(key==='assemblyVersion'&&value!=='v2')throw Error('A patch can only switch assembly to v2');
+      // A placement intervention at the frozen checkpoint: the whole object is replaced, and every existing place keeps its ID and name.
+      if(key==='locations'){
+        if(!base.locations)throw Error('Only a room that already has locations can take a placement condition');
+        const places=(value as any)?.places;
+        if(!Array.isArray(places)||base.locations.places.some(p=>!places.some((q:any)=>q?.id===p.id&&q?.name===p.name)))throw Error('A placement condition keeps every existing place with its name; it can move people and add places');
+      }
       (next as any)[key]=clone(value);
     }
   }
@@ -204,7 +211,9 @@ export class Experiments {
         const trialId=id(),index=start+n;
         let branch=this.engine.create(`${e.name} · ${c.key} · trial ${index}`,base,workspace.branch,workspace.revision,undefined,{experiment:key,trial:trialId});
         branch=this.engine.commit(branch.id,branch.head,applyPatch(base,c.patch),`Experiment condition ${c.key}`);
-        const t:Trial={id:trialId,experiment:key,condition:c.key,index,branch:branch.id,turnId:id(),at:now(),status:'queued',batch};
+        // The measured speaker's place resolves after the condition patch.
+        const placed=branch.revision.state.locations?{place:branch.revision.state.locations.at[e.speaker],visibleMessageIds:visibleTo(branch.revision.state,e.speaker).map(m=>m.id)}:{};
+        const t:Trial={id:trialId,experiment:key,condition:c.key,index,branch:branch.id,turnId:id(),at:now(),status:'queued',batch,...placed};
         this.store.put('experiment-trials',t.id,t);trials.push(t);
       }
     }
@@ -220,7 +229,7 @@ export class Experiments {
             this.event(t,{status:'running'});
             try {
               const b=this.engine.read(t.branch);
-              await this.engine.turn(b.id,b.head,e.speaker,{id:key,index:t.index,count:Math.max(...trials.filter(x=>x.condition===c.key).map(x=>x.index))},{turnId:t.turnId});
+              await this.engine.turn(b.id,b.head,e.speaker,{id:key,index:t.index,count:Math.max(...trials.filter(x=>x.condition===c.key).map(x=>x.index))},{turnId:t.turnId},undefined,t.place?{place:t.place}:undefined);
               const turn=this.store.get('turns',t.turnId);
               this.event(t,{status:turn.status==='attached'?'completed':turn.status==='canceled'?'canceled':'failed',...(turn.status==='detached'?{error:'Branch changed while the trial was running'}:{})});break;
             } catch(error:any) {
