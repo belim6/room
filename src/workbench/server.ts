@@ -178,6 +178,7 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.post('/api/branches/:id/people/preview', route((req,res) => res.json(people.previewAdd(req.params.id, req.body))));
   app.post('/api/branches/:id/people', route((req,res) => res.json(people.add(req.params.id, req.body))));
   app.get('/api/branches/:id/people/:person/assembled', route((req,res) => res.json(people.previewAssembled(req.params.id, req.params.person))));
+  app.post('/api/branches/:id/people/:person/assembled', route((req,res) => res.json(people.previewAssembled(req.params.id, req.params.person, req.body))));
   app.post('/api/branches/:id/people/:person/rename', route((req,res) => res.json(people.rename(req.params.id, req.params.person, req.body))));
   app.post('/api/branches/:id/people/:person/participation', route((req,res) => res.json(people.participation(req.params.id, req.params.person, req.body))));
   app.post('/api/branches/:id/people/:person/adopt/preview', route((req,res) => res.json(people.previewPersona(req.params.id, req.params.person, req.body))));

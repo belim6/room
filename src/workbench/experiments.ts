@@ -5,7 +5,7 @@ import { reasoningOf } from './generation';
 import { stateChanges } from './changes';
 import { speakerId, generationProvenance } from './identity';
 import type { Store } from './store';
-type Patch = Partial<Pick<State,'system'|'participants'|'shadow'|'policy'|'human'|'frame'|'assemblyVersion'>> & {characters?: Record<string,Partial<Character>>};
+type Patch = Partial<Pick<State,'system'|'participants'|'shadow'|'policy'|'human'|'frame'|'assemblyVersion'|'assembly'>> & {characters?: Record<string,Partial<Character>>};
 export interface Condition { key: string; label: string; control?: boolean; patch: Patch }
 interface OutcomeRule { pattern: string; flags?: string; highlight?: Record<string,string> }
 export interface Experiment { id: string; version: string; sequence: number; name: string; createdAt: string; question: string; prediction: string; base: {branch:string;revision:string}; speaker: string; conditions: Condition[]; outcome?: OutcomeRule; retrospective?: boolean; lockedAt?: string; parent?: string }
@@ -26,7 +26,7 @@ export function applyPatch(base: State, patch: Patch): State {
         }
       }
     } else {
-      if(!['system','participants','shadow','policy','human','frame','assemblyVersion'].includes(key))throw Error('Only settings may be patched');
+      if(!['system','participants','shadow','policy','human','frame','assemblyVersion','assembly'].includes(key))throw Error('Only settings may be patched');
       if(key==='assemblyVersion'&&value!=='v2')throw Error('A patch can only switch assembly to v2');
       (next as any)[key]=clone(value);
     }

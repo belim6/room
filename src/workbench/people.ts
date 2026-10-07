@@ -1,3 +1,4 @@
+import { getAttachments } from './attachments';
 import { Engine, emptyRoomState, assemble, validateState, type State, type Character, type TemplateField } from './engine';
 import { Vault, type VaultRevision } from './vault';
 import { clone, id } from './store';
@@ -57,19 +58,22 @@ export class People {
     s.characters[key] = c; s.participants.push(key);
     return { b, s, key, c, legacy };
   }
+  // The system message doesn't depend on history mode, so the preview skips perspective preflight.
   previewAdd(branch: string, input: any) {
     const { b, s, key, legacy } = this.planAdd(branch, { ...input, label: input.label || 'New person' });
     if (legacy) s.assemblyVersion = 'v2';
     validateState(s, b.revision.state);
-    return { person: key, assembled: assemble(this.store, s, key, false).system, switchRequired: legacy, ...(legacy ? { switchNotes: SWITCH_NOTES } : {}) };
+    return { person: key, assembled: assemble(this.store, { ...s, assembly: undefined }, key, false).system, switchRequired: legacy, ...(legacy ? { switchNotes: SWITCH_NOTES } : {}) };
   }
   add(branch: string, input: any) {
     const { b, s, c } = this.planAdd(branch, input), reason = this.switchIfNeeded(s, input, `Person added: ${c.label}`);
     return this.engine.commit(branch, input.expected, s, reason);
   }
-  previewAssembled(branch: string, person: string) {
-    const s = this.engine.read(branch).revision.state; if (!s.characters[person]) throw Error('Unknown person');
-    return { person, label: labelOf(s, person), assembled: assemble(this.store, s, person, false).system, assemblyVersion: assemblyOf(s) };
+  previewAssembled(branch: string, person: string, settings?: any) {
+    const s = settings ? this.settingsState(branch,settings) : this.engine.read(branch).revision.state;
+    validateState(s,s); if (!s.characters[person]) throw Error('Unknown person');
+    const request=assemble(this.store,s,person);
+    return { person, label: labelOf(s, person), assembled: request.system, messages: request.messages, images: s.messages.flatMap(m=>getAttachments(this.store,m.attachments).filter(a=>a.kind==='image').map(a=>({id:a.id,name:a.name}))), attachments: request.context.attachments, assembly: request.assembly, adapterVersion: request.adapterVersion, assemblyVersion: assemblyOf(s) };
   }
   rename(branch: string, person: string, input: any) {
     const b = this.engine.read(branch), s = clone(b.revision.state), c = s.characters[person];
@@ -146,10 +150,11 @@ export class People {
     return this.engine.create(name, s, null, null, undefined, undefined, `Room created from template · ${this.vault.item(ref.item).title}`);
   }
   // Settings save is a field-level merge: people are added, renamed and removed through their own actions.
-  settings(branch: string, body: any) {
+  private settingsState(branch: string, body: any) {
     const b = this.engine.read(branch), s = clone(b.revision.state);
     for (const key of ['system', 'human', 'shadow', 'policy'] as const) if (body[key] !== undefined) (s as any)[key] = body[key];
     if (body.participants !== undefined) s.participants = body.participants;
+    if (body.assembly !== undefined) s.assembly = clone(body.assembly);
     if (body.frame === null) delete s.frame; else if (body.frame !== undefined) s.frame = body.frame;
     if (body.flow !== undefined && (body.flow !== (s.flow ?? 'random') || s.flow !== undefined)) s.flow = body.flow;
     for (const [person, fields] of Object.entries(body.characters ?? {})) {
@@ -161,6 +166,9 @@ export class People {
         if (field === 'reasoning' && (value === 'default' || value === undefined)) delete c.reasoning; else if (field === 'situation' && value === '' && c.situation === undefined) continue; else (c as any)[field] = value;
       }
     }
-    return this.engine.commit(branch, body.expected, s, 'Settings updated');
+    validateState(s,b.revision.state); return s;
+  }
+  settings(branch: string, body: any) {
+    return this.engine.commit(branch, body.expected, this.settingsState(branch,body), 'Settings updated');
   }
 }
