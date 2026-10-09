@@ -1653,3 +1653,161 @@ test('§1.6 review P3: the Flow setting is gated on local pairs in rooms with pl
   assert.equal(flowOption(plain).enabled,false);assert.match(flowOption(plain).label,/exactly two active people/);
   plain.participants=['gav','odo'];assert.equal(flowOption(plain).enabled,true);
 });
+
+import { NoteFormatError, SIMULATED_REASONING_V1 } from '../src/workbench/generation';
+import { shadowJev } from '../src/workbench/jev';
+const simulatedInput = {...input,provider:'opengateway' as const,reasoning:'simulated' as const};
+test('simulated note is parsed first, separately recorded with provenance, and never consumes the public limit',async()=>{
+  const s=store(),note='Elorin: private\n#notetomyfutureself: PRIVATE MEMORY\n'+'n'.repeat(2300),reply='Boris: '+'p'.repeat(2100)+'\n#notetomyfutureself: public memory';
+  const raw=JSON.stringify({choices:[{message:{content:` \n<think>${note}</think>\n${reply}`,reasoning_content:'Native evidence'},finish_reason:'stop'}]});
+  const result=await generate(simulatedInput,s,async(_u,o)=>{
+    const attempt=s.list('attempts')[0];assert.deepEqual(attempt.simulatedReasoning,{version:'v1'});
+    assert.deepEqual(attempt.body,JSON.parse(String(o?.body)));assert.deepEqual(attempt.body.thinking,{type:'disabled'});
+    return new Response(raw);
+  });
+  assert.equal(result.text,'p'.repeat(1999)+'…');assert.deepEqual(result.notes,['public memory']);
+  const a=s.attempts()[0];assert.equal(a.outcome.generatedNote,note);assert.equal(a.outcome.raw,raw);assert.equal(reasoningOf(a.outcome),'Native evidence');
+  assert.deepEqual(a.outcome.transformations,['Moved generated private note out of reply','Removed future-memory notes from displayed reply','Removed assigned speaker label','Truncated to 2000 characters']);
+});
+test('simulated format rejects every malformed class before transformations and never attaches partial output',async()=>{
+  for(const content of ['Boris: missing','prefix<think>note</think>reply','<think>unclosed','<think>outer<think>nested</think>reply','<think>note</think>reply<think>extra</think>','<think>note</think>reply</think>','</think><think>note</think>reply','<think>note</think> \n','']) {
+    const s=store(),e=new Engine(s,async()=>new Response(JSON.stringify({choices:[{message:{content}}]}))),state=initialState();state.characters.Boris.reasoning='simulated';const b=e.create('Malformed',state);
+    await assert.rejects(e.turn(b.id,b.head,'Boris'),NoteFormatError);
+    assert.equal(e.read(b.id).head,b.head);assert.deepEqual(e.read(b.id).revision.state.messages,[]);assert.equal(s.attempts().length,2);
+    for(const a of s.attempts()){assert.equal(a.outcome.status,'rejected');assert(a.outcome.validation);assert.deepEqual(a.outcome.transformations,[]);assert.equal(a.outcome.generatedNote,undefined);assert.equal(a.outcome.text,undefined);}
+  }
+});
+test('simulated delimiter variants are rejected wherever they could leak into a reply',async()=>{
+  for(const tag of ['<THINK>','<think >','< think>','<\tThInK\n>','</THINK>','</think >','</ think>','< / ThInK >']) {
+    for(const content of [`${tag}note</think>Public`, `<think>note${tag}private</think>Public`, `<think>note</think>Public ${tag}private`, `<think>note</think>Public ${tag}private</think>`]) {
+      const s=store(),e=new Engine(s,async()=>response(content)),state=initialState();state.characters.Boris.reasoning='simulated';const b=e.create('Variant',state);
+      await assert.rejects(e.turn(b.id,b.head,'Boris'),NoteFormatError);
+      assert.equal(e.read(b.id).head,b.head);assert.deepEqual(e.read(b.id).revision.state.messages,[]);assert.equal(s.attempts().length,2);
+      for(const a of s.attempts()){assert.equal(a.outcome.status,'rejected');assert.equal(a.outcome.generatedNote,undefined);assert.equal(a.outcome.text,undefined);assert.deepEqual(a.outcome.transformations,[]);}
+    }
+  }
+});
+test('incomplete delimiter fragments after the note are rejected through generate() and attachment, including an exhausted retry',async()=>{
+  const bad=['<think>private</think>Public line. <think','<think>private</think>Public line. <think secret note','<think>private</think>Public line. </think','<think>private</think>Public line. < THINK','<think>private</think>Public line. </ Think more','<think>private</think>Public line. < / think'];
+  for(const content of bad) {
+    const g=store();await assert.rejects(generate(simulatedInput,g,async()=>response(content)),NoteFormatError);
+    assert.equal(g.attempts().length,2);for(const a of g.attempts()){assert.equal(a.outcome.status,'rejected');assert.equal(a.outcome.text,undefined);assert.equal(a.outcome.generatedNote,undefined);}
+    let calls=0;const s=store(),e=new Engine(s,async()=>response(++calls===1?content:'<think>fresh</think>Boris: Clean.')),state=initialState();state.characters.Boris.reasoning='simulated';let b=e.create('Fragment',state);
+    b=await e.turn(b.id,b.head,'Boris');assert.equal(calls,2);
+    assert.deepEqual(b.revision.state.messages.map(m=>m.text),['Clean.'],'the malformed first response never attaches');assert(!JSON.stringify(b.revision.state).includes('Public line'));
+    const [first]=s.attempts().filter(a=>!a.retryOf);assert.equal(first.outcome.status,'rejected');assert.equal(first.outcome.text,undefined);
+    const x=store(),ex=new Engine(x,async()=>response(content)),st=initialState();st.characters.Boris.reasoning='simulated';const xb=ex.create('Exhausted',st);
+    await assert.rejects(ex.turn(xb.id,xb.head,'Boris'),NoteFormatError);
+    assert.equal(ex.read(xb.id).head,xb.head);assert.deepEqual(ex.read(xb.id).revision.state.messages,[]);assert.equal(x.attempts().length,2);
+  }
+});
+test('Revise of a simulated reply asks for the note then only the reply; training export skips it with a visible reason',async()=>{
+  for(const reasoning of ['simulated','default'] as const){
+    const s=store(),bodies:any[]=[];let next=reasoning==='simulated'?'<think>orig note</think>Boris: Original.':'Boris: Original.';
+    const e=new Engine(s,async(_u,o)=>{bodies.push(JSON.parse(String(o?.body)));return response(next);}),state=initialState();state.characters.Boris.reasoning=reasoning;
+    let b=e.create('Revise '+reasoning,state);b=e.message(b.id,b.head,'Hello');b=await e.turn(b.id,b.head,'Boris');const original=b.revision.state.messages[1];
+    const x=new Alternatives(e),review=x.open(b.id,original.id).review;next=reasoning==='simulated'?'<think>revision note</think>Revised.':'Revised.';
+    let d=await x.propose(review.id,'Be shorter.');const instruction=String(bodies.at(-1).messages.at(-1).content),c=d.candidates[0];
+    assert.equal(c.result.status,'completed');assert.equal(c.result.text,'Revised.');
+    if(reasoning==='simulated'){assert.match(instruction,/first write your brief private note between <think> and <\/think>, then after <\/think> write only the replacement reply, within 2000 characters\./);assert(!instruction.includes('output only the replacement reply'));assert.deepEqual(s.get('attempts',c.result.attempts[0]).simulatedReasoning,{version:'v1'});}
+    else {assert.match(instruction,/and output only the replacement reply, within 2000 characters\./);assert(!instruction.includes('<think>'));}
+    d=x.judge(c.id,{expected:null,verdict:'accepted',text:'Revised.'});x.curate(review.id,{expected:null,candidate:c.id,judgment:d.candidates[0].judgment.id,approved:true,preference:true});
+    const [row]=x.dataset(),app=createApp(e),layer=app._router.stack.find((l:any)=>l.route?.path==='/api/dataset/:kind');
+    for(const kind of ['sft','preference']){
+      const report=x.exportReport(kind);let sent='';const headers:Record<string,string>={};
+      await layer.route.stack[0].handle({params:{kind}},{set(k:string,v:string){headers[k]=v;return this;},attachment(){return this;},type(){return this;},send(v:string){sent=v;return this;},status(){return this;},json(){return this;}},(error:any)=>{if(error)throw error;});
+      if(reasoning==='simulated'){assert.deepEqual(x.export(kind),[]);assert.equal(report.skipped,1);assert.match(report.reasons[0],/simulated reasoning/);assert.equal(sent,'');assert.equal(headers['X-Room-Export-Skipped'],'1');assert.match(headers['X-Room-Export-Skipped-Reason'],/simulated reasoning/);}
+      else {assert.equal(x.export(kind).length,1);assert.equal(report.skipped,0);assert.equal(headers['X-Room-Export-Skipped'],'0');assert(!JSON.stringify(x.export(kind)).includes('<think>'));}
+    }
+    if(reasoning==='simulated'){assert.match(row.excluded!,/simulated reasoning/);assert(!JSON.stringify(x.export('sft')).includes('orig note'));}else assert.equal(row.excluded,undefined);
+  }
+});
+test('non-string provider content fails once with the same evidence in default and simulated modes',async()=>{
+  for(const content of [undefined,null,42,false,{},[],[{type:'text',text:'<think>note</think>Public'}]]) {
+    for(const reasoning of ['default','simulated'] as const) {
+      const s=store();let calls=0;const raw=JSON.stringify({choices:[{message:{content},finish_reason:'stop'}],usage:{total_tokens:42}});
+      const e=new Engine(s,async()=>{calls++;return new Response(raw);}),state=initialState();state.characters.Boris.reasoning=reasoning;delete state.frame;const b=e.create('Content failure',state);
+      await assert.rejects(e.turn(b.id,b.head,'Boris'),error=>error instanceof Error && !(error instanceof NoteFormatError) && error.message==='Provider returned no text content');
+      assert.equal(calls,1);assert.equal(e.read(b.id).head,b.head);assert.deepEqual(e.read(b.id).revision.state.messages,[]);assert.equal(s.attempts().length,1);
+      const a=s.attempts()[0];assert.equal(a.outcome.status,'failed');assert.equal(a.outcome.validation,null);assert.equal(a.outcome.raw,raw);assert.deepEqual(a.outcome.usage,{total_tokens:42});assert.equal(a.outcome.finishReason,'stop');assert.equal(a.outcome.generatedNote,undefined);assert.equal(a.outcome.text,undefined);assert.deepEqual(a.outcome.transformations,[]);
+    }
+  }
+});
+test('note format and wrong speaker share one corrective retry in either order',async()=>{
+  for(const outputs of [['missing','<think>note</think>Elorin: wrong'],['<think>note</think>Elorin: wrong','missing'],['missing','missing']]) {
+    const s=store();let calls=0;
+    await assert.rejects(generate(simulatedInput,s,async()=>response(outputs[calls++])),outputs[1]==='missing'?NoteFormatError:WrongSpeakerError);
+    assert.equal(calls,2);const attempts=s.attempts();assert.equal(attempts.filter(a=>a.retryOf).length,1);
+  }
+  for(const assembly of [undefined,{history:'perspective' as const}]) {
+    const s=store();let calls=0;
+    const result=await generate({...simulatedInput,...(assembly?{assembly,assemblyVersion:'v2' as const,validationRoster:['Boris','Elorin']}:{} )},s,async(_u,o)=>{
+      const body=JSON.parse(String(o?.body));if(assembly)strictHistory(body.messages);
+      if(++calls===2){assert(JSON.stringify(body).includes('invalid private-note format'));assert(!JSON.stringify(body).includes('LEAKED NOTE'));}
+      return response(calls===1?'<think>LEAKED NOTE':'<think>private</think>Boris: Fresh.');
+    });assert.equal(result.text,'Fresh.');assert.equal(calls,2);
+  }
+  const s=store();let calls=0;await assert.rejects(generate({...simulatedInput,policy:'observe'},s,async()=>{calls++;return response('missing');}),NoteFormatError);assert.equal(calls,2);
+});
+test('simulated instruction follows the frame turn in legacy, custom, empty and perspective assembly; default/off stay unchanged',async()=>{
+  const s=store();
+  for(const state of [initialState(),{...initialState(),frame:undefined},{...initialState(),frame:{identity:'identity',context:'context',opening:'opening',turn:'TURN'}},perspectiveState(s,'cast')]) {
+    const speaker=state.characters.alpha?'alpha':'Boris',before=assemble(s,state,speaker).messages;
+    for(const reasoning of ['default','off'] as const){state.characters[speaker].reasoning=reasoning;assert.deepEqual(assemble(s,state,speaker).messages,before);}
+    state.characters[speaker].reasoning='simulated';const messages=assemble(s,state,speaker).messages;
+    assert.equal(JSON.stringify(messages).split(SIMULATED_REASONING_V1).length-1,1);
+    assert.equal(messages.at(-1)!.content,String(before.at(-1)!.content)+(String(before.at(-1)!.content).trim()?'\n\n':'')+SIMULATED_REASONING_V1);
+    if(state.assembly?.history==='perspective')strictHistory(messages);
+  }
+  for(const reasoning of [undefined,'default','off'] as const){const local=store(),text='<think>ordinary literal text</think>Reply';const result=await generate({...simulatedInput,reasoning},local,async()=>response(text));assert.equal(result.text,text);assert.equal(local.attempts()[0].simulatedReasoning,undefined);assert.equal(local.attempts()[0].outcome.generatedNote,undefined);assert.deepEqual(local.attempts()[0].body.thinking,reasoning==='off'?{type:'disabled'}:undefined);}
+});
+test('simulated setting survives state and experiment patches and Add person; unverified provider is rejected before dispatch',async()=>{
+  const s=store(),state=applyPatch(initialState(),{characters:{Boris:{reasoning:'simulated'}}});validateState(state);
+  assert.equal(state.characters.Boris.reasoning,'simulated');assert.equal(initialState().characters.Boris.reasoning,undefined);
+  assert.deepEqual(stateChanges(initialState(),state).settings.map(c=>[c.field,c.after]),[['reasoning','simulated']]);
+  const e=new Engine(s),b=e.create('Simulated',state);assert.equal(e.read(b.id).revision.state.characters.Boris.reasoning,'simulated');
+  const people=new People(e,new Vault(s)),empty=e.create('Empty',emptyRoomState()),added=people.add(empty.id,{expected:empty.head,label:'New',reasoning:'simulated'});assert.equal(Object.values(added.revision.state.characters)[0].reasoning,'simulated');
+  for(const reasoning of [undefined,'default','off','simulated'] as const){const room=e.create('Add setting',emptyRoomState()),result=people.add(room.id,{expected:room.head,label:'New',...(reasoning===undefined?{}:{reasoning})}),person=Object.values(result.revision.state.characters)[0];assert.equal(person.reasoning,reasoning==='default'?undefined:reasoning);assert.equal(Object.hasOwn(person,'reasoning'),reasoning==='off'||reasoning==='simulated');}
+  assert.throws(()=>applyPatch(state,{characters:{Boris:{provider:'together'}}}),/not verified/);
+  await assert.rejects(generate({...simulatedInput,provider:'together'},s,async()=>{throw Error('Must not dispatch');}),/not verified/);assert.equal(s.attempts().length,0);
+});
+test('simulated canceled and detached replies retain evidence but never enter the conversation',async()=>{
+  for(const mode of ['cancel','detach','abort'] as const){
+    const s=store();let release!:(r:Response)=>void,started!:()=>void;const ready=new Promise<void>(r=>started=r);
+    const e=new Engine(s,async(_u,o)=>{started();return new Promise<Response>((resolve,reject)=>{release=resolve;if(mode==='abort')o?.signal?.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')));});});
+    const state=initialState();state.characters.Boris.reasoning='simulated';const b=e.create('Pending',state),pending=e.turn(b.id,b.head,'Boris');await ready;
+    if(mode==='detach')e.message(b.id,b.head,'Concurrent edit');else e.cancel(b.id);
+    if(mode==='abort')await assert.rejects(pending,/Aborted/);else{release(response('<think>PRIVATE CANCELED</think>Public'));await pending;}
+    assert(!JSON.stringify(e.read(b.id).revision.state).includes('PRIVATE CANCELED'));assert(!e.read(b.id).revision.state.messages.some(m=>m.source==='generated'));
+    assert.equal(s.list('turns')[0].status,mode==='detach'?'detached':'canceled');assert.equal(s.attempts().length,1);
+    assert.equal(s.attempts()[0].outcome.status,mode==='abort'?'canceled':'completed');if(mode!=='abort')assert.equal(s.attempts()[0].outcome.generatedNote,'PRIVATE CANCELED');
+  }
+});
+// Invoke the actual export handlers without opening a listener or making network requests.
+async function exportWithoutServer(e:ProductionEngine,branch:string,suffix:string){
+  const app=createApp(e),layer=app._router.stack.find((l:any)=>l.route?.path===`/api/branches/:id/${suffix}`);let value:any;
+  const res:any={type(){return this;},attachment(){return this;},send(v:any){value=v;return this;},json(v:any){value=v;return this;},status(){return this;}};
+  await layer.route.stack[0].handle({params:{id:branch}},res,(error:any)=>{if(error)throw error;});return value;
+}
+test('generated notes stay out of all character and Jev contexts and conversation exports; research export retains provenance',async()=>{
+  const s=store(),e=new Engine(s,async()=>response('<think>UNIQUE PRIVATE NOTE</think>Boris: Public line.')),state=initialState();state.characters.Boris.reasoning='simulated';let b=e.create('Private',state);b=await e.turn(b.id,b.head,'Boris');
+  for(const speaker of Object.keys(b.revision.state.characters))assert(!JSON.stringify(assemble(s,b.revision.state,speaker).messages).includes('UNIQUE PRIVATE NOTE'));
+  const perspective=clone(b.revision.state);perspective.assemblyVersion='v2';perspective.assembly={history:'perspective'};delete perspective.frame;
+  for(const speaker of Object.keys(perspective.characters))assert(!JSON.stringify(assemble(s,perspective,speaker).messages).includes('UNIQUE PRIVATE NOTE'));
+  await shadowJev(s,b.revision.state,b.id,b.head,'mock-shadow',async(_u,o)=>{assert(!String(o?.body).includes('UNIQUE PRIVATE NOTE'));return new Response(JSON.stringify({answers:{next_speaker:{}}}));});
+  assert(!JSON.stringify(s.list('jev-requests')).includes('UNIQUE PRIVATE NOTE'));
+  for(const suffix of ['transcript','transcript.md']){const exported=await exportWithoutServer(e,b.id,suffix);assert(exported.includes('Public line.'));assert(!exported.includes('UNIQUE PRIVATE NOTE'));}
+  const exported=await exportWithoutServer(e,b.id,'export'),a=exported.attempts[0];assert.equal(a.outcome.generatedNote,'UNIQUE PRIVATE NOTE');assert.deepEqual(a.simulatedReasoning,{version:'v1'});assert.equal(a.revision,b.revision.parent);assert.equal(a.personId,'Boris');assert.equal(a.provider,'opengateway');assert.equal(a.outcome.id,a.id);assert.equal(a.reasoning,null);
+});
+test('simulated experiment timeout retries retain the existing six-attempt ceiling',async()=>{
+  const s=store();let calls=0;const e=new Engine(s,async()=>{if(++calls%2===1)return response('missing');throw new DOMException('Timed out','TimeoutError');}),x=new Experiments(e),d=design(e);d.conditions=[{key:'A',label:'Simulated',control:true,patch:{characters:{Boris:{reasoning:'simulated'}}}}];const exp=x.create(d);
+  x.run(exp.id,1,exp.version);await x.active.get(exp.id)?.done;assert.equal(calls,6);assert.equal(s.attempts().length,6);assert.equal(x.detail(exp.id).trials[0].status,'failed');
+});
+test('simulated Revise preserves parsing and provenance without carrying the previous private note into context',async()=>{
+  const s=store();let calls=0;const e=new Engine(s,async(_u,o)=>{const body=JSON.parse(String(o?.body));assert(!JSON.stringify(body).includes('ORIGINAL PRIVATE'));return response(++calls===1?'<think>ORIGINAL PRIVATE</think>First.':'<think>REVISED PRIVATE</think>Replacement.');});
+  const state=initialState();state.characters.Boris.reasoning='simulated';let b=e.create('Revise note',state);b=await e.turn(b.id,b.head,'Boris');
+  const x=new Alternatives(e),review=x.open(b.id,b.revision.state.messages[0].id).review,d=await x.propose(review.id,'Try again'),candidate=d.candidates[0];
+  assert.equal(candidate.result.text,'Replacement.');const attempt=s.attempts().find(a=>a.purpose==='alternative');assert.deepEqual(attempt.simulatedReasoning,{version:'v1'});assert.equal(attempt.outcome.generatedNote,'REVISED PRIVATE');
+  const judged=x.judge(candidate.id,{expected:null,verdict:'accepted',text:candidate.result.text}),judgment=judged.candidates[0].judgment;
+  const applied=x.apply(candidate.id,{judgment:judgment.id,expected:b.head});assert.equal(applied.revision.state.messages[0].text,'Replacement.');assert(!JSON.stringify(applied.revision.state).includes('PRIVATE'));
+});

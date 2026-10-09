@@ -18,7 +18,7 @@ export interface GenerationInput {
   assemblyVersion?: Assembly; assembly?: HistoryConfig; adapterVersion?: 'perspective-1'; origin?: { item: string; revision: string };
   // Locations: whose history this request was assembled from. Evidence only, outside model context.
   visibility?: { policy: 'audience-1'; person: string; place: string; hidden: number; visibleMessageIds: string[] };
-  messages: { role: string; content: string | ContentPart[] }[]; attachments?: unknown[]; temperature: number; reasoning?: 'default' | 'off';
+  messages: { role: string; content: string | ContentPart[] }[]; attachments?: unknown[]; temperature: number; reasoning?: 'default' | 'off' | 'simulated';
   branch?: string; revision?: string; turnId?: string; purpose?: 'alternative'; review?: string; candidate?: string;
   policy?: 'protected' | 'observe'; signal?: AbortSignal;
 }
@@ -30,6 +30,16 @@ export const ENDPOINTS = {
 // Only switches probed against the live provider; an unverified parameter is never sent silently.
 const REASONING_OFF: Partial<Record<Provider, object>> = { opengateway: { thinking: { type: 'disabled' } }, demo: {} };
 export const reasoningSwitchVerified = (provider: Provider) => provider in REASONING_OFF;
+export const SIMULATED_REASONING_V1 = "Before your message, write a brief private note to yourself between <think> and </think>: what you notice right now, what you want, and what you'll do. Nobody else sees this note. After </think>, write only your message.";
+export class NoteFormatError extends Error {
+  constructor() { super('Expected exactly one leading <think>…</think> block followed by a nonempty public reply'); this.name = 'NoteFormatError'; }
+}
+function splitGeneratedNote(full: string) {
+  const match = full.match(/^\s*<think>([\s\S]*?)<\/think>([\s\S]*)$/);
+  // After the leading block any delimiter fragment is reserved, complete or not (`<think`, `</think` at end of string included).
+  if (!match || /<\s*\/?\s*think\s*>/i.test(match[1]) || /<\s*\/?\s*think/i.test(match[2]) || !match[2].trim()) throw new NoteFormatError();
+  return { generatedNote: match[1], reply: match[2] };
+}
 export const readonlyMode = () => process.env.ROOM_READONLY === '1';
 export function defaultStore() { return new Store(process.env.ROOM_DATA_DIR || path.resolve('.room-data'), readonlyMode()); }
 export async function generate(input: GenerationInput, store = defaultStore(), transport: typeof fetch = fetch) {
@@ -41,15 +51,17 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
   if(input.adapterVersion!==undefined&&(!perspective||input.adapterVersion!=='perspective-1'))throw Error('Invalid history adapter version');
   const identity = { persona: label, personId: input.personId ?? label, labelAtDispatch: label, validationRoster: roster ?? [...LEGACY_NAMES], assemblyVersion, assembly, ...(perspective?{adapterVersion:'perspective-1'}:{}), ...(input.origin ? { origin: input.origin } : {}), ...(input.visibility ? { visibility: clone(input.visibility) } : {}) };
   if (input.provider === 'demo' && !demoEnabled()) throw Error(`${label} uses local demo, which is only available on instances started with ROOM_DEMO=1. Choose OpenGateway or Together in Characters.`);
-  if (input.reasoning === 'off' && !reasoningSwitchVerified(input.provider)) throw Error(`Turning reasoning off is not verified for ${input.provider}`);
+  const simulated = input.reasoning === 'simulated';
+  if ((input.reasoning === 'off' || simulated) && !reasoningSwitchVerified(input.provider)) throw Error(`Turning reasoning off is not verified for ${input.provider}`);
   const attempts: string[] = [];
   const messages = clone(input.messages);
   const group = input.turnId || id();
-  for (let n = 0; n < (input.policy === 'observe' ? 1 : 2); n++) {
+  for (let n = 0; n < (input.policy === 'observe' && !simulated ? 1 : 2); n++) {
     const attemptId = id(); attempts.push(attemptId);
-    const body = { model: input.model, messages: clone(messages), temperature: input.temperature, ...(input.reasoning === 'off' ? REASONING_OFF[input.provider] : {}) };
+    const body = { model: input.model, messages: clone(messages), temperature: input.temperature, ...(input.reasoning === 'off' || simulated ? REASONING_OFF[input.provider] : {}) };
     const request = { id: attemptId, at: new Date().toISOString(), turnId: group, branch: input.branch,
       revision: input.revision, ...identity, provider: input.provider, policy: input.policy || 'protected',
+      ...(simulated ? { simulatedReasoning: { version: 'v1' } } : {}),
       ...(input.purpose?{purpose:input.purpose,review:input.review,candidate:input.candidate}:{}),
       retryOf: n ? attempts[n - 1] : null, endpoint: ENDPOINTS[input.provider], body, ...(input.attachments?.length?{attachments:clone(input.attachments)}:{}) };
     if(perspective)assertPerspective(body.messages);
@@ -62,10 +74,11 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
     let notes: string[] = [];
     let transformations: string[] = [];
     let validation: string | null = null;
+    let generatedNote: string | undefined;
     try {
       input.signal?.throwIfAborted();
       if (input.provider === 'demo') {
-        raw = JSON.stringify({ choices: [{ message: { content: `[Demo · ${label}] This is a local placeholder. Choose OpenGateway or Together in Character settings to generate a real reply.` }, finish_reason: 'stop' }], demo: true });
+        raw = JSON.stringify({ choices: [{ message: { content: `${simulated ? '<think>Local placeholder note.</think>\n' : ''}[Demo · ${label}] This is a local placeholder. Choose OpenGateway or Together in Character settings to generate a real reply.` }, finish_reason: 'stop' }], demo: true });
         status = 200;
       } else {
         const key = process.env[input.provider === 'together' ? 'TOGETHER_API_KEY' : 'OPENGATEWAY_API_KEY'];
@@ -79,7 +92,12 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
         if (!response.ok) throw Error(`Provider returned HTTP ${status}; inspect the raw response.${messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==='image_url'))?' This request includes images. Check that this provider/model accepts image input; Room did not omit the images.':''}`);
       }
       parsed = JSON.parse(raw!);
-      const full = parsed.choices?.[0]?.message?.content;
+      let full = parsed.choices?.[0]?.message?.content;
+      if (typeof full !== 'string') throw Error('Provider returned no text content');
+      if (simulated) {
+        const split = splitGeneratedNote(full); generatedNote = split.generatedNote; full = split.reply;
+        transformations.push('Moved generated private note out of reply');
+      }
       if (typeof full !== 'string' || !full.trim()) throw Error('Provider returned no text content');
       const lines = full.split('\n');
       text = lines.filter(line => {
@@ -103,17 +121,20 @@ export async function generate(input: GenerationInput, store = defaultStore(), t
       if (limited !== text) transformations.push('Truncated to 2000 characters');
       text = limited;
       store.put('outcomes', attemptId, { id: attemptId, status: 'completed', httpStatus: status, raw, text, notes,
+        ...(generatedNote !== undefined ? { generatedNote } : {}),
         validation, transformations, usage: parsed.usage ?? null, finishReason: parsed.choices?.[0]?.finish_reason ?? null,
         latencyMs: Date.now() - start, at: new Date().toISOString() });
       return { text, notes, attempts, validation };
     } catch (error: any) {
-      const rejected = error instanceof WrongSpeakerError;
+      const rejected = error instanceof WrongSpeakerError || error instanceof NoteFormatError;
+      if (error instanceof NoteFormatError) validation = error.message;
       store.put('outcomes', attemptId, { id: attemptId, status: input.signal?.aborted ? 'canceled' : rejected ? 'rejected' : 'failed',
         httpStatus: status, raw, code: error.name === 'TimeoutError' ? 'timeout' : null, error: error.message || String(error), validation, transformations,
+        ...(generatedNote !== undefined ? { generatedNote } : {}),
         usage: parsed?.usage ?? null, finishReason: parsed?.choices?.[0]?.finish_reason ?? null,
         latencyMs: Date.now() - start, at: new Date().toISOString() });
       if (!rejected || n === 1) throw error;
-      const correction=`\n\nThe previous attempt used another participant's label. Write a fresh reply only as ${label}, from your own perspective.`;
+      const correction=error instanceof NoteFormatError ? '\n\nThe previous attempt had an invalid private-note format. Write a fresh reply with exactly one leading <think>…</think> block, then a nonempty public message. Do not nest or repeat either delimiter.' : `\n\nThe previous attempt used another participant's label. Write a fresh reply only as ${label}, from your own perspective.`;
       const last=messages[messages.length-1];
       if(perspective)appendContent(last,correction.slice(2));
       else if(typeof last.content==='string')last.content+=correction;else last.content.push({type:'text',text:correction});

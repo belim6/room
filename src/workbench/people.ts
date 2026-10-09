@@ -43,7 +43,7 @@ export class People {
   private person(input: any): Character {
     const c: Character = { label: validateLabel(input.label), prompt: '', situation: typeof input.situation === 'string' ? input.situation : '', memory: '',
       provider: input.provider ?? 'opengateway', model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : DEFAULT_MODEL,
-      temperature: input.temperature === undefined ? 0.7 : Number(input.temperature), ...(input.reasoning === 'off' ? { reasoning: 'off' as const } : {}) };
+      temperature: input.temperature === undefined ? 0.7 : Number(input.temperature), ...(input.reasoning !== undefined && input.reasoning !== 'default' ? { reasoning: input.reasoning } : {}) };
     if (input.persona) { const rev = this.revisionOf(input.persona, 'persona'); c.prompt = rev.content.compiled; c.origin = { item: input.persona.item, revision: input.persona.revision }; }
     else if (typeof input.prompt === 'string') c.prompt = input.prompt;
     return c;

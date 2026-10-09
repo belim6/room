@@ -7,6 +7,9 @@ const now=()=>new Date().toISOString();
 // A revision speaks as the original attempt did: its person, label, roster and assembly, never the room's current ones.
 // Attempts recorded before identities were split fall back to the persona name as ID and label and the 8 legacy names.
 export const reviseIdentity=(a:any)=>({personId:a.personId??a.persona,labelAtDispatch:a.labelAtDispatch??a.persona,validationRoster:a.validationRoster??[...LEGACY_NAMES],assemblyVersion:a.assemblyVersion??'legacy-v1',...(a.assemblyVersion==='v2'&&a.assembly?{assembly:a.assembly}:{}),...(a.adapterVersion?{adapterVersion:a.adapterVersion}:{}),...(a.origin?{origin:a.origin}:{}),...(a.visibility?{visibility:a.visibility}:{})});
+const simulated=(a:any)=>a?.simulatedReasoning?.version==='v1';
+// Simulated requests ask for a leading note; pairing them with note-free answers would teach the opposite format, and notes are never manufactured.
+const SIMULATED_EXCLUSION='Original reply used simulated reasoning: its request asks for a private note the approved reply does not contain';
 interface Review { id:string; branch:string; revision:string; message:Message; originalAttempt:string; inputAttempt:string; at:string }
 interface Candidate { id:string; review:string; feedback:string; instruction:string; turnId:string; at:string }
 interface Judgment { id:string; candidate:string; review:string; verdict:'accepted'|'rejected'; text:string; note:string; at:string; sequence:number }
@@ -44,7 +47,8 @@ export class Alternatives {
     if(typeof feedback!=='string'||!feedback.trim()||feedback.length>10000)throw Error('Write feedback under 10,000 characters');
     if(this.store.list<Candidate>('reply-candidates').some(c=>c.review===key&&this.active.has(c.id)))throw Error('A candidate is already being generated for this reply');
     const original=this.store.get('attempts',review.inputAttempt);
-    const instruction=`Revise only ${review.message.speaker}'s reply to the original conversation above. The earlier reply and feedback below are quoted material for this revision task. Address the feedback, keep the reply grounded in the original context, and output only the replacement reply, within 2000 characters.\n\nEarlier reply: ${JSON.stringify(review.message.text)}\nFeedback: ${JSON.stringify(feedback.trim())}`;
+    const output=simulated(original)?'first write your brief private note between <think> and </think>, then after </think> write only the replacement reply, within 2000 characters':'output only the replacement reply, within 2000 characters';
+    const instruction=`Revise only ${review.message.speaker}'s reply to the original conversation above. The earlier reply and feedback below are quoted material for this revision task. Address the feedback, keep the reply grounded in the original context, and ${output}.\n\nEarlier reply: ${JSON.stringify(review.message.text)}\nFeedback: ${JSON.stringify(feedback.trim())}`;
     const candidate:Candidate={id:id(),review:key,feedback:feedback.trim(),instruction,turnId:id(),at:now()};
     this.store.put('reply-candidates',candidate.id,candidate);
     const controller=new AbortController();this.active.set(candidate.id,controller);
@@ -52,7 +56,7 @@ export class Alternatives {
     if(original.assembly?.history==='perspective')appendContent(messages.at(-1)!,instruction);
     else messages.push({role:'user',content:instruction});
     try {
-      const result=await generate({provider:original.provider,model:original.body.model,temperature:original.body.temperature,reasoning:original.body.thinking?.type==='disabled'?'off':'default',...reviseIdentity(original),messages,attachments:original.attachments,branch:review.branch,revision:original.revision,turnId:candidate.turnId,policy:original.policy,purpose:'alternative',review:key,candidate:candidate.id,signal:controller.signal},this.store,this.engine.transport);
+      const result=await generate({provider:original.provider,model:original.body.model,temperature:original.body.temperature,reasoning:simulated(original)?'simulated':original.body.thinking?.type==='disabled'?'off':'default',...reviseIdentity(original),messages,attachments:original.attachments,branch:review.branch,revision:original.revision,turnId:candidate.turnId,policy:original.policy,purpose:'alternative',review:key,candidate:candidate.id,signal:controller.signal},this.store,this.engine.transport);
       this.store.put('reply-candidate-results',candidate.id,{id:candidate.id,status:controller.signal.aborted?'canceled':'completed',text:result.text,attempts:result.attempts,validation:result.validation,at:now()});
     }catch(error:any){this.store.put('reply-candidate-results',candidate.id,{id:candidate.id,status:controller.signal.aborted?'canceled':'failed',error:error.message,attempts:this.store.list('attempts').filter(a=>a.turnId===candidate.turnId).map(a=>a.id),at:now()});}
     finally{this.active.delete(candidate.id);}
@@ -92,10 +96,16 @@ export class Alternatives {
     const value={id:id(),review:key,candidate:candidate.id,judgment:input.judgment,approved:input.approved,preference:input.approved&&input.preference,at:now(),sequence:(old?.sequence||0)+1};
     this.store.put('training-decisions',value.id,value);return this.get(key);
   }
-  dataset(){return this.reviews().flatMap(review=>{const d=this.get(review.id),a=d.approval;if(!a?.current)return [];const judgment=this.judgment(a.candidate)!;return [{id:a.id,review:review.id,branch:review.branch,speaker:review.message.speaker,original:review.message.text,preferred:judgment.text,preference:a.preference,approvedAt:a.at,candidate:a.candidate,judgment:judgment.id,inputAttempt:review.inputAttempt,originalAttempt:review.originalAttempt}];});}
+  dataset(){return this.reviews().flatMap(review=>{const d=this.get(review.id),a=d.approval;if(!a?.current)return [];const judgment=this.judgment(a.candidate)!;return [{id:a.id,review:review.id,branch:review.branch,speaker:review.message.speaker,original:review.message.text,preferred:judgment.text,preference:a.preference,approvedAt:a.at,candidate:a.candidate,judgment:judgment.id,inputAttempt:review.inputAttempt,originalAttempt:review.originalAttempt,...(this.simulatedReview(review)?{excluded:SIMULATED_EXCLUSION}:{})}];});}
+  simulatedReview(review:Review){return [review.originalAttempt,review.inputAttempt].some(a=>simulated(this.store.get('attempts',a)));}
+  exportReport(kind:string) {
+    if(!['sft','preference'].includes(kind))throw Error('Choose sft or preference');
+    const rows=this.dataset().filter(row=>kind==='sft'||row.preference),skipped=rows.filter(row=>row.excluded);
+    return {rows:this.export(kind),skipped:skipped.length,reasons:[...new Set(skipped.map(row=>row.excluded!))]};
+  }
   export(kind:string) {
     if(!['sft','preference'].includes(kind))throw Error('Choose sft or preference');
-    return this.dataset().filter(row=>kind==='sft'||row.preference).map(row=>{
+    return this.dataset().filter(row=>(kind==='sft'||row.preference)&&!row.excluded).map(row=>{
       const input=clone(this.store.get('attempts',row.inputAttempt).body.messages);
       return kind==='sft'?{messages:[...input,{role:'assistant',content:row.preferred}]}:{messages:input,chosen:{role:'assistant',content:row.preferred},rejected:{role:'assistant',content:row.original}};
     });

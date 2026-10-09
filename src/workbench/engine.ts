@@ -1,5 +1,5 @@
 import { Store, clone, id } from './store';
-import { generate, reasoningSwitchVerified, DEFAULT_MODEL, type Provider } from './generation';
+import { generate, reasoningSwitchVerified, SIMULATED_REASONING_V1, DEFAULT_MODEL, type Provider } from './generation';
 import { PERSONAS, type PersonaName } from '../personas/personas';
 import { GLOBAL_SYSTEM } from '../modelRouter';
 import { buildSpeakerInput, fillFrame, EMPTY_FRAME, DEFAULT_FRAME, type Frame } from '../speakerTurn';
@@ -11,7 +11,7 @@ import { validateLocations, visibleTo, visibility, localCast, localLastSpeaker, 
 
 export interface VaultRef { item: string; revision: string }
 // Legacy rooms key characters by name with no label; v2 rooms key people by UUID and keep the label as display text.
-export interface Character { label?: string; prompt: string; situation?: string; memory: string; provider: Provider; model: string; temperature: number; reasoning?: 'default' | 'off'; origin?: VaultRef }
+export interface Character { label?: string; prompt: string; situation?: string; memory: string; provider: Provider; model: string; temperature: number; reasoning?: 'default' | 'off' | 'simulated'; origin?: VaultRef }
 // `speaker` is the label as written at the time (evidence, never rewritten); `speakerRef` is the identity.
 export interface Message { id: string; speaker: string; speakerRef?: SpeakerRef; text: string; source: 'human' | 'generated' | 'imported' | 'edited' | 'template' | 'movement' | 'narration'; turnId?: string; checkpoint?: string; editedFrom?: string[]; attachments?: string[]; review?: string;
   audience?: Audience; movement?: Movement }
@@ -51,9 +51,9 @@ export function validateState(s: State, previous?: State | null) {
   if (typeof s.shadow !== 'boolean' || !['protected','observe'].includes(s.policy)) throw Error('Invalid observation settings');
   for (const key of ids) {
     const c = s.characters[key], name = c && typeof c.label === 'string' ? c.label : key;
-    if (!c || typeof c.prompt !== 'string' || typeof c.memory !== 'string' || !['together','opengateway','demo'].includes(c.provider) || typeof c.model !== 'string' || !c.model.trim() || c.model.length > 200 || !Number.isFinite(c.temperature) || c.temperature < 0 || c.temperature > 2 || (c.reasoning !== undefined && !['default','off'].includes(c.reasoning))
+    if (!c || typeof c.prompt !== 'string' || typeof c.memory !== 'string' || !['together','opengateway','demo'].includes(c.provider) || typeof c.model !== 'string' || !c.model.trim() || c.model.length > 200 || !Number.isFinite(c.temperature) || c.temperature < 0 || c.temperature > 2 || (c.reasoning !== undefined && !['default','off','simulated'].includes(c.reasoning))
       || (c.label !== undefined && typeof c.label !== 'string') || (c.situation !== undefined && (typeof c.situation !== 'string' || c.situation.length > 20000)) || (c.origin !== undefined && !isRef(c.origin))) throw Error(`Invalid character settings: ${name}`);
-    if (c.reasoning === 'off' && !reasoningSwitchVerified(c.provider)) throw Error(`${name}: turning reasoning off is not verified for ${c.provider}`);
+    if ((c.reasoning === 'off' || c.reasoning === 'simulated') && !reasoningSwitchVerified(c.provider)) throw Error(`${name}: turning reasoning off is not verified for ${c.provider}`);
   }
   if (v2) {
     const humanChanged = !previous || previous.human !== s.human, key = new Map(ids.map(k => [k, labelKey(labelOf(s,k))]));
@@ -98,8 +98,10 @@ export function assemble(store: Store, s: State, speaker: string, images = true)
   const system = v2 ? [c.prompt, c.situation || '', s.system, c.memory ? `Your retained memory:\n${c.memory}` : '', fill(f!.identity)].filter(x => x.trim()).join('\n\n')
     : f ? [c.prompt, s.system, c.memory ? `Your retained memory:\n${c.memory}` : '', fill(f.identity)].filter(x => x.trim()).join('\n\n')
     : `${c.prompt}\n\n${s.system}\n\n${c.memory ? `Your retained memory:\n${c.memory}\n\n` : ''}Your identity for this request is ${speaker}. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters.`;
-  const user = f ? [fill(transcript.trim() ? f.context : f.opening), fill(f.turn)].filter(x => x.trim()).join('\n\n')
-    : buildSpeakerInput(speaker as PersonaName, transcript, s.participants as PersonaName[], human);
+  const noteInstruction = c.reasoning === 'simulated' ? SIMULATED_REASONING_V1 : '';
+  const turn = [fill(f?.turn ?? DEFAULT_FRAME.turn), noteInstruction].filter(x => x.trim()).join('\n\n');
+  const user = f ? [fill(transcript.trim() ? f.context : f.opening), turn].filter(x => x.trim()).join('\n\n')
+    : [buildSpeakerInput(speaker as PersonaName, transcript, s.participants as PersonaName[], human), noteInstruction].filter(x => x.trim()).join('\n\n');
   const messages:RequestMessage[]=[...(system.trim()?[{role:'system',content:system}]:[])];
   if(perspective) {
     const provenance=generationProvenance(store);
@@ -116,7 +118,7 @@ export function assemble(store: Store, s: State, speaker: string, images = true)
       if(messages.at(-1)?.role===role)appendContent(messages.at(-1)!,content);else messages.push({role,content});
     });
     if(!history.length)messages.push({role:'user',content:DEFAULT_FRAME.opening});
-    if(messages.at(-1)?.role==='user')appendContent(messages.at(-1)!,fill(DEFAULT_FRAME.turn));else messages.push({role:'user',content:fill(DEFAULT_FRAME.turn)});
+    if(messages.at(-1)?.role==='user')appendContent(messages.at(-1)!,turn);else messages.push({role:'user',content:turn});
     assertPerspective(messages);
   } else messages.push({role:'user',content:context.parts.length?[{type:'text',text:user},...context.parts]:user});
   return { system, user, context, label, v2, messages, assembly, ...(perspective?{adapterVersion:'perspective-1' as const}:{}), ...(L ? { visibility: visibility(s, speaker) } : {}) };

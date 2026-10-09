@@ -162,7 +162,7 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.post('/api/reviews/:id/training',route((req,res)=>res.json(alternatives.curate(req.params.id,req.body))));
   app.get('/api/dataset',route((_req,res)=>res.json(alternatives.dataset())));
   app.get('/api/dataset/:kind',route((req,res)=>{
-    const rows=alternatives.export(req.params.kind);res.attachment('room-'+req.params.kind+'.jsonl').type('application/x-ndjson').send(rows.map(row=>JSON.stringify(row)).join('\n')+(rows.length?'\n':''));
+    const {rows,skipped,reasons}=alternatives.exportReport(req.params.kind);res.set('X-Room-Export-Skipped',String(skipped));if(skipped)res.set('X-Room-Export-Skipped-Reason',reasons.join('; '));res.attachment('room-'+req.params.kind+'.jsonl').type('application/x-ndjson').send(rows.map(row=>JSON.stringify(row)).join('\n')+(rows.length?'\n':''));
   }));
   app.post('/api/branches/:id/trash', route((req,res) => res.json(engine.trash(req.params.id,req.body.expected))));
   app.post('/api/trash/:id/restore', route((req,res) => res.json(engine.restore(req.params.id))));
