@@ -1127,9 +1127,10 @@ test('client run driver continues until the server ends the run; polling backs o
   // The real client scheduler: a failed refresh leaves a retry timer behind.
   const {runInNewContext}=require('node:vm');const src=fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8');
   const fn=src.slice(src.indexOf('function scheduleRunPoll'),src.indexOf('addEventListener(\'focus\''));
-  const timers:any[]=[];const ctx:any={RoomRuns:R,records:new Map([['a',rec('a',{id:'r'})]]),runs:new Map(),comparison:null,current:'a',runPollTimer:null,clearTimeout(){},setTimeout(f:any,ms:number){timers.push({f,ms});return timers.length;},refresh:()=>Promise.reject(Error('offline'))};
+  const timers:any[]=[];const ctx:any={RoomRuns:R,live:{connected:false},records:new Map([['a',rec('a',{id:'r'})]]),runs:new Map(),comparison:null,current:'a',runPollTimer:null,clearTimeout(){},setTimeout(f:any,ms:number){timers.push({f,ms});return timers.length;},refresh:()=>Promise.reject(Error('offline'))};
   runInNewContext(fn+';scheduleRunPoll();',ctx);assert.equal(timers.length,1);timers[0].f();await tick();
   assert.equal(timers.length,2,'a failed poll reschedules');assert.equal(timers[1].ms,4000);
+  ctx.live.connected=true;runInNewContext('scheduleRunPoll();',ctx);assert.equal(timers.length,2,'live notices replace polling while connected');
 });
 
 import { assemble, validateState } from '../src/workbench/engine';
@@ -1810,4 +1811,97 @@ test('simulated Revise preserves parsing and provenance without carrying the pre
   assert.equal(candidate.result.text,'Replacement.');const attempt=s.attempts().find(a=>a.purpose==='alternative');assert.deepEqual(attempt.simulatedReasoning,{version:'v1'});assert.equal(attempt.outcome.generatedNote,'REVISED PRIVATE');
   const judged=x.judge(candidate.id,{expected:null,verdict:'accepted',text:candidate.result.text}),judgment=judged.candidates[0].judgment;
   const applied=x.apply(candidate.id,{judgment:judgment.id,expected:b.head});assert.equal(applied.revision.state.messages[0].text,'Replacement.');assert(!JSON.stringify(applied.revision.state).includes('PRIVATE'));
+});
+import { noticeOf } from '../src/workbench/events';
+test('live events: a notice per evidence write, IDs only, no content, cleanup on disconnect, served read-only',async()=>{
+  const e=new Engine(store()),{app,base,close}=await listen(e),secret='SECRET-LIVE-TEXT-4711';
+  const abort=new AbortController(),r=await fetch(base+'/api/events',{signal:abort.signal});
+  assert.equal(r.status,200);assert.match(r.headers.get('content-type')!,/text\/event-stream/);
+  let text='';const reader=r.body!.getReader(),decoder=new TextDecoder();
+  const reading=(async()=>{try{for(;;){const {done,value}=await reader.read();if(done)break;text+=decoder.decode(value);}}catch{}})();
+  const notices=()=>text.split('\n').filter(l=>l.startsWith('data: ')).map(l=>JSON.parse(l.slice(6)));
+  try {
+    assert.equal(e.store.subscribers,1);
+    let b=e.create('Live');b=(await (await fetch(base+'/api/branches/'+b.id+'/messages',json({expected:b.head,text:secret}))).json()) as any;
+    b=(await (await fetch(base+'/api/branches/'+b.id+'/turn',json({expected:b.head,speaker:'Boris'}))).json()) as any;
+    const run:any=await (await fetch(base+'/api/branches/'+b.id+'/runs',json({expected:b.head,maxTurns:1,policy:{kind:'random'}}))).json();
+    await fetch(base+'/api/runs/'+run.id+'/turns',json({index:1}));
+    e.store.put('jev-requests','jev-live',{id:'jev-live',branch:b.id,prompt:secret});e.store.put('jev-results','jev-live',{id:'jev-live',raw:secret,status:'completed'});
+    const input=design(e),exp:any=await (await fetch(base+'/api/experiments',json(input))).json();
+    await fetch(base+'/api/experiments/'+exp.id+'/run',json({perCondition:1,expected:exp.version}));await app.locals.experiments.active.get(exp.id)?.done;
+    const head=e.read(b.id).head;await fetch(base+'/api/branches/'+b.id+'/trash',json({expected:head}));
+    await new Promise(res=>setTimeout(res,50));
+    const all=notices(),kinds=new Set(all.map(n=>n.kind));
+    for(const k of ['revisions','turns','attempts','outcomes','selections','runs','experiment-trials','experiment-trial-events','jev-requests','jev-results','branches','trash'])assert(kinds.has(k),'notice for '+k);
+    for(const n of all){assert(Object.keys(n).every(k=>['kind','id','branch','experiment','at'].includes(k)),JSON.stringify(n));assert.equal(typeof n.id,'string');}
+    assert(!text.includes(secret)&&!text.includes('Mock reply'),'notices never carry record content');
+    const attempt=e.store.list('attempts').find(a=>a.branch===b.id)!;
+    assert.equal(all.find(n=>n.kind==='outcomes'&&n.id===attempt.id)?.branch,b.id,'outcome notices name the attempt branch');
+    assert.equal(all.find(n=>n.kind==='jev-results')?.branch,b.id);
+    assert(all.some(n=>n.kind==='experiment-trial-events'&&n.experiment===exp.id&&n.branch));
+    assert(all.some(n=>n.kind==='trash'&&n.branch===b.id));
+  } finally { abort.abort();await reading; }
+  for(let i=0;i<50&&e.store.subscribers;i++)await new Promise(res=>setTimeout(res,10));
+  assert.equal(e.store.subscribers,0,'the store subscription ends with the last connection');assert.equal(app.locals.live.clients.size,0);
+  await close();
+  const ro=new Store(fs.mkdtempSync(path.join(os.tmpdir(),'room-tests-')),true);roots.push(ro.root);
+  const second=await listen(new Engine(ro)),stream=new AbortController(),res=await fetch(second.base+'/api/events',{signal:stream.signal});
+  assert.equal(res.status,200);stream.abort();await res.body?.cancel().catch(()=>{});await second.close();
+  // Outcome notices read the attempt when its write was not seen; unknown requests get no branch.
+  const s=store();s.put('attempts','a1',{id:'a1',branch:'b1',body:{messages:[{content:secret}]}});
+  assert.deepEqual(Object.keys(noticeOf(s,'outcomes','a1',{id:'a1',text:secret})).sort(),['at','branch','id','kind']);
+  assert.equal(noticeOf(s,'outcomes','missing',{id:'missing'}).branch,undefined);
+  assert.equal(noticeOf(s,'turns','t',{branch:'not an id <x>'}).branch,undefined);
+});
+test('live client: flushes are serialized with a max wait, stale experiment loads never render, hidden tabs drop the stream',async()=>{
+  const {runInNewContext}=require('node:vm'),src=fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8');
+  const slice=(from:string,to:string)=>src.slice(src.indexOf(from),src.indexOf(to));
+  let now=1;const timers:any[]=[];const deferred=()=>{let resolve:any;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
+  const loads:any[]=[];
+  const ctx:any={live:{debounce:null,first:0,flushing:false,pending:new Set()},Date:{now:()=>now},setTimeout(f:any,ms:number){timers.push({f,ms});return timers.length;},clearTimeout(){},
+    $:()=>({open:false}),boot:{},vaultPage:null,experimentPage:{experiment:{id:'x'}},liveTarget:()=>'experiment',reloadExperiment(){const d=deferred();loads.push(d);return d.promise;}};
+  runInNewContext(slice('function scheduleFlush','// Hidden tabs'),ctx);
+  ctx.queueLive({});assert.equal(timers.at(-1).ms,300);now=1001;ctx.queueLive({});assert.equal(timers.at(-1).ms,200,'continuous notices still flush by 1.2 s');
+  now=1301;ctx.queueLive({});assert.equal(timers.at(-1).ms,0);
+  const first=ctx.flushLive();assert.equal(loads.length,1);
+  ctx.queueLive({});await ctx.flushLive();assert.equal(loads.length,1,'no second load while one is in flight');
+  const before=timers.length;loads[0].resolve();await first;assert.equal(timers.length,before+1,'pending notices flush after the in-flight one');
+  timers.at(-1).f();assert.equal(loads.length,2);loads[1].resolve();
+  // reloadExperiment renders only its latest call, whatever order responses arrive in.
+  const ex=fs.readFileSync(path.join(__dirname,'../web/experiments.js'),'utf8'),calls:any[]=[],rendered:any[]=[];
+  const ectx:any={experimentPage:{experiment:{id:'x'}},boot:{},render(){rendered.push(ectx.experimentPage.tag);},api(url:string){const d=deferred();calls.push({url,d});return d.promise;}};
+  runInNewContext(ex.slice(ex.indexOf('let experimentLoad'),ex.indexOf('async function editExperimentDesign')),ectx);
+  const older=ectx.reloadExperiment('x');await tick();const newer=ectx.reloadExperiment('x');await tick();
+  calls[1].d.resolve({experiment:{id:'x'},tag:'new'});await tick();calls[2].d.resolve([]);await newer;
+  calls[0].d.resolve({experiment:{id:'x'},tag:'old'});await tick();calls[3].d.resolve([]);await older;
+  assert.deepEqual(rendered,['new']);
+  // Hidden: the EventSource is closed and nothing reconnects; visible: reconnect (which resyncs on open).
+  const handlers:any={};let closed=0,connects=0;
+  const vctx:any={live:{source:{close(){closed++;}},connected:true,failures:4},document:{hidden:false,addEventListener(t:string,f:any){handlers[t]=f;}},clearTimeout(){},liveStatus(){},connectLive(){connects++;}};
+  runInNewContext(slice('function pauseLive','connectLive();addEventListener'),vctx);
+  vctx.document.hidden=true;handlers.visibilitychange();assert.equal(closed,1);assert.equal(vctx.live.source,null);assert.equal(vctx.live.connected,false);assert.equal(connects,0);
+  vctx.document.hidden=false;handlers.visibilitychange();assert.equal(connects,1);assert.equal(vctx.live.failures,0);
+});
+import { liveEvents } from '../src/workbench/events';
+test('live events: one failing client does not stop delivery to the others',()=>{
+  const s=store(),hub=liveEvents(s),got:any[]=[];let close:any;
+  hub.handler({} as any,{writeHead(){},write(){},on(_e:string,f:any){close=f;}} as any);
+  hub.clients.add(()=>{throw Error('gone');});hub.clients.add(n=>got.push(n));
+  s.put('turns','t1',{id:'t1',branch:'b1'});assert.equal(got.length,1);assert.equal(got[0].branch,'b1');
+  close();assert.equal(s.subscribers,1,'other clients keep the subscription');
+});
+test('live client: a failed refresh after the last notice retries with backoff until it succeeds, on the view open by then',async()=>{
+  const {runInNewContext}=require('node:vm'),src=fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8');
+  const timers:any[]=[];let refreshes=0,shown='stale';const reloads:string[]=[];
+  const ctx:any={live:{debounce:null,first:0,flushing:false,failed:0,pending:new Set()},Date,setTimeout(f:any,ms:number){timers.push({f,ms});return timers.length;},clearTimeout(){},
+    $:()=>({open:false}),boot:{},vaultPage:null,experimentPage:null,liveTarget:()=>'view',
+    refresh:async()=>{if(++refreshes<3)throw Error('offline');shown='fresh';},reloadExperiment:async(key:string)=>{reloads.push(key);}};
+  runInNewContext(src.slice(src.indexOf('function scheduleFlush'),src.indexOf('// Hidden tabs')),ctx);
+  ctx.queueLive({kind:'turns'});await timers.at(-1).f();
+  assert.equal(shown,'stale');assert.equal(timers.at(-1).ms,1000,'the failed batch is retried without any further notice');
+  await timers.at(-1).f();assert.equal(timers.at(-1).ms,2000,'backoff grows');
+  const count=timers.length;await timers.at(-1).f();assert.equal(shown,'fresh');assert.equal(timers.length,count,'no retry after success');assert.equal(ctx.live.failed,0);
+  // A retry targets whatever is open then: here the user navigated to an experiment.
+  refreshes=0;ctx.queueLive({kind:'turns'});await timers.at(-1).f();ctx.experimentPage={experiment:{id:'y'}};await timers.at(-1).f();assert.deepEqual(reloads,['y']);
+  ctx.experimentPage=null;ctx.refresh=async()=>{throw Error('offline');};ctx.live.failed=9;ctx.queueLive({kind:'turns'});await timers.at(-1).f();assert.equal(timers.at(-1).ms,15000,'backoff is capped');
 });

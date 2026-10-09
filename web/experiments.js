@@ -2,7 +2,7 @@ let experimentPage=null,experimentTimer,experimentFilter={condition:'',tag:'',mi
 function leaveExperiment(){experimentPage=null;clearTimeout(experimentTimer);localStorage.removeItem('room-experiment');document.querySelector('.workspace').classList.remove('experiment-mode');$('#experiment-page').hidden=true;}
 async function openExperiment(key){
   leaveVault();clearTimeout(experimentTimer);rememberInputs();comparison=null;localStorage.removeItem('room-comparison');
-  experimentPage=await api('/experiments/'+key);category='experiments';localStorage.setItem('room-experiment',key);render();
+  const v=++experimentLoad,d=await api('/experiments/'+key);if(v!==experimentLoad)return;experimentPage=d;category='experiments';localStorage.setItem('room-experiment',key);render();
 }
 function experimentLibrary(){
   const open=experimentPage?familyTree('experiment',experimentPage.experiment.id)[0]?.item.id:null;
@@ -53,9 +53,11 @@ function renderExperiment(){
   $('#attach-experiment').onclick=action(async()=>{const branches=boot.branches.filter(b=>b.fork===e.base.revision&&!b.comparison);const f=await dialog('Attach a recorded trial',`<p class="muted">No model calls. The measured request must match this condition and the frozen checkpoint. Attached trials are marked retrospective.</p><label>Condition<select name="condition">${e.conditions.map(c=>`<option value="${esc(c.key)}">${esc(c.label)}</option>`).join('')}</select></label><label>Branch<select name="branch">${branches.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join('')}</select></label>`,'Attach trial');if(f){await api('/experiments/'+e.id+'/attach',{condition:f.get('condition'),branch:f.get('branch')});await reloadExperiment(e.id);}});
   page.querySelectorAll('[data-label-trial]').forEach(b=>b.onclick=action(async()=>{const t=d.trials.find(t=>t.id===b.dataset.labelTrial);const f=await dialog('Label measured outcome',`<p>Extracted value: ${esc(t.extracted||'none')}. It will remain in the record.</p><label>Outcome<input name="outcome" required value="${esc(t.effectiveOutcome)}"></label><label>Tag (optional)<input name="tag" value="${esc(t.tag)}"></label><label>Note<textarea name="note">${esc(t.manual?.note||'')}</textarea></label>`);if(f){await api('/experiments/'+e.id+'/labels',{trial:t.id,...Object.fromEntries(f)});await reloadExperiment(e.id);}}));
   for(const kind of ['open','inspect'])page.querySelectorAll(`[data-${kind}-trial]`).forEach(b=>b.onclick=action(async()=>{const t=d.trials.find(t=>t.id===b.dataset[kind+'Trial']);await choose(t.branch);if(kind==='inspect')focusPane(t.branch,'inspect',t.messageId);}));
-  clearTimeout(experimentTimer);if(d.active)experimentTimer=setTimeout(()=>{reloadExperiment(e.id).catch(error);},1200);
+  clearTimeout(experimentTimer);if(d.active&&!live.connected)experimentTimer=setTimeout(()=>{reloadExperiment(e.id).catch(error);},1200);
 }
-async function reloadExperiment(key){const d=await api('/experiments/'+key);if(experimentPage?.experiment.id!==key)return;experimentPage=d;boot.experiments=await api('/experiments');render();}
+// Only the latest load renders, so a slow older response never replaces a newer snapshot.
+let experimentLoad=0;
+async function reloadExperiment(key){const v=++experimentLoad,d=await api('/experiments/'+key),list=await api('/experiments');if(v!==experimentLoad||experimentPage?.experiment.id!==key)return;experimentPage=d;boot.experiments=list;render();}
 async function editExperimentDesign(existing=null){
   if(!boot.branches.length)throw Error('Create a conversation to use as the starting point first');
   const selectedBranch=existing?.base.branch||(current&&!boot.branches.find(b=>b.id===current)?.comparison?current:null)||boot.branches.find(b=>!b.comparison)?.id;

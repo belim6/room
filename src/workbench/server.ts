@@ -17,6 +17,7 @@ import { Runs, statusOf } from './runs';
 import { assemblyOf, resolvedMap, resolveSpeaker, validRef, labelFor, validateLabel, generationProvenance, labelOf } from './identity';
 import { EMPTY_FRAME, DEFAULT_FRAME } from '../speakerTurn';
 import { visibility, scopeTag, stamp, knownPlace, placeName, whoLabel, HUMAN } from './locations';
+import { liveEvents } from './events';
 
 function runInfo(run: any) {
   if (run == null) return undefined;
@@ -92,6 +93,9 @@ export function createApp(engine = new Engine(defaultStore())) {
       shadow: store.list('jev-requests').filter(r => !done.has(r.id)).map(r => r.id), quiesced: !!app.locals.quiesced, readOnly: store.readOnly };
     return { ...value, busy: !!(value.turns.length || value.experiments.length || value.candidates.length || value.shadow.length) };
   };
+  // Read-only stream of write notices (IDs only); a read-only instance serves it but has nothing to announce.
+  const live = liveEvents(store); app.locals.live = live;
+  app.get('/api/events', live.handler);
   app.get('/api/admin/activity', route((_req,res) => res.json(activity())));
   app.post('/api/admin/quiesce', route((req,res) => { if (typeof req.body.on !== 'boolean') throw Error('Choose on or off'); app.locals.quiesced = req.body.on; res.json(activity()); }));
   app.get('/api/bootstrap', route((_req,res) => {

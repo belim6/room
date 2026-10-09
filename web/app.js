@@ -177,7 +177,28 @@ function controlsHtml(key){
   return `${empty?'<p class="notice">Nobody is in this room yet. Use <button type="button" class="link-button" data-add-person-now="'+key+'">Add person</button> in Characters to begin.</p>':''}${viewHtml(key)}<div class="turn-controls">${s.locations?placeControlsHtml(key):''}<label>Next voice <select data-speaker><option value="">${place==='rotate'?'Random in each place':'Random participant'}</option>${voices.map(p=>`<option value="${esc(p)}" ${p===d.speaker?'selected':''}>${esc(labelOf(s,p))}</option>`).join('')}</select></label><label>Turns <input data-count type="number" value="${esc(d.count||1)}" min="1" max="20"></label>${pair?`<label title="Each turn goes to whichever of the two didn't speak last"><input data-alternate type="checkbox" ${(d.alternate??s.flow==='alternate')?'checked':''} style="width:auto"> Back-and-forth</label>`:''}<button data-generate="${key}" class="primary" ${busy||empty?'disabled':''}>Continue ↗</button><button data-stop="${key}" ${generating?'':'hidden'}>Stop</button>${s.locations?placeActionsHtml(key):''}<span class="muted" role="status">${esc(status)}</span></div>${speakingInHtml(key)}${attachmentComposer(key)}<form data-compose="${key}"><textarea data-text aria-label="Your message" rows="2" placeholder="Say something to this conversation…" ${messageSends.has(key)?'disabled':''}>${esc(d.text||'')}</textarea><button class="primary" type="submit" ${attachmentBusy(key)?'disabled':''} title="You can speak during a run; the run continues after your message">Send</button></form>`;
 }
 function changesBadge(key){const c=records.get(key)?.changes;if(!c?.fork)return '';const all=RoomChanges.badges(c.changes);return `<button class="changes-badge" data-changes="${key}" title="View changes since fork">${esc(all.slice(0,3).join(' · ')||'No changes since fork')}${all.length>3?' · +'+(all.length-3)+' more':''}</button>`;}
-function render(){
+// Re-rendering replaces the view's DOM; keep focus, caret, scroll (following the bottom) and open details so background refreshes stay unobtrusive.
+function focusSelector(el){
+  if(el.id)return '#'+CSS.escape(el.id);
+  const owner=el.closest('[data-controls]'),attr=['data-text','data-speaker','data-count','data-place','data-alternate'].find(a=>el.hasAttribute(a));
+  return owner&&attr?`[data-controls="${CSS.escape(owner.dataset.controls)}"] [${attr}]`:null;
+}
+function capturePlace(){
+  const a=document.activeElement,view=JSON.stringify(viewOf()),panel=$('#panel').dataset.key+':'+selected;
+  const focus=a&&a!==document.body&&a.matches('input,textarea,select')&&!a.closest('dialog')?{sel:focusSelector(a),start:a.selectionStart,end:a.selectionEnd,top:a.scrollTop}:null;
+  const scroll=['#messages','.inspector',...[...document.querySelectorAll('[data-pane]')].map(p=>`[data-pane="${CSS.escape(p.dataset.pane)}"] .pane-messages`)].map(sel=>{const el=document.querySelector(sel);return el&&{sel,top:el.scrollTop,bottom:sel!=='.inspector'&&el.scrollHeight-el.scrollTop-el.clientHeight<40};}).filter(Boolean);
+  const details=new Map([...document.querySelectorAll('#panel details > summary')].map(s=>[s.textContent,s.parentElement.open]));
+  return {view,panel,focus,scroll,details};
+}
+function restorePlace(p){
+  if(p.view!==JSON.stringify(viewOf()))return;
+  for(const s of p.scroll){const el=document.querySelector(s.sel);if(el)el.scrollTop=s.bottom?el.scrollHeight:s.top;}
+  if(p.panel===$('#panel').dataset.key+':'+selected)for(const s of document.querySelectorAll('#panel details > summary'))if(p.details.has(s.textContent))s.parentElement.open=p.details.get(s.textContent);
+  const a=document.activeElement;
+  if(p.focus?.sel&&(!a||a===document.body)){const el=document.querySelector(p.focus.sel);if(el&&!el.disabled){el.focus({preventScroll:true});try{if(p.focus.start!=null)el.setSelectionRange(p.focus.start,p.focus.end);}catch{}el.scrollTop=p.focus.top;}}
+}
+function render(){const place=capturePlace();try{renderView();}finally{restorePlace(place);}}
+function renderView(){
   clearTimeout(jevTimer);++jevPollVersion;
   rememberInputs();renderLibrary();$('#connection').textContent=`OpenGateway ${boot.keys.opengateway?'● ready':'○ no key'} · Together ${boot.keys.together?'● ready':'○ no key'}`;
   trackView();
@@ -246,10 +267,65 @@ function bindControls(){
 let runPollTimer=null;
 // A failed refresh reschedules itself with backoff; a successful one re-renders, which reschedules from zero.
 function scheduleRunPoll(failures=0){
-  clearTimeout(runPollTimer);const visible=(comparison?[comparison.left,comparison.right]:current?[current]:[]).map(k=>records.get(k));
+  clearTimeout(runPollTimer);if(live.connected)return;const visible=(comparison?[comparison.left,comparison.right]:current?[current]:[]).map(k=>records.get(k));
   if(RoomRuns.shouldPoll(visible,k=>runs.has(k)))runPollTimer=setTimeout(()=>{refresh().catch(()=>scheduleRunPoll(failures+1));},RoomRuns.pollDelay(failures));
 }
-addEventListener('focus',()=>{if(boot)refresh().catch(()=>{});});addEventListener('online',()=>{if(boot)refresh().catch(()=>{});});
+addEventListener('focus',()=>{if(boot)refresh().catch(()=>{});});
+// Live notices carry IDs only; a notice touching what is on screen triggers the usual refresh, debounced.
+// While disconnected, the run and experiment polls above take over; reconnects back off up to 30 s.
+const live={source:null,connected:false,ever:false,failures:0,retry:null,debounce:null,first:0,flushing:false,failed:0,pending:new Set()};
+function liveStatus(text){const el=$('#live');el.textContent=text;el.classList.toggle('on',live.connected);}
+function connectLive(){
+  if(typeof EventSource==='undefined')return liveStatus('Live updates unavailable · refresh to update');
+  if(document.hidden)return pauseLive();if(live.source)return;
+  const source=live.source=new EventSource('/api/events');
+  source.onopen=()=>{live.connected=true;live.ever=true;live.failures=0;liveStatus('Live');clearTimeout(runPollTimer);clearTimeout(experimentTimer);if(boot)queueLive({kind:'resync'});};
+  source.onmessage=ev=>{try{queueLive(JSON.parse(ev.data));}catch{}};
+  source.onerror=()=>{
+    source.close();if(live.source!==source)return;live.source=null;
+    const was=live.connected;live.connected=false;liveStatus(live.ever?'Reconnecting…':'Connecting…');
+    if(was&&boot&&!vaultPage){scheduleRunPoll();if(experimentPage?.active){clearTimeout(experimentTimer);const key=experimentPage.experiment.id;experimentTimer=setTimeout(()=>reloadExperiment(key).catch(()=>{}),1200);}}
+    clearTimeout(live.retry);live.retry=setTimeout(connectLive,Math.min(30000,1000*2**live.failures++));
+  };
+}
+const LIBRARY_KINDS=['branches','comparisons','experiments','experiment-revisions','experiment-locks','experiment-links'];
+function liveTarget(n){
+  if(vaultPage)return null;
+  if(n.kind==='resync'||n.kind==='trash')return 'view';
+  if(experimentPage){if(n.experiment===experimentPage.experiment.id||(n.branch&&experimentPage.trials.some(t=>t.branch===n.branch)))return 'experiment';}
+  else if(n.branch&&(comparison?[comparison.left,comparison.right]:[current]).includes(n.branch))return 'view';
+  if(n.kind==='reactions'){marked.stale=true;return category==='favorites'||category==='dislikes'?'library':null;}
+  return LIBRARY_KINDS.includes(n.kind)?'library':null;
+}
+// Debounced 300 ms, but a steady stream of notices still renders at least every 1.2 s.
+function scheduleFlush(){live.first||=Date.now();clearTimeout(live.debounce);live.debounce=setTimeout(flushLive,Math.max(0,Math.min(300,live.first+1200-Date.now())));}
+function queueLive(n){const t=liveTarget(n);if(!t)return;live.pending.add(t);scheduleFlush();}
+// One flush at a time, so an older snapshot never renders over a newer one; notices that arrive meanwhile flush afterwards.
+async function flushLive(){
+  if(live.flushing)return;
+  // An open dialog was filled from the current state; refresh once it closes.
+  if($('#dialog').open){$('#dialog').addEventListener('close',()=>{live.first=0;scheduleFlush();},{once:true});return;}
+  live.first=0;const p=live.pending;live.pending=new Set();if(!p.size||!boot||vaultPage)return;
+  live.flushing=true;
+  try{
+    if(experimentPage&&(p.has('experiment')||p.has('view')))await reloadExperiment(experimentPage.experiment.id);
+    else if(!experimentPage&&p.has('view'))await refresh();
+    else{const next=await api('/bootstrap');if(!live.pending.size){boot=next;renderLibrary();}}
+    live.failed=0;
+  }catch{
+    // A failed fetch stays owed: resync whatever view is open then, backing off 1 s, 2 s, … up to 15 s until one succeeds.
+    live.pending.add('view');live.failed=(live.failed||0)+1;
+  }
+  finally{
+    live.flushing=false;
+    if(live.failed&&live.pending.has('view')){clearTimeout(live.debounce);live.debounce=setTimeout(flushLive,Math.min(15000,1000*2**(live.failed-1)));}
+    else if(live.pending.size)scheduleFlush();
+  }
+}
+// Hidden tabs hold no connection (browsers allow about six per host); showing the tab reconnects and resyncs.
+function pauseLive(){clearTimeout(live.retry);live.source?.close();live.source=null;live.connected=false;liveStatus('Paused while hidden');}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseLive();else{live.failures=0;connectLive();}});
+connectLive();addEventListener('online',()=>{if(boot)refresh().catch(()=>{});});
 function scrollMessages(key){const pane=document.querySelector(`[data-pane="${key}"] .pane-messages`);const el=pane||(!comparison&&key===current?$('#messages'):null);if(el)el.scrollTop=el.scrollHeight;}
 async function runTurns(key){
   if(isBusy(key)||attachmentBusy(key))return;rememberInputs();const rec=records.get(key),s=rec.branch.revision.state,d=drafts.get(key)||{},count=Number(d.count||1),place=s.locations?chosenPlace(key):undefined,voices=!s.locations?s.participants:place==='rotate'?[]:localCastOf(s,place),speaker=voices.includes(d.speaker)?d.speaker:'',alternate=!!(d.alternate??s.flow==='alternate')&&(s.locations?place==='rotate'||voices.length===2:s.participants.length===2);

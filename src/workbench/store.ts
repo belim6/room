@@ -3,7 +3,12 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 export const id = () => randomUUID();
 export const clone = <T>(value: T): T => structuredClone(value);
+export type Write = (kind: string, key: string, value: any) => void;
 export class Store {
+  private listeners = new Set<Write>();
+  // Called after each durable write; a listener failure never fails the write.
+  subscribe(fn: Write) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
+  get subscribers() { return this.listeners.size; }
   // Read-only instances (ROOM_READONLY=1, restore verification) refuse every write instead of creating files.
   constructor(public root: string, public readOnly = false) { if (!readOnly) fs.mkdirSync(root, { recursive: true, mode: 0o700 }); }
   file(kind: string, key: string) {
@@ -18,6 +23,7 @@ export class Store {
     const fd = fs.openSync(temp, 'wx', 0o600);
     try { fs.writeFileSync(fd, JSON.stringify(value, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(temp, target);
+    for (const fn of this.listeners) try { fn(kind, key, value); } catch {}
   }
   add(kind: string, value: any) { const key = value.id || id(); this.put(kind, key, { ...value, id: key }); return key; }
   get<T = any>(kind: string, key: string): T { return JSON.parse(fs.readFileSync(this.file(kind, key), 'utf8')); }
