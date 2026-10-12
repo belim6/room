@@ -1905,3 +1905,24 @@ test('live client: a failed refresh after the last notice retries with backoff u
   refreshes=0;ctx.queueLive({kind:'turns'});await timers.at(-1).f();ctx.experimentPage={experiment:{id:'y'}};await timers.at(-1).f();assert.deepEqual(reloads,['y']);
   ctx.experimentPage=null;ctx.refresh=async()=>{throw Error('offline');};ctx.live.failed=9;ctx.queueLive({kind:'turns'});await timers.at(-1).f();assert.equal(timers.at(-1).ms,15000,'backoff is capped');
 });
+
+test('store cached reads preserve isolation and observe atomic writes from another store',()=>{
+  const a=store(),b=new Store(a.root);a.put('cache-test','one',{id:'one',nested:{text:'first'}});
+  const read=a.get('cache-test','one');read.nested.text='mutated';assert.equal(a.get('cache-test','one').nested.text,'first');
+  a.list('cache-test')[0].nested.text='also mutated';assert.equal(a.get('cache-test','one').nested.text,'first');
+  b.put('cache-test','one',{id:'one',nested:{text:'second'}});b.put('cache-test','two',{id:'two'});
+  assert.equal(a.get('cache-test','one').nested.text,'second');assert.equal(a.list('cache-test').length,2);
+  const selected=a.select('cache-test',r=>r.id==='one');assert.equal(selected.length,1);selected[0].nested.text='changed';assert.equal(a.get('cache-test','one').nested.text,'second');
+  fs.unlinkSync(a.file('cache-test','two'));assert.equal(a.list('cache-test').length,1);
+  assert.throws(()=>a.list('../escape'),/Invalid/);
+});
+test('conversation view omits heavy evidence while Inspect and export retain it',async()=>{
+  const s=store(),e=new Engine(s);let b=e.create('Compact');b=e.message(b.id,b.head,'Hello');b=await e.turn(b.id,b.head,'Boris');
+  const server=createApp(e).listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));
+  try{
+    const base=`http://127.0.0.1:${(server.address() as any).port}/api/branches/${b.id}`;
+    const full=await (await fetch(base)).json(),lite=await (await fetch(base+'?view=conversation')).json(),exported=await (await fetch(base+'/export')).json();
+    assert.deepEqual(lite.branch,full.branch);assert.equal(lite.evidenceLoaded,false);assert.equal(lite.attempts.length,0);assert.equal(lite.revisions.length,1);
+    assert.equal(full.evidenceLoaded,true);assert(full.attempts.length);assert(full.revisions.length>1);assert.deepEqual(lite.selections,full.selections);assert.deepEqual(lite.jev,full.jev);assert.deepEqual(exported.attempts.map((a:any)=>a.id),full.attempts.map((a:any)=>a.id));
+  }finally{await new Promise<void>(r=>server.close(()=>r()));}
+});

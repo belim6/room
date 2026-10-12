@@ -68,24 +68,25 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.locals.experiments = experiments;
   const changes = (key: string) => { const b=engine.read(key); const fork=b.fork?store.get<Revision>('revisions',b.fork):null; return {fork:fork?{branch:fork.branch,revision:fork.id}:null,changes:fork?stateChanges(fork.state,b.revision.state):null}; };
   app.get('/api/attempts/:id/request',route((req,res)=>res.attachment('room-request.json').json(store.get('attempts',req.params.id))));
-  const evidence = (branch: string, originalImages = false) => {
+  const evidence = (branch: string, originalImages = false, compact = false) => {
     const b = engine.read(branch);
     const revisions: Revision[] = []; let cursor: string | null = b.head;
     while (cursor) { const rev: Revision = store.get<Revision>('revisions', cursor); revisions.push(rev); cursor = rev.parent; }
     const ids = new Set(revisions.map(r => r.id));
     const relevant = (r: any) => r.branch === branch || ids.has(r.revision);
     const jevResults = new Map(store.list('jev-results').map(r => [r.id,r]));
-    const attachmentIds=new Set(revisions.flatMap(r=>r.state.messages.flatMap(m=>m.attachments||[])));
-    return { branch: b, revisions, alternatives:alternatives.evidence(branch), attachments:[...attachmentIds].map(key=>attachmentInfo(store.get<Attachment>('attachments',key))), changes: changes(branch), attempts: store.attempts().filter(relevant).map(a=>{
+    const attachmentIds=new Set((compact?[b.revision]:revisions).flatMap(r=>r.state.messages.flatMap(m=>m.attachments||[])));
+    const formerLabels=[...new Set(revisions.flatMap(r=>Object.keys(r.state.characters).filter(k=>b.revision.state.characters[k]&&labelOf(r.state,k)!==labelOf(b.revision.state,k)).map(k=>labelOf(r.state,k))))];
+    return { branch: b, evidenceLoaded:!compact, formerLabels, revisions:compact?[b.revision]:revisions, alternatives:compact?null:alternatives.evidence(branch), attachments:[...attachmentIds].map(key=>attachmentInfo(store.get<Attachment>('attachments',key))), changes: changes(branch), attempts: (compact?[]:store.attempts(relevant)).map(a=>{
         const imageDataSummarized=!originalImages&&a.body.messages.some((m:any)=>Array.isArray(m.content)&&m.content.some((p:any)=>p.type==='image_url'));
         const body=imageDataSummarized?{...a.body,messages:a.body.messages.map((m:any)=>({...m,content:Array.isArray(m.content)?m.content.map((p:any)=>p.type==='image_url'?{...p,image_url:{...p.image_url,url:'[Image bytes retained in exact request download]'}}:p):m.content}))}:a.body;
         return {...a,body,imageDataSummarized,reasoning:reasoningOf(a.outcome)};
-      }), selections: store.list('selections').filter(relevant),
-      turns: store.list('turns').filter(r => r.branch === branch),
-      reactions: (() => { const messages = new Set(revisions.flatMap(r => r.state.messages.map(m => m.id))); return store.list('reactions').filter(r => messages.has(r.message)).sort((a,b)=>a.message.localeCompare(b.message)||a.sequence-b.sequence); })(),
-      imports: store.list('imports').filter(relevant),
-      observations: store.list('observations').filter(r => r.branch === branch), edits: store.list('edits').filter(r => r.branch === branch),
-      jev: store.list('jev-requests').filter(relevant).map(r => ({ ...r, outcome: jevResults.get(r.id) || null })) };
+      }), selections: store.select('selections',relevant),
+      turns: store.select('turns',r => r.branch === branch),
+      reactions: (() => { const messages = new Set(revisions.flatMap(r => r.state.messages.map(m => m.id))); return store.select('reactions',r => messages.has(r.message)).sort((a,b)=>a.message.localeCompare(b.message)||a.sequence-b.sequence); })(),
+      imports: store.select('imports',relevant),
+      observations: store.select('observations',r => r.branch === branch), edits: store.select('edits',r => r.branch === branch),
+      jev: store.select('jev-requests',relevant).map(r => ({ ...r, outcome: jevResults.get(r.id) || null })) };
   };
   const activity = () => {
     const done = new Set(store.list('jev-results').map(r => r.id));
@@ -176,7 +177,7 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.post('/api/comparisons/:id/fork', route((req,res) => res.json(comparisons.fork(req.params.id,req.body.name,req.body.expected))));
   // Every new room is v2: empty, or snapshotted from a room template. Existing rooms keep their assembly.
   app.post('/api/branches', route((req,res) => res.json(people.createRoom(req.body))));
-  app.get('/api/branches/:id', route((req,res) => { const e = evidence(req.params.id), s = e.branch.revision.state;
+  app.get('/api/branches/:id', route((req,res) => { const e = evidence(req.params.id,false,req.query.view==='conversation'), s = e.branch.revision.state;
     res.json({ ...e, active: engine.active.has(req.params.id), identity: resolvedMap(s, generationProvenance(store)), people: people.status(s), template: people.templateStatus(s), assemblyVersion: assemblyOf(s), run: runs.active(req.params.id) }); }));
   // Conversation edits go through the explicit retcon operation; this is a field-level merge.
   app.post('/api/branches/:id/settings', route((req,res) => res.json(people.settings(req.params.id, req.body))));

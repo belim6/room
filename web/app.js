@@ -77,7 +77,7 @@ async function refresh(){
   if(!comparison&&next.branches.find(b=>b.id===current)?.comparison)current=null;
   if(!next.branches.some(b=>b.id===current)){current=next.branches.find(b=>!b.parent&&!b.comparison)?.id;selected=null;}
   const ids=comparison?[comparison.left,comparison.right]:current?[current]:[];
-  const values=await Promise.all(ids.map(id=>api('/branches/'+id)));
+  const values=await Promise.all(ids.map(id=>api('/branches/'+id+(tab==='inspect'?'':'?view=conversation'))));
   if(version!==refreshVersion)return;
   boot=next;values.forEach(v=>records.set(v.branch.id,v));
   await Promise.all(ids.map(k=>refreshSeen(k).catch(()=>{})));if(version!==refreshVersion)return;
@@ -377,6 +377,12 @@ function renderPanel(force = true) {
   } else if(tab==='changes') {
     panel.innerHTML=`<h2>${paneChanges?'Left → right pane':'Changes since fork'}</h2>${RoomChanges.render(paneChanges||data.changes?.changes)}${data.changes?.fork&&!paneChanges?'<p class="muted">Derived from the stored fork revision. New edits track their original message IDs. Legacy edits without provenance may appear as removals and additions.</p>':''}`;
   } else if(tab==='inspect') {
+    if(data.evidenceLoaded===false){
+      panel.innerHTML='<p class="muted">Loading research records…</p>';
+      const key=current,version=refreshVersion;
+      api('/branches/'+key).then(full=>{if(current!==key||tab!=='inspect'||refreshVersion!==version)return;records.set(key,full);data=full;renderPanel();}).catch(error);
+      return;
+    }
     const message=s.messages.find(m=>m.id===selected);
     const attempts=message ? data.attempts.filter(a=>a.turnId===message.turnId && message.turnId) : data.attempts;
     const deleted=new Map();for(const revision of data.revisions){const change=revision.change;if(change?.kind==='delete-message'&&!s.messages.some(m=>m.id===change.message.id)&&!deleted.has(change.message.id))deleted.set(change.message.id,revision);}
@@ -418,7 +424,7 @@ function settingsChanged(){
 }
 async function saveSettings(all){await api('/branches/'+current+'/settings',settingsBody(all));$('#panel').dataset.key='';await refresh();}
 // Labels a person used to have in this branch's history, for flagging situations that still mention them.
-function formerLabels(d){const s=d.branch.revision.state,out=new Set();for(const r of d.revisions||[])for(const k of Object.keys(r.state.characters))if(s.characters[k]&&labelOf(r.state,k)!==labelOf(s,k))out.add(labelOf(r.state,k));return out;}
+function formerLabels(d){if(d.formerLabels)return new Set(d.formerLabels);const s=d.branch.revision.state,out=new Set();for(const r of d.revisions||[])for(const k of Object.keys(r.state.characters))if(s.characters[k]&&labelOf(r.state,k)!==labelOf(s,k))out.add(labelOf(r.state,k));return out;}
 async function addPerson(key){
   const v=await api('/vault'),personas=v.items.filter(i=>i.type==='persona');
   const f=await dialog('Add person',`<label>Label in this room<input name="label" required maxlength="80" placeholder="the judge, movie star #1…"></label><label>From persona<select name="persona"><option value="">Blank (write the prompt yourself)</option>${personas.map(p=>`<option value="${p.id}">${esc(p.title)}${p.archived?' (archived)':''} · revision ${esc(p.head.slice(0,8))}</option>`).join('')}</select></label><label>Situation in this room (optional)<textarea name="situation" rows="3" placeholder="Role, wants and relationships here. Not part of the persona."></textarea></label>${records.get(key).branch.revision.state.locations?`<label>Starts in<select name="place">${placesOf(records.get(key).branch.revision.state).map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></label><p class="muted">They hear only what is said after they arrive.</p>`:''}<h3>Instantiation</h3><label>Provider<select name="provider">${['opengateway','together',...(boot.keys.demo?['demo']:[])].map(p=>`<option value="${p}">${p==='demo'?'Local demo (no API calls)':p==='together'?'Together':'OpenGateway'}</option>`).join('')}</select></label><label>Model ID<input name="model" value="deepseek/deepseek-flash" required></label><label>Temperature<input name="temperature" type="number" min="0" max="2" step="0.1" value="0.7"></label><label>Reasoning<select name="reasoning"><option value="default">Provider default</option><option value="off">Off</option><option value="simulated">Simulated · generated private note</option></select></label><p class="muted">Two people from one persona are independent: separate labels, situations and memories. Labels: up to 80 characters, one line, no ":".</p>`,'Preview');

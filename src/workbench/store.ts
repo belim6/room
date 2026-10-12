@@ -5,6 +5,23 @@ export const id = () => randomUUID();
 export const clone = <T>(value: T): T => structuredClone(value);
 export type Write = (kind: string, key: string, value: any) => void;
 export class Store {
+  private records = new Map<string,{stamp:string;value:any}>();
+  private directories = new Map<string,{stamp:string;keys:string[]}>();
+  private stamp(stat: fs.Stats) { return `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}:${stat.ino}`; }
+  private keys(kind:string) {
+    this.file(kind,'validate');
+    const dir=path.join(this.root,kind);
+    let stamp:string;try{stamp=this.stamp(fs.statSync(dir));}catch(e:any){if(e.code==='ENOENT')return [];throw e;}
+    let cached=this.directories.get(kind);
+    if(!cached||cached.stamp!==stamp){cached={stamp,keys:fs.readdirSync(dir).filter(f=>f.endsWith('.json')).map(f=>f.slice(0,-5))};this.directories.set(kind,cached);}
+    return cached.keys;
+  }
+  private read(kind:string,key:string) {
+    const file=this.file(kind,key),stamp=this.stamp(fs.statSync(file));
+    let cached=this.records.get(file);
+    if(!cached||cached.stamp!==stamp){cached={stamp,value:JSON.parse(fs.readFileSync(file,'utf8'))};this.records.set(file,cached);}
+    return cached.value;
+  }
   private listeners = new Set<Write>();
   // Called after each durable write; a listener failure never fails the write.
   subscribe(fn: Write) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
@@ -26,14 +43,17 @@ export class Store {
     for (const fn of this.listeners) try { fn(kind, key, value); } catch {}
   }
   add(kind: string, value: any) { const key = value.id || id(); this.put(kind, key, { ...value, id: key }); return key; }
-  get<T = any>(kind: string, key: string): T { return JSON.parse(fs.readFileSync(this.file(kind, key), 'utf8')); }
-  list<T = any>(kind: string): T[] {
-    const dir = path.join(this.root, kind);
-    if (!fs.existsSync(dir)) return [];
-    return fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => this.get<T>(kind, f.slice(0, -5)));
+  get<T = any>(kind: string, key: string): T { return clone(this.read(kind,key)); }
+  list<T = any>(kind: string): T[] { return this.select<T>(kind,()=>true); }
+  // Predicates only inspect cached records. Callers receive independent copies of matches.
+  select<T = any>(kind:string, predicate:(record:T)=>boolean):T[] {
+    const out:T[]=[];for(const key of this.keys(kind)){const value=this.read(kind,key);if(predicate(value))out.push(clone(value));}return out;
   }
-  attempts() {
-    const outcomes = new Map(this.list('outcomes').map(o => [o.id, o]));
-    return this.list('attempts').map(a => ({ ...a, outcome: outcomes.get(a.id) ?? null }));
+  attempts(predicate:(record:any)=>boolean = ()=>true) {
+    return this.select('attempts',predicate).map(a=>{
+      let outcome=null;try{outcome=this.get('outcomes',a.id);}catch(e:any){if(e.code!=='ENOENT')throw e;}
+      return {...a,outcome};
+    });
   }
+
 }
