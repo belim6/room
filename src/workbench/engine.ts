@@ -1,3 +1,4 @@
+import { prepareImprov, validateImprov, type ImprovConfig, type Addition } from './improv';
 import { Store, clone, id } from './store';
 import { generate, reasoningSwitchVerified, SIMULATED_REASONING_V1, DEFAULT_MODEL, type Provider } from './generation';
 import { PERSONAS, type PersonaName } from '../personas/personas';
@@ -11,13 +12,13 @@ import { validateLocations, visibleTo, visibility, localCast, localLastSpeaker, 
 
 export interface VaultRef { item: string; revision: string }
 // Legacy rooms key characters by name with no label; v2 rooms key people by UUID and keep the label as display text.
-export interface Character { label?: string; prompt: string; situation?: string; memory: string; provider: Provider; model: string; temperature: number; reasoning?: 'default' | 'off' | 'simulated'; origin?: VaultRef }
+export interface Character { additions?: Addition[]; label?: string; prompt: string; situation?: string; memory: string; provider: Provider; model: string; temperature: number; reasoning?: 'default' | 'off' | 'simulated'; origin?: VaultRef }
 // `speaker` is the label as written at the time (evidence, never rewritten); `speakerRef` is the identity.
 export interface Message { id: string; speaker: string; speakerRef?: SpeakerRef; text: string; source: 'human' | 'generated' | 'imported' | 'edited' | 'template' | 'movement' | 'narration'; turnId?: string; checkpoint?: string; editedFrom?: string[]; attachments?: string[]; review?: string;
   audience?: Audience; movement?: Movement }
 export type TemplateField = 'system' | 'frame' | 'flow';
 export interface FieldProvenance { item: string; revision: string; value: unknown }
-export interface State { system: string; participants: string[]; characters: Record<string, Character>;
+export interface State { improv?: ImprovConfig; system: string; participants: string[]; characters: Record<string, Character>;
   messages: Message[]; shadow: boolean; policy: 'protected' | 'observe'; human: string; frame?: Frame; flow?: 'random' | 'alternate'; assemblyVersion?: Assembly; assembly?: HistoryConfig; locations?: Locations;
   origin?: { template: VaultRef }; templateFields?: Partial<Record<TemplateField, FieldProvenance>> }
 export interface Adoption { kind: 'persona' | 'template' | 'switch'; source?: VaultRef; person?: string; fields: string[]; replacedDiverged?: string[] }
@@ -41,6 +42,7 @@ const isRef = (r: any) => !!r && typeof r === 'object' && typeof r.item === 'str
 export function validateState(s: State, previous?: State | null) {
   if (!s || typeof s.system !== 'string' || s.system.length > 100000 || typeof s.human !== 'string' || !s.human.trim() || s.human.length > 80) throw Error('Invalid shared instructions or human name');
   if (s.assemblyVersion !== undefined && !['legacy-v1','v2'].includes(s.assemblyVersion)) throw Error('Invalid assembly version');
+  validateImprov(s);
   historyConfig(s.assemblyVersion,s.assembly);
   if (s.flow !== undefined && !['random','alternate'].includes(s.flow)) throw Error('Invalid flow');
   if (!s.characters || typeof s.characters !== 'object' || Array.isArray(s.characters)) throw Error('Invalid cast');
@@ -95,9 +97,10 @@ export function assemble(store: Store, s: State, speaker: string, images = true)
   const human = humanPresent(view) && (!L || L.at[HUMAN] === place) ? s.human : null, f = v2 ? s.frame ?? DEFAULT_FRAME : s.frame;
   const fill = (t: string) => fillFrame(t, { speaker: label, participants: [...(human ? [human] : []), ...(L ? localCast(s, place!) : s.participants).map(p => labelOf(s, p))].join(', '), transcript: JSON.stringify(transcript) });
   // A custom frame drops empty parts entirely, so a fully blanked room sends only what is left.
-  const system = v2 ? [c.prompt, c.situation || '', s.system, c.memory ? `Your retained memory:\n${c.memory}` : '', fill(f!.identity)].filter(x => x.trim()).join('\n\n')
+  const baseSystem = v2 ? [c.prompt, c.situation || '', s.system, c.memory ? `Your retained memory:\n${c.memory}` : '', fill(f!.identity)].filter(x => x.trim()).join('\n\n')
     : f ? [c.prompt, s.system, c.memory ? `Your retained memory:\n${c.memory}` : '', fill(f.identity)].filter(x => x.trim()).join('\n\n')
     : `${c.prompt}\n\n${s.system}\n\n${c.memory ? `Your retained memory:\n${c.memory}\n\n` : ''}Your identity for this request is ${speaker}. Stay in your own perspective even if someone else is addressed. Keep your entire reply within 2000 characters.`;
+  const system=[baseSystem,...(c.additions||[]).map(a=>a.text)].filter(x=>x.trim()).join('\n\n');
   const noteInstruction = c.reasoning === 'simulated' ? SIMULATED_REASONING_V1 : '';
   const turn = [fill(f?.turn ?? DEFAULT_FRAME.turn), noteInstruction].filter(x => x.trim()).join('\n\n');
   const user = f ? [fill(transcript.trim() ? f.context : f.opening), turn].filter(x => x.trim()).join('\n\n')
@@ -340,7 +343,7 @@ export class Engine {
   cancel(branch: string) { this.active.get(branch)?.controller.abort(); }
   async turn(branchId: string, expected: string, forced?: string, run?: { id: string; index: number; count: number; mode?: 'alternate' }, experiment?: { turnId: string }, preset?: { turnId: string }, where?: { place: string; policy?: 'place' | 'rotate'; cursor?: number }) {
     if (this.active.has(branchId)) throw Error('A turn is already running in this branch');
-    const b = this.read(branchId);
+    let b = this.read(branchId);
     if (b.head !== expected) throw Error('Branch changed; reload before generating');
     const s = clone(b.revision.state);
     if (!s.participants.length) throw Error('Add a person to this room before generating');
@@ -366,7 +369,20 @@ export class Engine {
       eligible: forced ? local : pool, chosen: speaker, ...(L ? { place, placePolicy: where!.policy ?? 'place', ...(where!.cursor !== undefined ? { cursor: where!.cursor } : {}) } : {}) });
     try {
       // Validate file inputs before launching any paid observation. Jev receives text and image filenames only.
-      const c = s.characters[speaker], { user, context, label, v2, messages, assembly, adapterVersion, visibility: seen } = assemble(this.store, s, speaker);
+      const initial=assemble(this.store,s,speaker);
+      if (!initial.user.trim()&&!initial.context.parts.length) throw Error('Nothing to send: the assembled user message is empty');
+      const visible=s.locations?visibleTo(s,speaker):s.messages;
+      const addition=s.improv?.enabled?await prepareImprov(this.store,s,speaker,{system:initial.system,transcript:initial.context.transcript,parts:initial.context.parts,visibleMessageIds:visible.map(m=>m.id)},{branch:branchId,revision:b.head,turnId},controller.signal,this.transport):null;
+      if(controller.signal.aborted||this.read(branchId).head!==b.head){
+        if(addition)this.store.put('improv-applications',turnId,{id:turnId,branch:branchId,turnId,status:'discarded',addition:addition.id});
+        this.store.put('turns',turnId,{id:turnId,branch:branchId,status:controller.signal.aborted?'canceled':'detached',attempts:[],...(run?{run:run.id}:{})});return this.read(branchId);
+      }
+      if(addition){
+        (s.characters[speaker].additions??=[]).push(addition);
+        b=this.commit(branchId,b.head,s,'Improv prompt addition saved');
+        this.store.put('improv-applications',turnId,{id:turnId,branch:branchId,turnId,status:'applied',revision:b.head,addition:addition.id});
+      }
+      const c = s.characters[speaker], { user, context, label, v2, messages, assembly, adapterVersion, visibility: seen } = addition?assemble(this.store,s,speaker):initial;
       if (!user.trim() && !context.parts.length) throw Error('Nothing to send: the assembled user message is empty. Include {transcript} in the conversation header, or add an opening instruction for an empty conversation.');
       if (s.shadow) void shadowJev(this.store,s,branchId,b.head,turnId,this.transport,speaker).catch(error=>console.error('Jev persistence error:',error.message));
       const result = await generate({ provider: c.provider, model: c.model, temperature: c.temperature, reasoning: c.reasoning,

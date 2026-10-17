@@ -1926,3 +1926,77 @@ test('conversation view omits heavy evidence while Inspect and export retain it'
     assert.equal(full.evidenceLoaded,true);assert(full.attempts.length);assert(full.revisions.length>1);assert.deepEqual(lite.selections,full.selections);assert.deepEqual(lite.jev,full.jev);assert.deepEqual(exported.attempts.map((a:any)=>a.id),full.attempts.map((a:any)=>a.id));
   }finally{await new Promise<void>(r=>server.close(()=>r()));}
 });
+
+import { IMPROV_DEFAULTS, recoverImprov } from '../src/workbench/improv';
+function improvState(){const state=initialState();delete state.frame;state.improv={...IMPROV_DEFAULTS,enabled:true};return state;}
+test('improv persists before replying, remains in later prompts, and records cooldown without extra calls',async()=>{
+  process.env.TYPESAFE_API_KEY='mock';const s=store(),calls:any[]=[];
+  const e=new ProductionEngine(s,async(url,opts)=>{
+    const body=JSON.parse(String(opts?.body));calls.push(body);
+    if(String(url).includes('typesafe')){assert.equal(s.list('improv-requests').length,1);return new Response(JSON.stringify({answers:{intervene:{noul:.95}}}));}
+    if(body.max_tokens){assert.equal(s.list('improv-requests').length,2);return response('You have just recognized an old friend in the room.');}
+    assert(s.list('improv-applications').some(r=>r.status==='applied'));assert(body.messages[0].content.includes('recognized an old friend'));return response('Hello again.');
+  });let b=e.create('Improv',improvState());const original=b.head;
+  b=await e.turn(b.id,b.head,'Boris');assert.equal(calls.length,3);assert.equal(b.revision.state.characters.Boris.additions!.length,1);
+  assert.equal(s.get('revisions',original).state.characters.Boris.additions,undefined);
+  assert.notEqual(s.attempts()[0].revision,original);assert.equal(s.list('improv-results')[0].status,'prepared');
+  b=await e.turn(b.id,b.head,'Boris');assert.equal(calls.length,4);assert(s.list('improv-results').some(r=>r.status==='cooldown'));
+  const fork=e.fork(b.id,b.head,'Copy');assert.deepEqual(fork.revision.state.characters.Boris.additions,b.revision.state.characters.Boris.additions);
+});
+test('improv declines, invalid answers, provider failures and deadlines fall back without additions',async()=>{
+  process.env.TYPESAFE_API_KEY='mock';
+  for(const mode of ['no','invalid','failure','timeout']){
+    const s=store();let characterCalls=0;
+    const e=new ProductionEngine(s,async(url,opts)=>{
+      if(String(url).includes('typesafe')){
+        if(mode==='timeout')return new Promise(()=>{});
+        if(mode==='failure')return new Response('bad',{status:500});
+        return new Response(JSON.stringify({answers:{intervene:{noul:mode==='no'?.2:'yes'}}}));
+      }
+      characterCalls++;return response('Normal reply.');
+    });const state=improvState();state.improv!.budgetMs=500;let b=e.create(mode,state);
+    // A mock transport may ignore abort; the deadline must still allow the turn to finish.
+    const keepAlive=setInterval(()=>{},1000);try{b=await e.turn(b.id,b.head,'Boris');}finally{clearInterval(keepAlive);}
+    assert.equal(characterCalls,1);assert.equal(b.revision.state.characters.Boris.additions,undefined);
+    assert.equal(s.list('improv-results')[0].status,mode==='no'?'declined':mode==='timeout'?'timed-out':'failed');
+  }
+});
+test('improv discards prepared additions when the branch changes during the writer call',async()=>{
+  process.env.TYPESAFE_API_KEY='mock';const s=store();let resolve!:(r:Response)=>void,ready!:()=>void;const started=new Promise<void>(r=>ready=r);let characterCalls=0;
+  const e=new ProductionEngine(s,async(url,opts)=>{
+    if(String(url).includes('typesafe'))return new Response(JSON.stringify({answers:{intervene:{noul:1}}}));
+    if(JSON.parse(String(opts?.body)).max_tokens){ready();return new Promise(r=>resolve=r);}characterCalls++;return response('Never used');
+  });const b=e.create('Stale',improvState()),pending=e.turn(b.id,b.head,'Boris');await started;e.message(b.id,b.head,'Interjection');resolve(response('An addition that arrived too late.'));await pending;
+  assert.equal(characterCalls,0);assert.equal(e.read(b.id).revision.state.characters.Boris.additions,undefined);assert.equal(s.list('improv-applications')[0].status,'discarded');assert.equal(s.list('turns')[0].status,'detached');
+});
+test('improv shares only the selected character visible context and keeps additions isolated',async()=>{
+  process.env.TYPESAFE_API_KEY='mock';const s=store(),state=improvState();state.assemblyVersion='v2';
+  state.locations={places:[{id:'one',name:'One'},{id:'two',name:'Two'}],at:Object.fromEntries([...Object.keys(state.characters).map(k=>[k,k==='Boris'?'one':'two']),['human','one']])};
+  state.messages=[{id:'private',speaker:'Ilya',source:'human',text:'SECRET PRIVATE SCENE',audience:{place:'two',present:['Ilya'],display:{place:'Two',present:['Ilya']}}},{id:'public',speaker:'Dennis',source:'human',text:'Visible hello'}];
+  const e=new ProductionEngine(s,async(url,opts)=>{const body=JSON.parse(String(opts?.body));assert(!JSON.stringify(body).includes('SECRET PRIVATE SCENE'));if(String(url).includes('typesafe'))return new Response(JSON.stringify({answers:{intervene:{noul:1}}}));return response(body.max_tokens?'You suspect a delightful surprise.':'Hello!');});
+  let b=e.create('Private',state);b=await e.turn(b.id,b.head,'Boris',undefined,undefined,undefined,{place:'one'});
+  assert(b.revision.state.characters.Boris.additions?.length);assert.equal(b.revision.state.characters.Ilya.additions,undefined);assert.deepEqual(s.list('improv-decisions')[0].visibleMessageIds,['public']);
+});
+test('improv settings and addition edits preserve old revisions; recovery never dispatches',async()=>{
+  const s=store(),e=new ProductionEngine(s);const state=improvState();state.characters.Boris.additions=[{id:'addition',text:'Original direction',turnId:'turn',at:'2026-10-17T00:00:00Z',afterTurns:0}];const b=e.create('Edit',state);
+  const server=createApp(e).listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));
+  try{const base=`http://127.0.0.1:${(server.address() as any).port}/api/branches/${b.id}/improv`;
+    const edit=await fetch(base,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected:b.head,person:'Boris',addition:'addition',text:'Changed direction'})});assert.equal(edit.status,200);
+    const next=await edit.json();assert.equal(next.revision.state.characters.Boris.additions[0].text,'Changed direction');assert.equal(s.get('revisions',b.head).state.characters.Boris.additions[0].text,'Original direction');
+    const remove=await fetch(base,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected:next.head,person:'Boris',addition:'addition',remove:true})});assert.equal(remove.status,200);assert.equal((await remove.json()).revision.state.characters.Boris.additions.length,0);
+  }finally{await new Promise<void>(r=>server.close(()=>r()));}
+  s.put('improv-decisions','pending',{id:'pending',branch:b.id,turnId:'pending',person:'Boris'});s.put('improv-requests','request',{id:'request',branch:b.id,turnId:'pending'});recoverImprov(s);assert.equal(s.get('improv-results','pending').status,'interrupted');assert.equal(s.get('improv-outcomes','request').status,'interrupted');
+});
+test('improv Stop cancels the gate even when transport ignores abort, and never calls the writer or character',async()=>{
+  process.env.TYPESAFE_API_KEY='mock';const s=store();let ready!:()=>void;const started=new Promise<void>(r=>ready=r);let calls=0;
+  const e=new ProductionEngine(s,async()=>{calls++;ready();return new Promise(()=>{});});const b=e.create('Cancel',improvState());const pending=e.turn(b.id,b.head,'Boris');await started;e.cancel(b.id);await pending;
+  assert.equal(calls,1);assert.equal(s.list('improv-results')[0].status,'canceled');assert.equal(s.list('turns')[0].status,'canceled');assert.equal(e.read(b.id).head,b.head);
+});
+test('improv rate cap skips Jev, and a slow writer cannot apply an addition after the deadline',async()=>{
+  process.env.TYPESAFE_API_KEY='mock';const state=improvState();state.improv!.maxPerTen=1;state.characters.Ilya.additions=[{id:'previous',text:'Existing direction',turnId:'old',at:'2026-10-17T00:00:00Z',afterTurns:0}];
+  const s=store();let calls=0;const e=new ProductionEngine(s,async()=>{calls++;return response('Normal');});const b=e.create('Rate',state);await e.turn(b.id,b.head,'Boris');assert.equal(calls,1);assert.equal(s.list('improv-results')[0].status,'rate-limit');
+  const s2=store();let late!:(r:Response)=>void;const st=improvState();st.improv!.budgetMs=500;
+  const e2=new ProductionEngine(s2,async(url,opts)=>{if(String(url).includes('typesafe'))return new Response(JSON.stringify({answers:{intervene:{noul:1}}}));if(JSON.parse(String(opts?.body)).max_tokens)return new Promise(r=>late=r);return response('Normal');});
+  const b2=e2.create('Deadline',st),keepAlive=setInterval(()=>{},1000);try{await e2.turn(b2.id,b2.head,'Boris');}finally{clearInterval(keepAlive);}
+  late(response('Too late to apply'));await new Promise(r=>setImmediate(r));assert.equal(e2.read(b2.id).revision.state.characters.Boris.additions,undefined);assert.equal(s2.list('improv-results')[0].status,'timed-out');assert.equal(s2.list('improv-applications').length,0);
+});

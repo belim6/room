@@ -1,3 +1,4 @@
+import { IMPROV_DEFAULTS, validateImprov, recoverImprov } from './improv';
 import 'dotenv/config';
 import { transcriptExport } from './transcriptExport';
 import express from 'express';
@@ -77,7 +78,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     const jevResults = new Map(store.list('jev-results').map(r => [r.id,r]));
     const attachmentIds=new Set((compact?[b.revision]:revisions).flatMap(r=>r.state.messages.flatMap(m=>m.attachments||[])));
     const formerLabels=[...new Set(revisions.flatMap(r=>Object.keys(r.state.characters).filter(k=>b.revision.state.characters[k]&&labelOf(r.state,k)!==labelOf(b.revision.state,k)).map(k=>labelOf(r.state,k))))];
-    return { branch: b, evidenceLoaded:!compact, formerLabels, revisions:compact?[b.revision]:revisions, alternatives:compact?null:alternatives.evidence(branch), attachments:[...attachmentIds].map(key=>attachmentInfo(store.get<Attachment>('attachments',key))), changes: changes(branch), attempts: (compact?[]:store.attempts(relevant)).map(a=>{
+    return { branch: b, evidenceLoaded:!compact, formerLabels, revisions:compact?[b.revision]:revisions, improv:compact?null:Object.fromEntries(['improv-decisions','improv-results','improv-requests','improv-outcomes','improv-applications'].map(k=>[k,store.select(k,relevant)])), alternatives:compact?null:alternatives.evidence(branch), attachments:[...attachmentIds].map(key=>attachmentInfo(store.get<Attachment>('attachments',key))), changes: changes(branch), attempts: (compact?[]:store.attempts(relevant)).map(a=>{
         const imageDataSummarized=!originalImages&&a.body.messages.some((m:any)=>Array.isArray(m.content)&&m.content.some((p:any)=>p.type==='image_url'));
         const body=imageDataSummarized?{...a.body,messages:a.body.messages.map((m:any)=>({...m,content:Array.isArray(m.content)?m.content.map((p:any)=>p.type==='image_url'?{...p,image_url:{...p.image_url,url:'[Image bytes retained in exact request download]'}}:p):m.content}))}:a.body;
         return {...a,body,imageDataSummarized,reasoning:reasoningOf(a.outcome)};
@@ -103,7 +104,7 @@ export function createApp(engine = new Engine(defaultStore())) {
     const saved = comparisons.list(), library = engine.library();
     const trials = experiments.trialBranches();
     res.json({ ...library, attachments:attachmentCapabilities(), branches: library.branches.map(b => trials.has(b.id) ? { ...b, isTrial: true } : b), comparisons: saved, experiments: experiments.list(), reactions: reactions(),
-      frame: EMPTY_FRAME, legacyFrame: DEFAULT_FRAME, readOnly: store.readOnly, keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY, demo: demoEnabled() },
+      improvDefaults:IMPROV_DEFAULTS, frame: EMPTY_FRAME, legacyFrame: DEFAULT_FRAME, readOnly: store.readOnly, keys: { opengateway: !!process.env.OPENGATEWAY_API_KEY, together: !!process.env.TOGETHER_API_KEY, jev: !!process.env.TYPESAFE_API_KEY, demo: demoEnabled() },
       active: [...engine.active.keys()] });
   }));
   app.get('/api/branches/:id/changes', route((req,res) => res.json(changes(req.params.id))));
@@ -282,6 +283,22 @@ export function createApp(engine = new Engine(defaultStore())) {
   app.get('/api/branches/:id/transcript', route((req,res) => {const b=engine.read(req.params.id);res.type('html').send(transcriptExport(b.name,b.revision.state));}));
   // Markdown transcript: written labels, with location tags from the stamped snapshots. No prompts or research records.
   app.get('/api/branches/:id/transcript.md', route((req,res) => {const b=engine.read(req.params.id),s=b.revision.state;res.type('text/markdown').attachment('room-transcript.md').send(`# ${b.name}\n\n`+(s.messages.map(m=>`**${m.speaker}**${scopeTag(m)?' '+scopeTag(m):''}\n\n${m.text}`).join('\n\n')||'_No messages yet._')+'\n');}));
+  app.get('/api/branches/:id/improv',route((req,res)=>{
+    engine.read(req.params.id);
+    const kinds=['improv-decisions','improv-results','improv-requests','improv-outcomes','improv-applications'];
+    const requests=store.select('improv-requests',r=>r.branch===req.params.id),ids=new Set(requests.map(r=>r.id));
+    res.json(Object.fromEntries(kinds.map(k=>[k,store.select(k,r=>r.branch===req.params.id||k==='improv-outcomes'&&ids.has(r.id))])));
+  }));
+  app.post('/api/branches/:id/improv',route((req,res)=>{
+    const b=engine.read(req.params.id),state=structuredClone(b.revision.state);
+    if(req.body.config!==undefined)state.improv=req.body.config;
+    if(req.body.addition!==undefined){
+      const c=state.characters[req.body.person],a=c?.additions?.find(a=>a.id===req.body.addition);
+      if(!a)throw Error('Prompt addition not found');
+      if(req.body.remove===true)c.additions=c.additions!.filter(x=>x.id!==a.id);else a.text=req.body.text;
+    }
+    validateImprov(state);res.json(engine.commit(b.id,req.body.expected,state,'Improv settings or additions edited'));
+  }));
   app.get('/api/branches/:id/export', route((req,res) => res.attachment('room-research.json').json((()=>{const record=evidence(req.params.id,true),s=record.branch.revision.state;return {format:'room-workbench-v1',...record,...(s.locations?{locationTags:Object.fromEntries(s.messages.filter(m=>scopeTag(m)).map(m=>[m.id,scopeTag(m)]))}:{}),attachments:record.attachments.map(a=>store.get<Attachment>('attachments',a.id))};})())));
   app.get('/api/branches/:id/notebook', route((req,res) => {
     const e = evidence(req.params.id);
@@ -319,6 +336,7 @@ export function recoverOnStartup(app: express.Express, store: Store) {
   for (const r of store.list('jev-requests')) if (!done.has(r.id)) store.put('jev-results',r.id,{ id:r.id,status:'interrupted',error:'Process ended before a result was recorded' });
   app.locals.experiments.recover();
   app.locals.alternatives.recover();
+  recoverImprov(store);
   app.locals.runs.recover();
   app.locals.vault.seedKinds();
 }

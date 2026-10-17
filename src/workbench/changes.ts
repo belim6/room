@@ -25,6 +25,7 @@ export function stateChanges(from: State, to: State) {
     settings.push({field,...(character?{character,label:labelOf(to.characters[character]?to:from,character)}:{}),before,after,...(typeof before==='string' && typeof after==='string' && (before.includes('\n')||after.includes('\n'))?{diff:lineDiff(before,after)}:{})});
   }
   for(const key of ['system','human','participants','shadow','policy'] as const) field(key,from[key],to[key]);
+  field('improv',from.improv??null,to.improv??null);
   field('assembly',from.assembly??{history:'transcript'},to.assembly??{history:'transcript'});
   field('frame',from.frame??null,to.frame??null);
   field('flow',from.flow??'random',to.flow??'random');field('assemblyVersion',assemblyOf(from),assemblyOf(to));
@@ -34,6 +35,7 @@ export function stateChanges(from: State, to: State) {
   for(const name of Object.keys(from.characters).filter(p=>to.characters[p])) {const a=from.characters[name],b=to.characters[name];
     field('label',labelOf(from,name),labelOf(to,name),name);
     for(const key of ['prompt','memory','provider','model','temperature'] as const) field(key,a[key],b[key],name);field('reasoning',a.reasoning||'default',b.reasoning||'default',name);
+    field('additions',a.additions??[],b.additions??[],name);
     field('situation',a.situation??'',b.situation??'',name);field('origin',a.origin??null,b.origin??null,name);}
   const people={added,removed:dropped,activated:to.participants.filter(p=>!from.participants.includes(p)),deactivated:from.participants.filter(p=>!to.participants.includes(p)),
     labels:Object.fromEntries([...Object.keys(from.characters).map(p=>[p,labelOf(from,p)]),...Object.keys(to.characters).map(p=>[p,labelOf(to,p)])])};

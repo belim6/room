@@ -344,7 +344,7 @@ function renderPanel(force = true) {
   const s=data.branch.revision.state, panel=$('#panel');
   $('#panel-context').textContent=(comparison ? (current===comparison.left?'Left':'Right')+' pane · ' : '')+data.branch.name;
   const panelKey=current+':'+tab+':'+character+(s.locations?':'+JSON.stringify(s.locations):'');
-  if(!force && (tab==='characters'||tab==='revise') && panel.dataset.key===panelKey)return;
+  if(!force && (tab==='characters'||tab==='revise'||tab==='improv') && panel.dataset.key===panelKey)return;
   const noteDraft=tab==='notes' && panel.dataset.key===panelKey ? $('#observation')?.value : '';
   panel.dataset.key=panelKey;
   if(tab==='characters') {
@@ -374,6 +374,8 @@ function renderPanel(force = true) {
     $('#adopt-template')?.addEventListener('click',action(()=>adoptTemplate(current)));
   } else if(tab==='revise') {
     renderReview(panel);
+  } else if(tab==='improv') {
+    renderImprov(panel,s);
   } else if(tab==='changes') {
     panel.innerHTML=`<h2>${paneChanges?'Left → right pane':'Changes since fork'}</h2>${RoomChanges.render(paneChanges||data.changes?.changes)}${data.changes?.fork&&!paneChanges?'<p class="muted">Derived from the stored fork revision. New edits track their original message IDs. Legacy edits without provenance may appear as removals and additions.</p>':''}`;
   } else if(tab==='inspect') {
