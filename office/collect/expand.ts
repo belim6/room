@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { Collected } from './index';
 import type { OfficeEvent } from './types';
 import { redact } from './privacy';
-import { shellFacts, segments, verifyCommand } from './shell';
+import { shellFacts, verifyCommand, offAllowlistWrites } from './shell';
 import { codexSessions, execOf } from './codex';
 
 // The content tier. Every text that leaves here is (a) from an allowlisted source file, (b) about an allowlisted target
@@ -23,6 +23,11 @@ export function lineAt(c: Collected, file: string, n: number): string {
 }
 const WITHHELD = 'output withheld (unverifiable)';
 const verify = (c: Collected, cmd: string, cwd: string) => verifyCommand(cmd, cwd, c.allow.cfg.home, p => c.allow.allows(p), p => c.allow.allowsDir(p));
+// The command text itself, unless it writes off-allowlist: then the payload is in the arguments and only the targets are shown.
+const commandSection = (c: Collected, title: string, cmd: string, cwd: string): Section => {
+  const w = offAllowlistWrites(cmd, cwd, c.allow.cfg.home, p => c.allow.allows(p));
+  return w.withhold ? { title, allowed: false, note: `writes to ${w.targets.join(', ')} (content withheld)` } : { title, ...clip(cmd) };
+};
 const json = (s: string) => { try { return JSON.parse(s); } catch { return undefined; } };
 const textOf = (c: any): string => typeof c === 'string' ? c : Array.isArray(c) ? c.map(b => b?.type === 'text' ? b.text : b?.type === 'image' ? '[image]' : '').join('\n') : '';
 const fileLines = (c: Collected, file: string) => { const o = openSource(c, file); if (!o) return []; try { const b = Buffer.alloc(o.size); fs.readSync(o.fd, b, 0, o.size, 0); return b.toString('utf8').split('\n'); } finally { fs.closeSync(o.fd); } };
@@ -41,12 +46,14 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       const result = results.map(r => Array.isArray(r.message?.content) ? r.message.content.filter((b: any) => b.type === 'tool_result' && b.tool_use_id === d.key).map((b: any) => textOf(b.content)).join('\n') : textOf(r.message?.content)).join('\n---\n');
       const name = use?.name;
       if (name === 'Read' || name === 'NotebookRead') { gate('file read (as the agent saw it)', tgtPath!, result); break; }
-      if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(name)) { gate('written', tgtPath!, inp.content ?? (inp.old_string != null ? `--- old\n${inp.old_string}\n+++ new\n${inp.new_string}` : JSON.stringify(inp.edits || inp, null, 1))); add('result', result); break; }
+      if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(name)) {
+        if (!tgtPath || !allow.allows(tgtPath)) { out.push({ title: 'written', path: tgtPath, allowed: false, note: `writes to ${tgtPath || 'an unknown path'} (content withheld)` }); break; }
+        add('written', inp.content ?? (inp.old_string != null ? `--- old\n${inp.old_string}\n+++ new\n${inp.new_string}` : JSON.stringify(inp.edits || inp, null, 1)), { path: tgtPath, allowed: true }); add('result', result); break;
+      }
       if (name === 'Bash') {
-        const cmd = String(inp.command || ''), cwd = rec?.cwd || allow.cfg.home, f = shellFacts(cmd, cwd, allow.cfg.home), v = verify(c, cmd, cwd);
+        const cmd = String(inp.command || ''), cwd = rec?.cwd || allow.cfg.home, v = verify(c, cmd, cwd);
         add('description', inp.description);
-        if (f.writes.some(p => !allow.allows(p))) add('command (heredoc bodies withheld: writes off-allowlist)', segments(cmd).join('\n'));
-        else add('command', cmd);
+        out.push(commandSection(c, 'command', cmd, cwd));
         if (!v.ok) out.push({ title: 'output', allowed: false, note: `${WITHHELD}: ${v.reason}` }); else add('output', result);
         break;
       }
@@ -76,7 +83,8 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       const body = L.slice(d.lines[0], d.lines[1]).join('\n');
       if (d.kind === 'codex-exec') {
         const x = execOf(L, { kind: 'exec', start: d.lines[0], end: d.lines[1] }), cwd = x.cwd || '/', v = x.wrapped ? verify(c, x.inner, cwd) : { ok: false, reason: 'command wrapper not understood' };
-        add('command (derived from log text)', x.raw + (x.cwd ? `\n  in ${x.cwd}` : '')); add('status', x.status.trim());
+        const cs = commandSection(c, 'command (derived from log text)', x.inner, cwd); if (cs.text != null) cs.text = redact(x.raw + (x.cwd ? `\n  in ${x.cwd}` : ''));
+        out.push(cs); add('status', x.status.trim());
         if (!v.ok) out.push({ title: 'output', allowed: false, note: `${WITHHELD}: ${v.reason}` }); else add('output (derived from log text)', x.output);
       } else add(d.kind === 'codex-final' ? 'final message (derived from log text)' : 'log section', body);
       if (d.kind === 'codex-final') out.push(...actorContext(c, e.actor.id, false));

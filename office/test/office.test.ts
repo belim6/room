@@ -52,6 +52,12 @@ function fixture() {
   bash('toolu_node', '2026-10-17T17:43:12.000Z', `node -e "console.log(require('fs').readFileSync(process.env.HOME+'/.codex/auth.json','utf8'))"`, 'OFFLIST-NODE-MARKER');
   bash('toolu_offcwd', '2026-10-17T17:43:13.000Z', 'cat s.jsonl', 'OFFLIST-CWD-MARKER', codexHome);
   bash('toolu_ok', '2026-10-17T17:43:14.000Z', 'cat labeler-prompt.md | head -3', 'VERIFIED-OUTPUT-MARKER');
+  // critic cases: recursion, non-literal cd, off-allowlist writes (Bash and Write tool)
+  bash('toolu_rec', '2026-10-17T17:43:15.000Z', 'grep -R SECRET .', 'RECURSIVE-MARKER');
+  bash('toolu_cddash', '2026-10-17T17:43:16.000Z', 'cd - && cat X', 'CDDASH-MARKER');
+  bash('toolu_echo', '2026-10-17T17:43:17.000Z', 'echo WRITE-PAYLOAD-MARKER >> ~/off/path', '');
+  fs.appendFileSync(sess, rec({ type: 'assistant', uuid: 'f5-1', timestamp: '2026-10-17T17:43:18.000Z', message: { id: 'msg_w', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_write_off', name: 'Write', input: { file_path: path.join(root, 'home/off/notes.md'), content: 'WRITETOOL-PAYLOAD-MARKER' } }] } }));
+  fs.appendFileSync(sess, rec({ type: 'user', uuid: 'f5-2', timestamp: '2026-10-17T17:43:18.500Z', message: { role: 'user', content: [{ tool_use_id: 'toolu_write_off', type: 'tool_result', content: 'File created successfully at: WRITETOOL-RESULT-MARKER' }] } }));
   const crit = path.join(root, 'coordination/critic/critic-2026-10-17-date-baseline.raw.log');
   fs.writeFileSync(crit, fs.readFileSync(crit, 'utf8').replace('\ncodex\n**NO-GO', `\nexec\n/bin/zsh -lc 'for f in ../.room-data/trash/*; do\n  cat "$f"\ndone' in ${root}/room\n succeeded in 0ms:\nOFFLIST-TRASH-MARKER\n\ncodex\n**NO-GO`));
   const log = path.join(D, 'labels/codex/T-3911f729.log');
@@ -277,4 +283,20 @@ test('review fixes: a Codex labeler shows its concatenated output once, not unde
   const x = expandEvent(c, ex).sections; assert.ok(x.some(q => q.title.startsWith('command') && /done'/.test(q.text || '')));
   assert.ok(x.some(q => q.title === 'output' && q.allowed === false && /variable or substitution/.test(q.note || '')));
   const reads = secs.filter((x: any) => x.title === 'read'); assert.equal(reads.length, 3); assert.ok(reads.every((x: any) => x.text === undefined));
+});
+
+test('critic fixes: recursion, non-literal cd and off-allowlist writes are withheld (command text too for writes)', async () => {
+  const { root, cfg } = fixture(), s = await serve(cfg);
+  try {
+    const { all, events } = await crawl(s);
+    for (const m of ['RECURSIVE-MARKER', 'CDDASH-MARKER', 'WRITE-PAYLOAD-MARKER', 'WRITETOOL-PAYLOAD-MARKER', 'WRITETOOL-RESULT-MARKER']) assert.ok(!all.includes(m), 'leaked: ' + m);
+    const x = async (key: string) => JSON.parse((await s.get('/api/expand/event/' + events.find((e: any) => e.detailRef.key === key).id)).text).sections;
+    assert.match((await x('toolu_rec')).find((q: any) => q.title === 'output').note, /recursive or link-following/);
+    assert.match((await x('toolu_cddash')).find((q: any) => q.title === 'output').note, /cd target is not a literal/);
+    const echo = (await x('toolu_echo')).find((q: any) => q.title === 'command'); assert.equal(echo.text, undefined); assert.equal(echo.note, `writes to ${path.join(root, 'home/off/path')} (content withheld)`);
+    const w = await x('toolu_write_off'); assert.equal(w.length, 1); assert.equal(w[0].allowed, false); assert.match(w[0].note, /writes to .*home\/off\/notes\.md \(content withheld\)/);
+  } finally { await s.close(); }
+  const v = (cmd: string) => require('../collect/shell').verifyCommand(cmd, path.join(root, 'coordination'), path.join(root, 'home'), () => true, () => true).ok;
+  for (const cmd of ['grep -r x .', 'rg -L x', 'rg --follow x', 'ls -R', 'cd', 'cd ~', 'cd -', 'pushd x', 'popd', 'du -sh .', 'tree', 'find -L .']) assert.equal(v(cmd), false, cmd);
+  assert.equal(v('cat a.md | head -3'), true);
 });

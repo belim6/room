@@ -87,17 +87,32 @@ export function verifyCommand(cmd: string, cwd: string, home: string, okFile: (p
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t[0])) return no('sets environment variables');
     const name = t[0];
     if (name.includes('/') || !SAFE.has(name)) return no('runs an unverifiable program: ' + name);
+    if (name === 'cd' && (t.length !== 2 || /^[-~]/.test(t[1]))) return no('cd target is not a literal path');
     let pat = PATTERN_AT[name] || 0;
     for (let i = 1; i < t.length; i++) {
       const a = t[i];
       if (/^[<>&\d]*[<>]/.test(a)) continue; // redirection operator; its target is checked as the next token
-      if (a.startsWith('-')) { if (a.includes('/') || a.includes('~')) return no('a flag names a path: ' + a); continue; }
+      if (a.startsWith('-')) {
+        if (a.includes('/') || a.includes('~')) return no('a flag names a path: ' + a);
+        if (/^-[A-Za-z0-9]*[rRL]/.test(a) || /^--(recursive|follow|dereference|dereference-recursive)\b/.test(a)) return no('recursive or link-following flag: ' + a);
+        continue;
+      }
       if (pat > 0) { pat--; if (name === 'sed' && !/^[\d,$;!pnq\s]+$/.test(a)) return no('sed script is not a plain print'); continue; }
       if (/[*?[\]{}]/.test(a)) return no('uses a glob: ' + a);
       const p = abs(a); if (!okFile(p) && !okDir(p)) return no('touches an off-allowlist path: ' + p);
     }
-    if (name === 'cd') cwd = t[1] ? abs(t[1]) : home;
+    if (name === 'cd') cwd = abs(t[1]);
     if (!okDir(cwd)) return no('changes into an off-allowlist directory: ' + cwd);
   }
   return { ok: true };
+}
+
+// Does the command write somewhere we can't show? Then its text (the payload) is withheld, not just its output.
+// Coarse on purpose: any write construct whose target isn't a resolved, allowlisted path counts.
+const WRITE_CONSTRUCT = /(^|[^0-9&<>])>>?(?!&)\s*(?!\/dev\/null\b)\S|\btee\b|\bsed\b[^|;&\n]*\s-i\b|\b(cp|mv|ln|touch|rm)\s/;
+export function offAllowlistWrites(cmd: string, cwd: string, home: string, okFile: (p: string) => boolean): { withhold: boolean; targets: string[] } {
+  if (!WRITE_CONSTRUCT.test(cmd)) return { withhold: false, targets: [] };
+  const f = shellFacts(cmd, cwd, home), off = f.writes.filter(p => !okFile(p));
+  const unresolvable = !f.writes.length || /(>>?|\btee\b(\s+-a)?)\s*["']?[$`(]/.test(cmd);
+  return { withhold: unresolvable || off.length > 0, targets: off.length ? off : unresolvable ? ['an unverifiable path'] : [] };
 }

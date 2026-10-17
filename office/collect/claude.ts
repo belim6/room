@@ -62,7 +62,7 @@ export function parseClaude(o: ClaudeOpts, sink: Sink, allow: Allowlist) {
       }
       return;
     }
-    if (r.type === 'user' && m) {
+    if (r.type === 'user' && m) { think = -1;
       const blocks = Array.isArray(m.content) ? m.content : [];
       for (const b of blocks) {
         if (b.type !== 'tool_result') continue;

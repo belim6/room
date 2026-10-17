@@ -201,3 +201,23 @@ New tests:
 ### Remaining limits
 - Assistant `text` and `thinking`, and agents' final outputs, are shown redacted but are not checked against the allowlist. An agent that quoted an off-allowlist file in its own words would show that quote.
 - A command that names the repo root (`~/dev/room`) or a worktree is withheld (869 cases in real data). That is the intended fail-closed cost, and widening the allowlist is Deniz's call.
+
+## Critic fixes (after the release NO-GO)
+The release critic reproduced three ways `verifyCommand` could disclose off-allowlist content. Each is now closed by withholding; none relies on smarter parsing.
+1. **Recursive or link-following commands are unverifiable.** That covers any short flag cluster containing `r`, `R` or `L`, and `--recursive`, `--follow` or `--dereference*`. `find`, `du` and `tree` were already off the safe-program list. The rule is coarse on purpose: `sort -r` is withheld too.
+2. **`cd` must name a literal path.** Any `cd` that doesn't have exactly one literal argument is unverifiable: no argument, `-`, or anything starting with `~`. `pushd` and `popd` aren't on the safe list, and `$VAR` was already rejected.
+3. **Writes outside the allowlist withhold the command text itself** (`offAllowlistWrites` in `shell.ts`).
+   - A write here is any `>`/`>>` redirect (except to `/dev/null`), `tee`, `sed -i`, `cp`, `mv`, `ln`, `touch` or `rm`.
+   - If the target is off-allowlist, or can't be resolved to a literal path, the command section shows only `writes to <path> (content withheld)`.
+   - This applies to both Claude Bash commands and Codex `exec` commands.
+   - Write, Edit, MultiEdit and NotebookEdit calls to off-allowlist paths now return one path-only section for both input and result.
+4. **New note in the Expand panel:** "Agent text (prompts, thinking, messages, outputs) is redacted but not allowlist-checked."
+5. **A small fix found along the way.** The "thinking before this call" pointer is now reset at each new user/tool-result turn. Before, it could attach an earlier turn's thinking to a later tool call.
+
+**Tests.** The new test `critic fixes: …` covers:
+- `grep -R SECRET .`, `cd - && cat X`, and `echo PAYLOAD >> ~/off/path`, each through the server;
+- a `Write` tool call to an off-allowlist path, checked in both input and result;
+- direct `verifyCommand` cases: `grep -r`, `rg -L`, `rg --follow`, `ls -R`, `cd`, `cd ~`, `cd -`, `pushd`, `popd`, `du`, `tree`, `find -L`;
+- a positive control: `cat a.md | head -3` still verifies.
+
+**Results:** `npm run test:office` passes 14 of 14 and `npx tsc --noEmit` is clean. `npx tsc -p office` is also clean, and `npm run test:workbench` passes 150 of 150.

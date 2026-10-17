@@ -180,7 +180,7 @@ function actorCard(id) {
 const evList = (evs) => h('details', { open: evs.length < 40 ? '' : null }, h('summary', {}, `${evs.length} events`), h('div', { class: 'rows' }, evs.slice(0, 400).map((e) => row(e, false, false))));
 function expandBtn(load, label = 'Expand') {
   const wrap = h('div', {}), b = h('button', { on: { click: async () => { b.disabled = true; b.textContent = 'loading…';
-    try { const secs = await load(); b.remove(); wrap.append(...secs.map(section)); } catch (err) { b.textContent = 'failed: ' + err.message; } } } }, label);
+    try { const secs = await load(); b.remove(); wrap.append(h('div', { class: 'note' }, 'Agent text (prompts, thinking, messages, outputs) is redacted but not allowlist-checked.'), ...secs.map(section)); } catch (err) { b.textContent = 'failed: ' + err.message; } } } }, label);
   wrap.append(b); return wrap;
 }
 const section = (s) => h('details', { open: '' }, h('summary', {}, s.title, s.path ? h('span', { class: 'note' }, '  ' + short(s.path)) : '', s.truncated ? h('span', { class: 'badge b-warn' }, 'truncated') : ''),
