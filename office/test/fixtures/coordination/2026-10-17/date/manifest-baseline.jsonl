@@ -1,0 +1,8 @@
+{"at":"2026-10-17T17:28:26.097Z","kind":"branch","traj":"baseline·v0·r01","branch":"6923994d-3e7c-41bc-8a3e-2df8392547be","from":{"branch":"15066c21-61d5-4639-998f-cb1e6ca6742b","revision":"c6e3bd91-46ba-4196-9998-709c2f8debf7"}}
+{"at":"2026-10-17T17:28:26.501Z","kind":"phase-start","phase":"baseline","base":"http://127.0.0.1:4317","trajectories":[{"id":"baseline·v0·r01","branch":"6923994d-3e7c-41bc-8a3e-2df8392547be"}]}
+{"at":"2026-10-17T17:28:26.502Z","kind":"sweep","when":"start","ok":true}
+{"at":"2026-10-17T17:28:26.524Z","kind":"intent","traj":"baseline·v0·r01","turn":1,"speakerId":"e470d70b-75cc-44b6-9bfd-529d6275ff65","pick":{"speaker":"e470d70b-75cc-44b6-9bfd-529d6275ff65","rule":"alternate-v1","reason":"seeded-first","label":"Jake"},"inputRevision":"d901ae48-1b67-4149-9617-212c2ec559da"}
+{"at":"2026-10-17T17:28:30.881Z","kind":"done","traj":"baseline·v0·r01","turn":1,"run":"0987a97a-089c-4146-b47e-4dd098fe5716","turnId":"2c181537-f8f7-4d5f-b598-6ae7c3e721f7","messageId":"ace464d6-7254-4268-92a4-f06ed140e82e","attempts":["47433993-552e-4263-8b90-6adc32d075a3"],"inputRevision":"d901ae48-1b67-4149-9617-212c2ec559da","outputRevision":"353c38e6-5dca-407d-b6b0-0f3db51a993d"}
+{"at":"2026-10-17T17:28:31.000Z","kind":"mystery-kind","x":1}
+{"at":"2026-10-17T17:40:50.708Z","kind":"phase-end","phase":"baseline","stoppedPairs":{},"qualifyingFailures":[]}
+{"at":"2026-13-45T99:00:00Z","kind":"intent","traj":"x","turn":2}

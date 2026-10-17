@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Office</title>
+<link rel="stylesheet" href="office.css">
+</head>
+<body>
+<header id="bar">
+  <strong>Office</strong>
+  <select id="op" title="Operation"></select>
+  <span id="coverage" class="cov" title="Coverage for this operation: events by provenance, and gaps between events.jsonl and the session transcript"></span>
+  <span class="sep"></span>
+  <button id="play" title="Play / pause (space)">▶</button>
+  <span id="speeds"><button data-s="1">1×</button><button data-s="10" class="on">10×</button><button data-s="100">100×</button></span>
+  <label title="Collapse idle stretches over 30 s to 3 s"><input type="checkbox" id="compress" checked> skip idle</label>
+  <span id="clock" class="mono"></span>
+  <span class="grow"></span>
+  <span id="legend" class="mono"></span>
+</header>
+<div id="scrub"><canvas id="tl"></canvas></div>
+<main>
+  <section id="floorwrap"><canvas id="floor"></canvas><div id="tip"></div></section>
+  <aside id="inspector"><div class="empty">Click a node, an edge, a chip or an event.</div></aside>
+</main>
+<footer id="log"></footer>
+<script type="module" src="office.js"></script>
+</body>
+</html>

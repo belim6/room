@@ -1,0 +1,4 @@
+{"at":"2026-10-17T17:41:51Z","from":"claude","to":"stable","kind":"dispatch","ref":"2026-10-17/date/codexlabel.mjs","note":"codex baseline labels"}
+{"at":"2026-10-17T17:42:30Z","from":"claude","to":"critic","kind":"packet","ref":"2026-10-17/99-ghost-packet.md","note":"logged but never sent"}
+{"at":"2026-10-17T17:45:00Z","from":"claude","to":"critic","kind":"packet","ref":"2026-10-17/71-shared-call.md","note":"logged in the same call as the dispatch"}
+{"at":"not-a-date","from":"claude","to":"critic","kind":"packet","ref":"2026-10-17/70-date-baseline-results.md","note":"malformed timestamp"}

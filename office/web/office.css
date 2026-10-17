@@ -1,0 +1,47 @@
+:root { --bg: #0d1014; --panel: #13171d; --line: #232a33; --fg: #c9d1d9; --dim: #6b7682; --cap: #7cc4ff; --der: #b39cff; --inf: #8b949e;
+  --ok: #4fd18b; --amber: #f0b429; --red: #ff5c5c; color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+body { display: grid; grid-template-rows: auto 34px 1fr 128px; height: 100vh; overflow: hidden; }
+.mono, pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+#bar { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+#bar select, #bar button { background: #1b2129; color: var(--fg); border: 1px solid var(--line); border-radius: 3px; padding: 2px 7px; font: inherit; }
+#bar select { max-width: 340px; }
+#bar button.on { border-color: var(--cap); color: var(--cap); }
+#bar label { color: var(--dim); display: flex; align-items: center; gap: 3px; }
+.sep { width: 1px; height: 18px; background: var(--line); }
+.grow { flex: 1; }
+.cov { font-family: ui-monospace, Menlo, monospace; font-size: 11px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 3px; }
+.cov b { font-weight: 600; } .cov .c { color: var(--cap); } .cov .d { color: var(--der); } .cov .i { color: var(--inf); } .cov .g { color: var(--red); } .cov .g0 { color: var(--dim); }
+#legend { color: var(--dim); }
+#scrub { border-bottom: 1px solid var(--line); position: relative; }
+#tl { width: 100%; height: 34px; display: block; cursor: pointer; }
+main { display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
+#floorwrap { position: relative; min-width: 0; min-height: 0; }
+#floor { width: 100%; height: 100%; display: block; }
+#tip { position: absolute; pointer-events: none; background: #000c; border: 1px solid var(--line); padding: 3px 6px; border-radius: 3px; display: none; white-space: nowrap; }
+#inspector { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 8px 10px; }
+#inspector .empty { color: var(--dim); }
+#inspector h3 { margin: 0 0 4px; font-size: 13px; }
+#inspector table { border-collapse: collapse; width: 100%; }
+#inspector td { padding: 1px 4px 1px 0; vertical-align: top; }
+#inspector td:first-child { color: var(--dim); width: 76px; white-space: nowrap; }
+#inspector .path { word-break: break-all; }
+#inspector button { background: #1b2129; color: var(--fg); border: 1px solid var(--line); border-radius: 3px; padding: 2px 8px; margin: 6px 4px 2px 0; cursor: pointer; font: inherit; }
+#inspector details { border-top: 1px solid var(--line); padding: 4px 0; }
+#inspector summary { cursor: pointer; color: var(--fg); }
+#inspector pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; background: #0a0d10; border: 1px solid var(--line); padding: 5px; margin: 3px 0; }
+#inspector .note { color: var(--dim); font-style: italic; }
+#inspector .withheld { color: var(--amber); }
+.badge { display: inline-block; font-size: 10px; padding: 0 4px; border-radius: 2px; border: 1px solid; margin-left: 4px; text-transform: uppercase; letter-spacing: .03em; }
+.b-captured { color: var(--cap); } .b-derived { color: var(--der); } .b-inferred { color: var(--inf); } .b-fail { color: var(--red); } .b-ok { color: var(--ok); } .b-warn { color: var(--amber); }
+.rows div { padding: 1px 3px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rows div:hover { background: #1b2129; }
+.rows .fail { color: var(--red); } .rows .gap { color: var(--amber); } .rows .now { background: #17202b; }
+#log { border-top: 1px solid var(--line); overflow: auto; background: var(--panel); padding: 2px 6px; }
+#log .rows div { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+#log .t { color: var(--dim); } #log .v { display: inline-block; width: 62px; color: var(--dim); } #log .p { display: inline-block; width: 10px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr 40%; } #inspector { border-left: 0; border-top: 1px solid var(--line); } }
+.lc, .p-captured { color: var(--cap); } .ld, .p-derived { color: var(--der); } .li, .p-inferred { color: var(--inf); } .lr { color: var(--red); }
+.rows .future { opacity: .4; }
+.fatal { color: var(--red); padding: 10px; }
