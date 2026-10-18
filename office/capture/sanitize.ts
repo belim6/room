@@ -37,7 +37,10 @@ export function responseText(name: string, r: any): string {
   if (typeof r.content === 'string') return r.content;
   try { return JSON.stringify(r).slice(0, SPOOL_CAP); } catch { return ''; }
 }
-export function hookRecord(h: any, allow: Allowlist, now = new Date().toISOString()) {
+// At PostToolUse the output was produced in the PreToolUse cwd. ctx.preCwd: that cwd; null: no matching Pre record found.
+// Shell/search output is then shown only if verified under the Pre cwd, and, when the two differ, both are allowlisted.
+const CWD_TOOLS = new Set(['Bash', 'Grep', 'Glob']);
+export function hookRecord(h: any, allow: Allowlist, now = new Date().toISOString(), ctx: { preCwd?: string | null } = {}) {
   const event = String(h?.hook_event_name || 'unknown'), session = String(h?.session_id || ''), cwd = typeof h?.cwd === 'string' ? h.cwd : allow.cfg.home;
   const base: any = { v: 1, src: 'hook', ts: now, event, session, ...(h?.agent_id ? { agent: String(h.agent_id) } : {}), ...(h?.agent_type ? { agentType: String(h.agent_type) } : {}), cwd: allow.canonical(cwd) };
   const name = h?.tool_name ? String(h.tool_name) : '', inp = h?.tool_input && typeof h.tool_input === 'object' ? h.tool_input : {};
@@ -54,38 +57,82 @@ export function hookRecord(h: any, allow: Allowlist, now = new Date().toISOStrin
       const id = s.match(/agentId["':\s\\]+(a[0-9a-f]{8,})/); if (id && (name === 'Agent' || name === 'Task')) base.agentId = id[1];
       base.outcome = h.tool_response?.is_error || h.tool_response?.interrupted || /^Exit code [1-9]/.test(result) ? 'error' : 'ok';
     }
-    base.sections = cap(toolSections(allow, name, inp, result, cwd, target));
+    let execCwd = cwd, hold = '';
+    if (event === 'PostToolUse' && CWD_TOOLS.has(name)) {
+      if (!ctx.preCwd) hold = 'no matching PreToolUse record (working directory unknown)';
+      else if (allow.canonical(ctx.preCwd) !== allow.canonical(cwd) && !(allow.allowsDir(ctx.preCwd) && allow.allowsDir(cwd))) hold = 'working directory changed during the call and is not allowlisted on both sides';
+      else execCwd = ctx.preCwd;
+    }
+    const secs = toolSections(allow, name, inp, hold ? '' : result, execCwd, target);
+    if (hold) { const i = secs.findIndex(x => x.title === 'output' || x.title === 'result'); const w = { title: name === 'Bash' ? 'output' : 'result', allowed: false, note: `output withheld (unverifiable): ${hold}` }; if (i >= 0) secs[i] = w; else secs.push(w); }
+    base.sections = cap(secs);
   } else if (event === 'UserPromptSubmit') base.sections = cap([{ title: 'message', ...clip(String(h?.prompt || '')) }]);
-  else if (event === 'SubagentStop' && typeof h?.last_assistant_message === 'string') base.sections = cap([{ title: 'final output', ...clip(h.last_assistant_message) }]);
+  else if (event === 'SubagentStop' && typeof h?.last_assistant_message === 'string') base.sections = cap([{ title: 'final output', prose: true, ...clip(h.last_assistant_message) }]);
   if (h?.agent_transcript_path) base.transcript = allow.canonical(String(h.agent_transcript_path));
   base.id = hash('hook', session, base.agent || '', event, base.toolUseId || '', now);
   return base;
 }
 
 // ---- Codex `exec --json` events ---------------------------------------------------------------------------------
-export function codexItem(item: any, allow: Allowlist, cwd: string) {
+// The run's working directory from argv: `-C DIR`, `-CDIR`, `--cd DIR`, `--cd=DIR`. More than one distinct value, a missing
+// value, or a short-flag cluster that hides a C: undetermined, and then every command output of the run is withheld.
+export function codexCwd(args: string[], base: string): { cwd: string | null; reason?: string } {
+  const found: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') break;
+    if (a === '-C' || a === '--cd') { if (i + 1 >= args.length) return { cwd: null, reason: `${a} without a directory` }; found.push(args[++i]); continue; }
+    if (a.startsWith('--cd=')) { found.push(a.slice(5)); continue; }
+    if (/^-C./.test(a)) { found.push(a.slice(2)); continue; }
+    if (/^-[A-Za-z]+$/.test(a) && a.slice(1).includes('C')) return { cwd: null, reason: `ambiguous flag ${a}` };
+    if (/^-[cmposi]$|^--(config|model|profile|output-schema|output-last-message|sandbox|image|color|enable|disable)$/.test(a)) i++; // flags that take a value: skip it
+  }
+  const dirs = [...new Set(found.map(d => path.resolve(base, d)))];
+  if (dirs.length > 1) return { cwd: null, reason: 'working directory given more than once' };
+  return { cwd: dirs[0] || path.resolve(base) };
+}
+export function codexItem(item: any, allow: Allowlist, cwd: string | null) {
   const t = String(item?.type || item?.item_type || 'unknown'), out: any = { type: t, id: item?.id ? String(item.id) : undefined, status: item?.status };
   if (t === 'command_execution') {
     const raw = Array.isArray(item.command) ? item.command.join(' ') : String(item.command || '');
     const arr = Array.isArray(item.command) && item.command.length === 3 && /(?:^|\/)(?:zsh|bash|sh)$/.test(item.command[0]) && /^-l?c$/.test(item.command[1]) ? { wrapped: true, inner: String(item.command[2]) } : unwrapShell(raw);
-    const f = shellFacts(arr.inner, cwd, allow.cfg.home);
+    const f = cwd ? shellFacts(arr.inner, cwd, allow.cfg.home) : { reads: [], writes: [] };
     out.reads = f.reads; out.writes = f.writes; out.exitCode = item.exit_code ?? undefined;
-    out.sections = cap(commandSections(allow, arr.inner, cwd, item.aggregated_output ?? item.output, { shown: raw, understood: arr.wrapped }));
-  } else if (t === 'file_change') out.paths = (item.changes || []).map((c: any) => ({ path: allow.canonical(String(c?.path || ''), cwd), kind: c?.kind }));
-  else if (t === 'agent_message' || t === 'assistant_message') out.sections = cap([{ title: 'message', ...clip(String(item.text ?? '')) }]);
-  else if (t === 'reasoning') out.sections = cap([{ title: 'reasoning', ...clip(String(item.text ?? '')) }]);
+    out.sections = cap(commandSections(allow, arr.inner, cwd || '/', item.aggregated_output ?? item.output, { shown: raw, understood: arr.wrapped, withhold: cwd ? '' : 'the run\'s working directory could not be determined' }));
+  } else if (t === 'file_change') out.paths = (item.changes || []).map((c: any) => ({ path: allow.canonical(String(c?.path || ''), cwd || '/'), kind: c?.kind }));
+  else if (t === 'agent_message' || t === 'assistant_message') out.sections = cap([{ title: 'message', prose: true, ...clip(String(item.text ?? '')) }]);
+  else if (t === 'reasoning') out.sections = cap([{ title: 'reasoning', prose: true, ...clip(String(item.text ?? '')) }]);
   else if (t === 'web_search') out.sections = cap([{ title: 'query', ...clip(String(item.query ?? '')) }]);
   else if (t === 'mcp_tool_call') { out.tool = `${item.server || '?'}/${item.tool || '?'}`; out.sections = [{ title: 'result', allowed: false, note: 'output withheld (unverifiable): MCP results are not checked against the allowlist' }]; }
   else if (t === 'todo_list') out.sections = cap([{ title: 'todo', ...clip((item.items || []).map((x: any) => `${x.completed ? '[x]' : '[ ]'} ${x.text}`).join('\n')) }]);
-  else if (t === 'error') out.sections = cap([{ title: 'error', ...clip(String(item.message ?? '')) }]);
+  else if (t === 'error') out.sections = cap([{ title: 'error', prose: true, ...clip(String(item.message ?? '')) }]);
   return out;
 }
-export function codexRecord(ev: any, run: string, seq: number, allow: Allowlist, cwd: string, meta: Record<string, unknown>, now = new Date().toISOString()) {
+export function codexRecord(ev: any, run: string, seq: number, allow: Allowlist, cwd: string | null, meta: Record<string, unknown>, now = new Date().toISOString()) {
   const type = String(ev?.type || 'unknown'), r: any = { v: 1, src: 'codex', ts: now, run, seq, kind: 'event', type, ...meta };
   if (ev?.thread_id) r.thread = String(ev.thread_id);
   if (ev?.item) r.item = codexItem(ev.item, allow, cwd);
   if (ev?.usage) r.usage = { input: ev.usage.input_tokens, cached: ev.usage.cached_input_tokens, output: ev.usage.output_tokens };
-  if (type === 'error' || type === 'turn.failed') r.sections = cap([{ title: 'error', ...clip(String(ev?.message ?? ev?.error?.message ?? '')) }]);
+  if (type === 'error' || type === 'turn.failed') r.sections = cap([{ title: 'error', prose: true, ...clip(String(ev?.message ?? ev?.error?.message ?? '')) }]);
   r.id = hash('codex', run, seq); return r;
 }
 export { Allowlist, config, clip };
+
+// The PreToolUse record of a tool call, from the tail of today's and yesterday's hook spool (async hooks may land late:
+// the caller retries a few times before treating the record as missing).
+export function findPreCwd(dir: string, toolUseId: string, now = new Date()): string | null {
+  const days = [now, new Date(now.getTime() - 864e5)].map(d => path.join(dir, `hooks-${d.toISOString().slice(0, 10)}.jsonl`)), needle = `"toolUseId":${JSON.stringify(toolUseId)}`;
+  for (const f of days) {
+    let fd: number; try { fd = fs.openSync(f, 'r'); } catch { continue; }
+    try {
+      const size = fs.fstatSync(fd).size, n = Math.min(size, 512 * 1024), buf = Buffer.alloc(n); fs.readSync(fd, buf, 0, n, size - n);
+      const lines = buf.toString('utf8').split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) if (lines[i].includes(needle) && lines[i].includes('"event":"PreToolUse"')) { try { return JSON.parse(lines[i]).cwd || null; } catch {} }
+    } finally { fs.closeSync(fd); }
+  }
+  return null;
+}
+
+// Terminal-generated signals (Ctrl-C, Ctrl-\) already reach codex: it shares the wrapper's process group. Forwarding them
+// again would deliver them twice, so they are forwarded only when there is no terminal (a programmatic kill hits only us).
+export const forwardSignal = (sig: string, interactive: boolean) => !(interactive && (sig === 'SIGINT' || sig === 'SIGQUIT'));

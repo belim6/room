@@ -15,10 +15,10 @@ const payloads = [
   { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'cat labeler-prompt.md | head -5' }, tool_response: { stdout: 'y'.repeat(4000), stderr: '' } },
   { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: path.join(D, 'labels/claude/T-x.json'), content: '{"a":1}' } },
 ];
-const ms: number[] = [];
+const ms: number[] = []; // each PostToolUse shares its PreToolUse's tool_use_id, as in Claude Code
 for (let i = 0; i < N; i++) {
-  const input = JSON.stringify({ session_id: 'bench', cwd: D, tool_use_id: 'tu' + i, ...payloads[i % payloads.length] }), t = process.hrtime.bigint();
-  const r = spawnSync(process.execPath, ['--no-warnings', path.join(here, 'hook.ts')], { input, env: { ...process.env, OFFICE_SPOOL: spool } });
+  const input = JSON.stringify({ session_id: 'bench', cwd: D, tool_use_id: `tu${Math.floor(i / 5)}_${[0, 0, 1, 1, 2][i % 5]}`, ...payloads[i % payloads.length] }), t = process.hrtime.bigint();
+  const r = spawnSync(process.execPath, ['--no-warnings', path.join(here, 'hook.mjs')], { input, env: { ...process.env, OFFICE_SPOOL: spool } });
   ms.push(Number(process.hrtime.bigint() - t) / 1e6); if (r.status !== 0) console.error('non-zero exit', r.status);
 }
 const s = [...ms].sort((a, b) => a - b), q = (p: number) => s[Math.min(s.length - 1, Math.floor(p * s.length))];

@@ -4,7 +4,12 @@
 import { redact, type Allowlist } from './privacy.ts';
 import { verifyCommand, offAllowlistWrites } from './shell.ts';
 
-export interface Section { title: string; text?: string; path?: string; allowed?: boolean; note?: string; truncated?: boolean }
+// prose: agent-written text that cannot be checked against the allowlist (Deniz 2026-10-18): redacted, and served only on an
+// explicit third click (/api/expand/event/:id/prose), never in summaries or a default Expand.
+export interface Section { title: string; text?: string; path?: string; allowed?: boolean; note?: string; truncated?: boolean; prose?: boolean; hidden?: boolean }
+export const PROSE_NOTE = 'unverified agent text: redacted, but not checked against the allowlist';
+export const hideProse = (secs: Section[]): Section[] => secs.map(x => x.prose ? { title: x.title, prose: true, hidden: true, note: PROSE_NOTE, ...(x.truncated ? { truncated: true } : {}) } : x);
+export const onlyProse = (secs: Section[]): Section[] => secs.filter(x => x.prose);
 export const CAP = 120_000;
 export const WITHHELD = 'output withheld (unverifiable)';
 export const clip = (s: string, cap = CAP): { text: string; truncated?: boolean } => s.length > cap ? { text: redact(s.slice(0, cap)), truncated: true } : { text: redact(s) };
@@ -20,8 +25,8 @@ export function unwrapShell(raw: string): { wrapped: boolean; inner: string } {
   return w ? { wrapped: true, inner: w[1].replace(/'\\''/g, "'") } : { wrapped: false, inner: raw };
 }
 // A shell command (Claude Bash or a Codex exec) and its output, under the fail-closed rule.
-export function commandSections(allow: Allowlist, cmd: string, cwd: string, output: string | undefined, { title = 'command', outTitle = 'output', shown = cmd, understood = true } = {}): Section[] {
-  const out: Section[] = [commandSection(allow, title, cmd, cwd, shown)], v = understood ? verify(allow, cmd, cwd) : { ok: false, reason: 'command wrapper not understood' };
+export function commandSections(allow: Allowlist, cmd: string, cwd: string, output: string | undefined, { title = 'command', outTitle = 'output', shown = cmd, understood = true, withhold = '' } = {}): Section[] {
+  const out: Section[] = [commandSection(allow, title, cmd, cwd, shown)], v = withhold ? { ok: false, reason: withhold } : understood ? verify(allow, cmd, cwd) : { ok: false, reason: 'command wrapper not understood' };
   if (!v.ok) out.push({ title: 'output', allowed: false, note: `${WITHHELD}: ${v.reason}` });
   else if (output) out.push({ title: outTitle, ...clip(output) });
   return out;
@@ -39,7 +44,7 @@ export function toolSections(allow: Allowlist, name: string, inp: any, result: s
     add('written', inp.content ?? (inp.old_string != null ? `--- old\n${inp.old_string}\n+++ new\n${inp.new_string}` : JSON.stringify(inp.edits || inp, null, 1)), { path: target, allowed: true }); add('result', result); return out;
   }
   if (name === 'Bash') { add('description', inp.description); out.push(...commandSections(allow, String(inp.command || ''), cwd, result)); return out; }
-  if (name === 'Agent' || name === 'Task') { add('description', inp.description); add('prompt', inp.prompt); add('launch result', String(result || '').replace(/agentId: \S+.*$/gm, '')); return out; }
+  if (name === 'Agent' || name === 'Task') { add('description', inp.description); add('prompt', inp.prompt); add('launch result', String(result || '').replace(/agentId: \S+.*$/gm, ''), { prose: true }); /* a synchronous agent returns its prose here */ return out; }
   if (name === 'SendMessage') { add('message', inp.message ?? JSON.stringify(inp, null, 1)); add('result', result); return out; }
   if (name === 'Grep' || name === 'Glob') {
     const where = String(inp.path || cwd || ''), pat = String(inp.glob || (name === 'Glob' ? inp.pattern : '') || '');

@@ -37,7 +37,7 @@ export function* simulate(o: SimOpts): Generator<{ kind: 'hooks' | 'codex'; rec:
     yield cx(codexRecord({ type: 'item.completed', item: { id: 'item_0', type: 'command_execution', command: cmd, aggregated_output: files(id).map(read).join('') + tail, exit_code: 0, status: 'completed' } }, run, seq++, allow, D, meta, at()));
     yield cx(codexRecord({ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: verdict } }, run, seq++, allow, D, meta, at()));
     yield cx(codexRecord({ type: 'turn.completed', usage: { input_tokens: 4000, cached_input_tokens: 0, output_tokens: 300 } }, run, seq++, allow, D, meta, at()));
-    yield cx({ v: 1, src: 'codex', ts: at(), run, seq: seq++, kind: 'end', id: run + ':end', exit: { code: 0, signal: null }, ...meta, sections: [{ title: 'final message', text: verdict }] });
+    yield cx({ v: 1, src: 'codex', ts: at(), run, seq: seq++, kind: 'end', id: run + ':end', exit: { code: 0, signal: null }, ...meta, sections: [{ title: 'final message', prose: true, text: verdict }] });
   }
 }
 export function writeAll(spool: string, recs: Iterable<{ kind: 'hooks' | 'codex'; rec: any }>) { for (const { kind, rec } of recs) append(spool, kind, [rec], rec.ts); }

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export interface Config { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; coordinatorSession?: string; home: string; spool?: string }
+export interface Config { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; coordinatorSession?: string; home: string; spool?: string; repos?: string[] }
 export function config(env: NodeJS.ProcessEnv = process.env): Config {
   const home = env.OFFICE_HOME || os.homedir(), room = env.OFFICE_ROOM || path.join(home, 'dev/room');
   return {
@@ -12,6 +12,8 @@ export function config(env: NodeJS.ProcessEnv = process.env): Config {
     claudeProject: env.OFFICE_CLAUDE_PROJECT || path.join(home, '.claude/projects', room.replace(/[/.]/g, '-')),
     coordinatorSession: env.OFFICE_COORDINATOR_SESSION || undefined,
     spool: env.OFFICE_SPOOL || path.join(room, 'office-spool'),
+    // Deniz 2026-10-18: the repo is on the allowlist (room, room-stable and the room-* worktrees: the same code).
+    repos: env.OFFICE_REPOS != null ? env.OFFICE_REPOS.split(':').filter(Boolean) : [room, ...siblings(path.dirname(room), path.basename(room))],
   };
 }
 
@@ -30,14 +32,18 @@ const under = (p: string, root: string) => p === root || p.startsWith(root + pat
 export const ROOM_KINDS = /^(revisions|turns|attempts|outcomes|branches|vault-[a-z-]+|experiment[a-z-]*)$/;
 
 export interface Opened { fd: number; size: number }
+// git worktrees of the repo only (a worktree has a .git *file*): room-backups and other look-alikes are not code
+const siblings = (dir: string, name: string) => { try { return fs.readdirSync(dir).filter(n => n.startsWith(name + '-')).map(n => path.join(dir, n)).filter(p => { try { return fs.statSync(path.join(p, '.git')).isFile(); } catch { return false; } }); } catch { return []; } };
+// Inside the repos, these stay path-only wherever they occur (.room-data is handled by its own record-kind rule).
+export const EXCLUDED_SEGMENT = /^(saves|saved|oldsaves|prompt-archive|_dead|node_modules|\.git|office-spool|\.room-data)$/;
 export class Allowlist {
-  roots: { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; spool: string };
+  roots: { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; spool: string; repos: string[] };
   cfg: Config;
   // Test seam: runs between the allowlist check and the open, so a symlink swap there can be simulated.
   beforeOpen?: (canonicalPath: string) => void;
   constructor(cfg: Config) {
     this.cfg = cfg;
-    this.roots = { coordination: real(cfg.coordination), promptKnowledge: real(cfg.promptKnowledge), roomData: real(cfg.roomData), claudeProject: real(cfg.claudeProject), spool: real(cfg.spool || path.join(cfg.home, 'dev/room/office-spool')) };
+    this.roots = { coordination: real(cfg.coordination), promptKnowledge: real(cfg.promptKnowledge), roomData: real(cfg.roomData), claudeProject: real(cfg.claudeProject), spool: real(cfg.spool || path.join(cfg.home, 'dev/room/office-spool')), repos: (cfg.repos || []).map(real) };
   }
   canonical(p: string, cwd?: string) { return canonical(p, this.cfg.home, cwd); }
   // Raw sources whose text embeds other files' contents (transcripts, Codex/driver logs): readable by the collector and the
@@ -55,13 +61,17 @@ export class Allowlist {
   allows(p: string, cwd?: string) {
     if (!p || p.includes('\0')) return false;
     const c = this.canonical(p, cwd), r = this.roots;
-    if (/\.log$/.test(c) || under(c, r.spool)) return false;
-    if (under(c, r.coordination) || under(c, r.promptKnowledge)) return true;
+    if (/\.log$/.test(c) || under(c, r.spool) || /^\.env/.test(path.basename(c))) return false; // .env* anywhere: path only
     if (under(c, r.roomData)) { const rel = path.relative(r.roomData, c).split(path.sep); return rel.length === 2 && ROOM_KINDS.test(rel[0]) && rel[1].endsWith('.json'); }
+    if (under(c, r.coordination) || under(c, r.promptKnowledge)) return true;
+    return this.inRepo(c);
+  }
+  private inRepo(c: string) {
+    for (const root of this.roots.repos) if (under(c, root)) return !path.relative(root, c).split(path.sep).some(seg => EXCLUDED_SEGMENT.test(seg) || /^\.env/.test(seg));
     return false;
   }
   // A directory a shell command may run in (or list) without escaping the content tier.
-  allowsDir(p: string, cwd?: string) { const c = this.canonical(p, cwd), r = this.roots; return under(c, r.coordination) || under(c, r.promptKnowledge); }
+  allowsDir(p: string, cwd?: string) { const c = this.canonical(p, cwd), r = this.roots; return !under(c, r.roomData) && !under(c, r.spool) && (under(c, r.coordination) || under(c, r.promptKnowledge) || this.inRepo(c)); }
   // Which permanent artifact node a path belongs to (metadata only; works for off-allowlist paths too).
   group(p: string, cwd?: string) {
     const c = this.canonical(p, cwd), r = this.roots;

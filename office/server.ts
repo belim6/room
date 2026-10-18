@@ -3,6 +3,7 @@ import path from 'node:path';
 import { collect, type Collected } from './collect/index';
 import { config, redact, redactDeep, type Config } from './collect/privacy';
 import { expandEvent } from './collect/expand';
+import { hideProse, onlyProse } from './collect/withhold';
 import type { OfficeEvent } from './collect/types';
 import { Live, type LiveOpts } from './live';
 
@@ -32,7 +33,9 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   app.get('/api/events', (req, res) => { const op = String(req.query.op || ''); send(res, { op, events: data.events.filter(e => inOp(e, op)).map(meta) }); });
   app.get('/api/artifacts', (req, res) => { const op = String(req.query.op || ''), g = String(req.query.group || '');
     send(res, data.artifacts.filter(a => (!op || op === '*' || a.operation === op || a.operation?.startsWith(op + '/')) && (!g || a.group === g)).slice(0, 2000)); });
-  app.get('/api/expand/event/:id', (req, res) => { const e = data.byId.get(req.params.id); if (!e) return res.status(404).json({ error: 'No such event' }); send(res, { event: meta(e), ...expandEvent(data, e) }); });
+  // Default Expand: agent prose is replaced by a stub. It is served only by the explicit third-click route below.
+  app.get('/api/expand/event/:id', (req, res) => { const e = data.byId.get(req.params.id); if (!e) return res.status(404).json({ error: 'No such event' }); const x = expandEvent(data, e); send(res, { event: meta(e), ...x, sections: hideProse(x.sections) }); });
+  app.get('/api/expand/event/:id/prose', (req, res) => { const e = data.byId.get(req.params.id); if (!e) return res.status(404).json({ error: 'No such event' }); const x = expandEvent(data, e); send(res, { id: e.id, source: x.source, sections: onlyProse(x.sections) }); });
   app.get('/api/expand/file', (req, res) => { const p = String(req.query.path || ''); if (!p) return res.status(400).json({ error: 'path required' }); send(res, data.allow.read(p)); });
   app.get('/api/recollect', (_req, res) => { live.full(); send(res, { collectedAt: data.collectedAt, events: data.events.length }); });
   // Server-sent events: upserts/removals as the live tier merges them. Same metadata tier and redaction as /api/events.

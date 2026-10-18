@@ -34,7 +34,7 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
   switch (d.kind) {
     case 'claude-tool': {
       const rec = json(lineAt(c, d.file, d.lines[0])), use = rec?.message?.content?.find((b: any) => b.type === 'tool_use' && b.id === d.key), inp = use?.input || {};
-      if (d.extra?.think != null) { const t = json(lineAt(c, d.file, d.extra.think as number)); add('thinking before this call', (t?.message?.content || []).filter((b: any) => b.type === 'thinking').map((b: any) => b.thinking).join('\n')); }
+      if (d.extra?.think != null) { const t = json(lineAt(c, d.file, d.extra.think as number)); add('thinking before this call', (t?.message?.content || []).filter((b: any) => b.type === 'thinking').map((b: any) => b.thinking).join('\n'), { prose: true }); }
       const results = d.lines.slice(1).map(n => json(lineAt(c, d.file, n))).filter(Boolean);
       const result = results.map(r => Array.isArray(r.message?.content) ? r.message.content.filter((b: any) => b.type === 'tool_result' && b.tool_use_id === d.key).map((b: any) => textOf(b.content)).join('\n') : textOf(r.message?.content)).join('\n---\n');
       const name = use?.name;
@@ -42,8 +42,9 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       if ((name === 'Agent' || name === 'Task') && e.target?.id.startsWith('agent:')) out.push(...actorContext(c, e.target.id, false));
       break;
     }
-    case 'claude-text': { const r = json(lineAt(c, d.file, d.lines[0])); add('text', textOf(r?.message?.content)); break; }
-    case 'claude-user': case 'claude-notification': { const r = json(lineAt(c, d.file, d.lines[0])); add('message', textOf(r?.message?.content)); break; }
+    case 'claude-text': { const r = json(lineAt(c, d.file, d.lines[0])); add('text', textOf(r?.message?.content), { prose: true }); break; }
+    case 'claude-user': { const r = json(lineAt(c, d.file, d.lines[0])); add('message', textOf(r?.message?.content)); break; }
+    case 'claude-notification': { const r = json(lineAt(c, d.file, d.lines[0])); add('message', textOf(r?.message?.content), { prose: true }); break; } // carries the agent's result text
     case 'claude-subagent-start': { const r = json(lineAt(c, d.file, 0)); add('prompt', textOf(r?.message?.content)); out.push(...actorContext(c, e.target!.id, false)); break; }
     case 'claude-subagent-end': out.push(...actorContext(c, e.actor.id)); break;
     case 'codex-session': case 'codex-exec': case 'codex-final': case 'codex-section': {
@@ -59,7 +60,7 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
         const x = execOf(L, { kind: 'exec', start: d.lines[0], end: d.lines[1] }), cwd = x.cwd || '/';
         const secs = commandSections(allow, x.inner, cwd, x.output, { title: 'command (derived from log text)', outTitle: 'output (derived from log text)', shown: x.raw + (x.cwd ? `\n  in ${x.cwd}` : ''), understood: x.wrapped });
         out.push(secs[0]); add('status', x.status.trim()); out.push(...secs.slice(1));
-      } else add(d.kind === 'codex-final' ? 'final message (derived from log text)' : 'log section', body);
+      } else add(d.kind === 'codex-final' ? 'final message (derived from log text)' : 'log section', body, { prose: true });
       if (d.kind === 'codex-final') out.push(...actorContext(c, e.actor.id, false));
       break;
     }
@@ -123,6 +124,6 @@ export function actorContext(c: Collected, actorId: string, withPrompt = true): 
   }
   for (const e of evs.filter(e => e.verb === 'write' && e.target?.kind === 'file')) out.push(...expandEvent(c, e).sections.filter(s => s.title === 'written').map(s => ({ ...s, title: 'wrote' })));
   const end = evs.find(e => e.verb === 'end');
-  if (end?.detailRef.kind === 'claude-subagent-end' && end.detailRef.lines.length) { const r = json(lineAt(c, end.detailRef.file, end.detailRef.lines[0])); const t = textOf(r?.message?.content); if (t) out.push({ title: 'final output', ...clip(t) }); }
+  if (end?.detailRef.kind === 'claude-subagent-end' && end.detailRef.lines.length) { const r = json(lineAt(c, end.detailRef.file, end.detailRef.lines[0])); const t = textOf(r?.message?.content); if (t) out.push({ title: 'final output', prose: true, ...clip(t) }); }
   return out;
 }

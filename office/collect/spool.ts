@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Sink, type OfficeEvent, type Verb } from './types';
-import { readLines, agentKind } from './claude';
+import { agentKind } from './claude';
 import { verdictOf, findingsOf } from './codex';
 import type { Allowlist } from './privacy';
 
@@ -15,12 +15,37 @@ export const dedupeKey = (e: OfficeEvent) => e.verb === 'spawn' && e.target?.kin
 
 export function spoolFiles(dir: string) { return fs.existsSync(dir) ? fs.readdirSync(dir).filter(n => /^(hooks|codex)-\d{4}-\d\d-\d\d\.jsonl$/.test(n)).sort().map(n => path.join(dir, n)) : []; }
 
+// Per-file read state: byte offset of the next unread line, parsed records, line offsets (for Expand). Live ticks read only
+// the new tail; a partial last line waits for its newline.
+export interface SpoolState { ino: number; offset: number; lines: number; recs: { r: any; i: number }[]; offs: number[]; unparsed: number; dupes: number; ids: Set<string>; lastTs: string }
+export function readSpoolTail(file: string, st?: SpoolState): SpoolState {
+  let size = 0, ino = 0; try { const s = fs.statSync(file); size = s.size; ino = s.ino; } catch { return st || newState(); }
+  if (!st || size < st.offset || (st.ino && st.ino !== ino)) st = newState(); // first read, or the file was truncated/replaced
+  st.ino = ino;
+  if (size === st.offset) return st;
+  const fd = fs.openSync(file, 'r'); let buf: Buffer;
+  try { buf = Buffer.alloc(size - st.offset); fs.readSync(fd, buf, 0, buf.length, st.offset); } finally { fs.closeSync(fd); }
+  const end = buf.lastIndexOf(10); if (end < 0) return st;
+  let pos = 0;
+  while (pos <= end) {
+    const nl = buf.indexOf(10, pos), line = buf.toString('utf8', pos, nl), i = st.lines++;
+    st.offs.push(st.offset + pos); pos = nl + 1;
+    if (!line.trim()) continue;
+    try { const r = JSON.parse(line); if (r?.v !== 1 || !r.ts || !Number.isFinite(Date.parse(r.ts))) throw 0;
+      if (r.id && st.ids.has(r.id)) { st.dupes++; continue; } if (r.id) st.ids.add(r.id); st.recs.push({ r, i }); if (r.ts > st.lastTs) st.lastTs = r.ts; } catch { st.unparsed++; }
+  }
+  st.offset += end + 1; return st;
+}
+const newState = (): SpoolState => ({ ino: 0, offset: 0, lines: 0, recs: [], offs: [], unparsed: 0, dupes: 0, ids: new Set(), lastTs: '' });
+
 export function parseSpool(file: string, sink: Sink, allow: Allowlist, opts: { primarySession?: string; known?: Set<string> }) {
-  const stat = { kind: path.basename(file).startsWith('hooks') ? 'spool-hooks' : 'spool-codex', path: file, records: 0, events: 0, unparsed: 0, note: '' as string | undefined };
-  sink.sources.push(stat); let deduped = 0;
-  const recs: { r: any; i: number }[] = [];
-  const ids = new Set<string>(); // a record appended twice (retry) counts once
-  readLines(file, sink).forEach((l, i) => { if (!l.trim()) return; try { const r = JSON.parse(l); if (r?.v !== 1 || !r.ts || !Number.isFinite(Date.parse(r.ts))) throw 0; if (r.id && ids.has(r.id)) { deduped++; return; } if (r.id) ids.add(r.id); recs.push({ r, i }); stat.records++; } catch { stat.unparsed++; } });
+  const st = readSpoolTail(file); sink.lineIndex.set(file, st.offs); buildSpool(file, st, sink, allow, opts); return st;
+}
+// Events from a file's records (all of them: tool calls and runs pair up across appends).
+export function buildSpool(file: string, st: SpoolState, sink: Sink, allow: Allowlist, opts: { primarySession?: string; known?: Set<string> }) {
+  const stat = { kind: path.basename(file).startsWith('hooks') ? 'spool-hooks' : 'spool-codex', path: file, records: st.recs.length, events: 0, unparsed: st.unparsed, note: '' as string | undefined };
+  sink.sources.push(stat); let deduped = st.dupes;
+  const recs = [...st.recs];
   recs.sort((a, b) => a.r.ts.localeCompare(b.r.ts) || a.i - b.i); // delayed / out-of-order appends
   const seen = new Set<string>(), push = (e: Omit<OfficeEvent, 'id' | 'seq' | 'derived'>) => {
     const ev = sink.push(e), k = dedupeKey(ev);

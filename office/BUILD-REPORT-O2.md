@@ -39,15 +39,15 @@ cd ~/dev/room-office && npm run office          # http://127.0.0.1:4318 ; live t
   ```
 
 ## Hook settings snippet (ready to paste; not installed)
-Add this to `~/dev/room/.claude/settings.local.json`, which is per-machine and not committed. After the Office merges to `main`, change the path to `~/dev/room/office/capture/hook.ts`. `"async": true` is the critic's P1: tools never wait on the hook.
+Add this to `~/dev/room/.claude/settings.local.json`, which is per-machine and not committed. After the Office merges to `main`, change the path to `~/dev/room/office/capture/hook.mjs`. `"async": true` is the critic's P1: tools never wait on the hook.
 ```json
 {
   "hooks": {
-    "PreToolUse":       [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.ts", "async": true, "timeout": 10 }] }],
-    "PostToolUse":      [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.ts", "async": true, "timeout": 10 }] }],
-    "SubagentStart":    [{ "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.ts", "async": true, "timeout": 10 }] }],
-    "SubagentStop":     [{ "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.ts", "async": true, "timeout": 10 }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.ts", "async": true, "timeout": 10 }] }]
+    "PreToolUse":       [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.mjs", "async": true, "timeout": 10 }] }],
+    "PostToolUse":      [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.mjs", "async": true, "timeout": 10 }] }],
+    "SubagentStart":    [{ "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.mjs", "async": true, "timeout": 10 }] }],
+    "SubagentStop":     [{ "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.mjs", "async": true, "timeout": 10 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node --no-warnings /Users/denizyuksel/dev/room-office/office/capture/hook.mjs", "async": true, "timeout": 10 }] }]
   }
 }
 ```
@@ -137,3 +137,68 @@ New tests in `office/test/office-o2.test.ts`:
 - **Agent text is redacted but not allowlist-checked.** This covers prompts, messages, reasoning and final outputs, and applies in the spool too. It is unchanged from O1 and noted in the Expand panel.
 - **Not in O2:** the workflow graph (O3; the data model keeps template and run apart), the agent-side narrative, and widening the allowlist.
 - **Spool retention.** The spool grows by one file per day per source and has no rotation or retention yet. It is outside `.room-data`, `coordination/` and every agent context, and nothing in any prompt refers to it.
+
+## Review fixes (after the O2 review NO-GO)
+These supersede the sections above where they differ. Each fix has a test in `office/test/office-o2.test.ts` named `review N: …`.
+
+1. **HIGH: the Codex working directory is parsed in every form** (`codexCwd` in `capture/sanitize.ts`).
+   - Accepted forms: `-C DIR`, `-CDIR`, `--cd DIR` and `--cd=DIR`. Parsing stops at `--`, and the values of flags that take a value are skipped.
+   - The cwd counts as undetermined in three cases: two different values, a missing value, or a short-flag cluster hiding a `C` (e.g. `-sC`).
+   - When it is undetermined, **every command output of that run is withheld** ("the run's working directory could not be determined"), and the spool records `cwdUnknown` with the reason.
+   - Tested on the parser and through the wrapper process. `-C D --cd=/outside`, `--cd /outside` and `-C/outside` leave no planted output in the spool; `-C<allowlisted dir>` shows it.
+2. **HIGH: Live catches up.** This is `web/liveclient.mjs`, shared by the page and the test.
+   - Every `hello` triggers a refetch of the current operation. A `hello` arrives on the first connect, on the browser's automatic reconnect after a drop, and when Live is switched back on.
+   - Deltas that arrive during the refetch are queued and applied after it.
+   - Changing operation while Live is on re-subscribes.
+   - The test drives a real server through a stand-in EventSource. It checks that events written while Live was off appear when it is switched back on, and that events written during a network drop appear after the automatic reconnect.
+   - I also checked this in the browser, on a temp server on 4319 with a throwaway spool. Live on → off, then a simulated run, then Live on: the client went from 0 to 66 run events.
+3. **MEDIUM: sub-agent progress triggers the transcript fallback.** The change check now includes size and mtime for every `subagents/**/agent-*.jsonl`, not only the directory. The test appends a tool call to a sub-agent transcript, sees the signature change, and sees the full collect pick the event up.
+4. **MEDIUM: PostToolUse output is checked against the PreToolUse cwd.**
+   - For Bash, Grep and Glob, the hook finds the call's PreToolUse record in the spool (`findPreCwd`, which reads the tail of today's and yesterday's file). The Pre hook may still be writing, so it retries up to 5 × 100 ms.
+   - Output is shown only if it verifies under the Pre cwd.
+   - If the two cwds differ, both must be allowlisted directories.
+   - With no Pre record, the output is withheld.
+   - Tested on the record builder and through two real hook processes, Pre then Post.
+5. **LOW: performance.**
+   - Spool files are read **only from the last byte offset** (`readSpoolTail`). A partial last line waits for its newline, and a truncated or replaced file (detected by size or inode) is re-read from the start. The test overwrites already-read bytes in place, and only the new tail is parsed.
+   - Events for a changed file are rebuilt from cached records. There is no re-read and no re-parse.
+   - While the hooks are delivering (a hook record within 2 minutes), the blocking full transcript collect backs off from 15 s to 120 s (`fullMsWithHooks`), because the hooks already cover live activity. Tested.
+   - The full collect itself is still synchronous, about 1.1 s. Moving it to a worker is left for O4.
+6. **LOW: hook failures and Ctrl-C.**
+   - The hook entry point is now `capture/hook.mjs`. It is plain JavaScript using only Node built-ins, and it imports `hook-main.ts` inside a try. A load-time failure (missing file, syntax error, old Node) is counted as `hook-load` in `errors.count`, and the exit status is still 0. Tested by running a copy of `hook.mjs` with no `hook-main.ts` beside it.
+   - **The hook snippet above now points at `hook.mjs`.**
+   - The wrapper no longer forwards SIGINT or SIGQUIT when it has a terminal, because the terminal already delivers them to Codex, which shares the wrapper's process group. Without a terminal it still forwards them, since a programmatic `kill` reaches only the wrapper.
+   - SIGTERM and SIGHUP are always forwarded. Exit and signal passthrough are unchanged. Tested as a unit (`forwardSignal`); the non-terminal forwarding tests still pass.
+
+**Latency after the fixes.** 100 calls, with each Post sharing its Pre's tool-use id as in Claude Code: p50 67.6 / 69.5 ms, p95 269.2 / 271.7 ms, 0 errors. A Bash Post with no Pre record waits up to 500 ms before withholding. That's acceptable because the hooks are async.
+
+## Deniz's decisions (2026-10-18)
+**A. Agent text sits behind a third click.**
+- Agent-written prose is marked `prose` wherever it is produced:
+  - **Codex:** agent and assistant messages, reasoning, error text, and the final message, from both the wrapper spool and O1 log parsing;
+  - **Claude sub-agents:** `last_assistant_message`, and the final text in transcripts;
+  - **Coordinator transcripts:** assistant text and thinking, plus the agent result inside task notifications and synchronous Agent results.
+- **Default views:** `/api/expand/event/:id` replaces prose with a stub titled "unverified agent text: redacted, but not checked against the allowlist". The summary, events and SSE never carried prose and still don't.
+- **The third click:** `/api/expand/event/:id/prose` returns only those sections, still redacted. The page shows a **Show unverified agent text** button with that one-line explanation; clicking it fills in the stubs.
+- **Test:** planted markers in every prose kind are absent from the summary, the events and every default Expand. All of them are present on the third-click route, with a planted key redacted.
+
+**B. The repo is on the allowlist.**
+- **Allowlisted:** `~/dev/room` and its git worktrees, a `room-*` sibling with a `.git` *file*: today `room-stable`, `room-live`, `room-office` and `room-simreason`. `room-backups` is not a worktree, so it stays off.
+- **Path-only anywhere inside them:**
+  - `.env*` files;
+  - `saves/`, `saved/`, `oldsaves/`, `prompt-archive/`, `_dead/`;
+  - `node_modules/`, `.git/`, `office-spool/`;
+  - `.room-data/`, except the record kinds already allowed; `trash/` stays excluded.
+- `.log` files and raw spool files stay path-only. Canonical-path and open-then-verify (TOCTOU) checks are unchanged. `OFFICE_REPOS` overrides the list.
+- **Test:** a repo source file is readable, directly and through the server. `.env`, `.env.local`, `saves/`, `saved/`, `oldsaves/`, `prompt-archive/`, `_dead/`, `node_modules/`, `.git/config`, office-spool files and `.room-data/trash` are path-only, and a symlink out of the repo is refused. Shell output inside the repo now verifies; `cat .env`, `cat saves/…` and `cd .git` do not.
+- **Withheld commands on real data, before → after**, counting command/tool outputs once per tool call:
+
+| | before (no repo) | after (repo allowlisted) |
+|---|---|---|
+| outputs shown | 313 | 581 |
+| outputs withheld | 2,315 | 2,121 |
+| file reads whose content may be shown | 1,091 / 2,127 | 1,881 / 2,128 |
+
+  Most of the remaining withheld outputs come from commands that use `$variables`, heredocs, interpreters (`node -e`, `python3`) or paths outside the repo, like the scratchpad and `~/.codex`. That is fail-closed by design.
+
+**Results:** `npm run test:office` passes 31 of 31, `npx tsc --noEmit` and `npx tsc -p office` are clean, and `npm run test:workbench` passes 150 of 150. My temp servers on 4319 are stopped. PID 2333 on 4318 was left alone.

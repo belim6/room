@@ -4,7 +4,7 @@ import { collect, finalize, operations, type Collected } from './collect/index';
 import { Sink, type OfficeEvent, type Actor } from './collect/types';
 import { parseEvents } from './collect/events';
 import { parseManifest } from './collect/manifests';
-import { parseSpool, spoolFiles, dedupeKey } from './collect/spool';
+import { readSpoolTail, buildSpool, spoolFiles, dedupeKey, type SpoolState } from './collect/spool';
 import type { Config } from './collect/privacy';
 
 // Live tier. Every second: re-parse the append-only small sources that changed (spool, events.jsonl, driver manifests)
@@ -13,14 +13,14 @@ import type { Config } from './collect/privacy';
 // and fold them with the same renderer as replay.
 export const meta = (e: OfficeEvent) => { const { hints, ...m } = e; return m; };
 const same = (a: OfficeEvent, b: OfficeEvent) => JSON.stringify({ ...meta(a), seq: 0 }) === JSON.stringify({ ...meta(b), seq: 0 });
-export interface LiveOpts { tickMs?: number; fullMs?: number; roomFeed?: string }
+export interface LiveOpts { tickMs?: number; fullMs?: number; fullMsWithHooks?: number; roomFeed?: string }
 export type Push = (type: string, data: unknown) => void;
 
 export class Live {
-  clients = new Set<Push>(); sizes = new Map<string, number>(); transcriptSig = ''; lastFull = Date.now(); version = 0;
+  clients = new Set<Push>(); sizes = new Map<string, number>(); spool = new Map<string, SpoolState>(); transcriptSig = ''; lastFull = Date.now(); version = 0; fulls = 0;
   private timer?: NodeJS.Timeout; private feedStop?: () => void; private busy = false;
   constructor(private get: () => Collected, private set: (c: Collected) => void, private cfg: Config, private opts: LiveOpts = {}) {
-    for (const f of this.tracked()) this.sizes.set(f, this.size(f));
+    for (const f of this.tracked()) { this.sizes.set(f, this.size(f)); if (this.get().allow.isSpool(f)) this.spool.set(f, readSpoolTail(f)); }
     this.transcriptSig = this.sig();
   }
   start() {
@@ -37,13 +37,19 @@ export class Live {
     scan(c.coordination, 2);
     return out;
   }
-  // Session transcripts and sub-agent dirs: size/mtime signature only (cheap); a change schedules a full collect.
-  private sig() {
-    const root = this.get().allow.roots.claudeProject; let s = '';
-    try { for (const n of fs.readdirSync(root).sort()) { const p = path.join(root, n); const st = fs.statSync(p); s += `${n}:${st.size}:${st.mtimeMs};`;
-      const sub = path.join(p, 'subagents'); if (st.isDirectory() && fs.existsSync(sub)) s += `${fs.statSync(sub).mtimeMs};`; } } catch {}
-    return s;
+  // Session transcripts and every sub-agent transcript (subagents/**/agent-*.jsonl): sizes and mtimes. Any change, including
+  // an agent appending to its own transcript, schedules a full collect (the transcript fallback).
+  sig() {
+    const root = this.get().allow.roots.claudeProject, parts: string[] = [];
+    const walk = (d: string) => { let ns: string[] = []; try { ns = fs.readdirSync(d).sort(); } catch { return; }
+      for (const n of ns) { const p = path.join(d, n); let st: fs.Stats; try { st = fs.lstatSync(p); } catch { continue; }
+        if (st.isDirectory()) walk(p); else if (/^agent-.*\.jsonl$/.test(n)) parts.push(`${p}:${st.size}:${st.mtimeMs}`); } };
+    try { for (const n of fs.readdirSync(root).sort()) { const p = path.join(root, n); const st = fs.statSync(p);
+      if (st.isFile() && n.endsWith('.jsonl')) parts.push(`${n}:${st.size}:${st.mtimeMs}`); else if (st.isDirectory()) walk(path.join(p, 'subagents')); } } catch {}
+    return parts.join(';');
   }
+  // While the hooks are delivering, transcripts only reconcile: the blocking full collect then runs far less often.
+  private hooksActive(now: number) { for (const [f, st] of this.spool) if (path.basename(f).startsWith('hooks') && st.lastTs && now - Date.parse(st.lastTs) < 120e3) return true; return false; }
   tick(now = Date.now()) {
     if (this.busy) return; this.busy = true;
     try {
@@ -51,7 +57,8 @@ export class Live {
       for (const f of this.tracked()) { const s = this.size(f); if (s !== this.sizes.get(f)) { this.sizes.set(f, s); if (s >= 0) changed.push(f); } }
       if (changed.length) this.incremental(changed);
       const sig = this.sig();
-      if (sig !== this.transcriptSig && now - this.lastFull >= (this.opts.fullMs ?? 15000)) { this.transcriptSig = sig; this.full(); }
+      const every = this.hooksActive(now) ? (this.opts.fullMsWithHooks ?? 120000) : (this.opts.fullMs ?? 15000);
+      if (sig !== this.transcriptSig && now - this.lastFull >= every) { this.transcriptSig = sig; this.full(); }
     } finally { this.busy = false; }
   }
   incremental(files: string[]) {
@@ -59,7 +66,7 @@ export class Live {
     for (const [k, a] of data.actors) sink.actors.set(k, { ...a });
     const known = new Set(data.events.filter(e => !fileSet.has(e.source)).map(dedupeKey).filter(Boolean));
     for (const f of files) {
-      if (allow.isSpool(f)) parseSpool(f, sink, allow, { primarySession: data.primarySession, known });
+      if (allow.isSpool(f)) { const st = readSpoolTail(f, this.spool.get(f)); this.spool.set(f, st); sink.lineIndex.set(f, st.offs); buildSpool(f, st, sink, allow, { primarySession: data.primarySession, known }); }
       else if (path.basename(f) === 'events.jsonl') parseEvents(f, sink, allow);
       else parseManifest(f, sink, allow);
     }
@@ -70,7 +77,8 @@ export class Live {
     this.merge(events, removes, sink.actors);
   }
   full() {
-    const prev = this.get(), next = collect(this.cfg), ids = new Set(next.events.map(e => e.id));
+    const prev = this.get(), next = collect(this.cfg), ids = new Set(next.events.map(e => e.id)); this.fulls++;
+    for (const f of spoolFiles(next.allow.roots.spool)) this.spool.set(f, readSpoolTail(f, this.spool.get(f)));
     const removes = prev.events.filter(e => !ids.has(e.id)).map(e => e.id);
     this.lastFull = Date.now(); this.set(next);
     const changed = next.events.filter(e => { const p = prev.byId.get(e.id); return !p || !same(p, e); });

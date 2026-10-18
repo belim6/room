@@ -1,4 +1,5 @@
 import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate } from './model.mjs';
+import { liveClient } from './liveclient.mjs';
 
 const $ = (s) => document.querySelector(s);
 const h = (tag, attrs = {}, ...kids) => { const n = document.createElement(tag); for (const [k, v] of Object.entries(attrs || {})) if (v != null) k === 'on' ? Object.entries(v).forEach(([e, f]) => n.addEventListener(e, f)) : k === 'class' ? (n.className = v) : n.setAttribute(k, v);
@@ -43,6 +44,7 @@ function fillOps() {
   if (cur) sel.value = cur;
 }
 async function loadOp(op) {
+  if (S.live) { live.stop(); live.start(); } // re-subscribe so the catch-up targets the new operation
   S.op = op; location.hash = 'op=' + encodeURIComponent(op);
   const { events } = await get('/api/events?op=' + encodeURIComponent(op));
   setEvents(events, true);
@@ -65,12 +67,16 @@ function coverage() {
 function togglePlay() { if (S.live) toggleLive(); if (!S.playing && S.c >= S.tl.duration) S.c = 0; S.playing = !S.playing; $('#play').textContent = S.playing ? '❚❚' : '▶'; }
 
 // ---- live (SSE) ----------------------------------------------------------------------------------------------------
+const live = liveClient({
+  refetch: async () => ({ summary: await get('/api/summary'), events: (await get('/api/events?op=' + encodeURIComponent(S.op))).events }),
+  onReset: ({ summary, events }) => { S.summary = summary; fillOps(); setEvents(events, false); },
+  onDelta: (d) => applyLive(d),
+});
 function toggleLive() {
   S.live = !S.live; $('#live').classList.toggle('live-on', S.live); $('#live').textContent = S.live ? '● Live (on)' : '● Live';
-  if (!S.live) { S.es?.close(); S.es = null; return; }
+  if (!S.live) return live.stop();
   S.playing = false; $('#play').textContent = '▶';
-  S.es = new EventSource('/api/live');
-  S.es.addEventListener('events', (m) => applyLive(JSON.parse(m.data)));
+  live.start(); // its hello triggers a catch-up refetch, on every (re)connect
 }
 // The same fold as replay: live upserts land in the same event list the replay renderer reads.
 export function applyLive(msg) {
@@ -241,7 +247,7 @@ function eventCard(e) {
       ['time', `${e.ts}${e.until ? ' → ' + e.until : ''}`], ['time from', e.tsSource], ['operation', e.operation ? `${opTitleOf(e.operation)}${e.opInferred ? ' (inferred)' : ''}` : '—'],
       ['cost', e.cost ? Object.entries(e.cost).filter(([, v]) => v != null).map(([k, v]) => `${k} ${v}`).join(' · ') : ''], ['findings', e.findings], ['gap', e.gap ? `${e.gap.direction}${e.gap.ref ? ' · ' + e.gap.ref : ''}` : ''],
       ['source', h('span', { class: 'path mono' }, `${short(e.source)}${e.detailRef?.lines?.length ? ':' + e.detailRef.lines.map((n) => n + 1).join(',') : ''}`)], ['id', h('span', { class: 'mono' }, e.id)]]),
-    expandBtn(() => get('/api/expand/event/' + e.id).then((r) => r.sections)));
+    expandBtn(() => get('/api/expand/event/' + e.id).then((r) => r.sections), 'Expand', () => get('/api/expand/event/' + e.id + '/prose').then((r) => r.sections)));
 }
 function actorCard(id) {
   const a = S.A.get(id) || { id, label: id, kind: '?' }, own = S.events.filter((e) => e.actor.id === id), spawn = S.events.find((e) => e.verb === 'spawn' && e.target?.id === id), end = own.find((e) => e.verb === 'end');
@@ -253,15 +259,22 @@ function actorCard(id) {
     ['children', kids.length || ''], ['spawned', spawn ? `${spawn.ts} ${spawn.provenance}` : a.permanent ? 'permanent' : 'no spawn event (unknown)'], ['ended', end ? `${end.ts} (${end.tsSource})` : a.permanent ? '' : 'no end event'],
     ['events', Object.entries(verbs).map(([k, v]) => `${k} ${v}`).join(' · ')], ['provenance', Object.entries(prov).map(([k, v]) => `${k} ${v}`).join(' · ')], ['failures', fails || ''],
     ['cost', cost ? Object.entries(cost).filter(([, v]) => v != null).map(([k, v]) => `${k} ${v}`).join(' · ') : '']]),
-    (end || spawn) && !a.permanent ? expandBtn(() => get('/api/expand/event/' + (end || spawn).id).then((r) => r.sections), 'Expand: prompt, files read, output') : '', evList(own));
+    (end || spawn) && !a.permanent ? expandBtn(() => get('/api/expand/event/' + (end || spawn).id).then((r) => r.sections), 'Expand: prompt, files read, output', () => get('/api/expand/event/' + (end || spawn).id + '/prose').then((r) => r.sections)) : '', evList(own));
 }
 const evList = (evs) => h('details', { open: evs.length < 40 ? '' : null }, h('summary', {}, `${evs.length} events`), h('div', { class: 'rows' }, evs.slice(-400).map((e) => row(e, false, false))));
-function expandBtn(load, label = 'Expand') {
+// Expand (second click) shows checked content; agent prose stays a stub until "Show unverified agent text" (third click).
+function expandBtn(load, label = 'Expand', loadProse = null) {
   const wrap = h('div', {}), b = h('button', { on: { click: async () => { b.disabled = true; b.textContent = 'loading…';
-    try { const secs = await load(); b.remove(); wrap.append(h('div', { class: 'note' }, 'Agent text (prompts, thinking, messages, outputs) is redacted but not allowlist-checked.'), ...secs.map(section)); } catch (err) { b.textContent = 'failed: ' + err.message; } } } }, label);
+    try { const secs = await load(); b.remove(); const nodes = secs.map(section); wrap.append(...nodes);
+      const stubs = secs.map((s, i) => [s, nodes[i]]).filter(([s]) => s.prose && s.hidden);
+      if (stubs.length && loadProse) {
+        const pb = h('button', { on: { click: async () => { pb.disabled = true; try { const prose = await loadProse(); prose.forEach((s, i) => stubs[i] && stubs[i][1].replaceWith(section(s))); pb.parentElement.remove(); } catch (err) { pb.textContent = 'failed: ' + err.message; } } } }, 'Show unverified agent text');
+        wrap.prepend(h('div', { class: 'prose-gate' }, pb, h('span', { class: 'note' }, ` ${stubs.length} section${stubs.length === 1 ? '' : 's'} of agent-written text: redacted, but not checked against the allowlist.`)));
+      }
+    } catch (err) { b.textContent = 'failed: ' + err.message; } } } }, label);
   wrap.append(b); return wrap;
 }
-const section = (s) => h('details', { open: '' }, h('summary', {}, s.title, s.path ? h('span', { class: 'note' }, '  ' + short(s.path)) : '', s.truncated ? h('span', { class: 'badge b-warn' }, 'truncated') : ''),
+const section = (s) => h('details', { open: s.hidden ? null : '' }, h('summary', {}, s.title, s.path ? h('span', { class: 'note' }, '  ' + short(s.path)) : '', s.truncated ? h('span', { class: 'badge b-warn' }, 'truncated') : '', s.prose ? h('span', { class: 'badge b-warn' }, 'agent text') : ''),
   s.allowed === false ? h('div', { class: 'withheld' }, s.note || 'off-allowlist: path only', s.path ? h('div', { class: 'path mono' }, s.path) : '') : s.note ? h('div', { class: 'note' }, s.note) : '',
   s.text != null ? h('pre', {}, s.text) : s.content != null ? h('pre', {}, s.content) : '');
 
