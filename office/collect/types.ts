@@ -4,7 +4,7 @@ export type Provenance = 'captured' | 'derived' | 'inferred';
 export type Verb = 'spawn' | 'end' | 'read' | 'write' | 'message' | 'dispatch' | 'turn' | 'rule' | 'wait' | 'block' | 'unblock' | 'error' | 'deviation';
 export interface ActorRef { id: string; kind: string; label: string; parent?: string; name?: string }
 export interface Actor extends ActorRef { name?: string; permanent?: boolean; operation?: string; parentInferred?: boolean; source?: string }
-export interface Target { kind: string; id: string; path?: string; group?: string }
+export interface Target { kind: string; id: string; path?: string; group?: string; title?: string }
 // Points back to the exact source lines; Expand re-reads them. kind names the expander.
 export interface DetailRef { kind: string; file: string; lines: number[]; key?: string; extra?: Record<string, unknown> }
 export interface OfficeEvent {

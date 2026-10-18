@@ -42,3 +42,16 @@ export function displayName(a: Actor, ev: OfficeEvent[]) {
   const parts = [kind, fam, op && !subject.toLowerCase().includes(op.toLowerCase()) ? op : '', subject].filter(Boolean);
   return parts.join(' · ').replace(/\s+/g, ' ').slice(0, 90);
 }
+
+// A file's display name: its first markdown heading when the file is allowlisted .md (never under restricted/, never the
+// unmasking key), else the file name in words. Blind ids stay as given: "T-3911f729" is never resolved to a room.
+export function humanizeFile(p: string) {
+  const b = path.basename(p).replace(/\.[A-Za-z0-9]+$/, '');
+  return b.split(/(T-[0-9a-f]{8})/).map((part, i) => i % 2 ? part : part.replace(/[-_]+/g, ' ')).join('').replace(/\s+/g, ' ').trim() || path.basename(p);
+}
+export function fileTitle(p: string, allow: Allowlist, cache: Map<string, string>) {
+  const hit = cache.get(p); if (hit != null) return hit;
+  let t = '';
+  if (/\.md$/i.test(p) && !/\/restricted\//i.test(p) && allow.allows(p)) { const r = allow.read(p, undefined, 4096); t = r.content?.match(/^#\s+(.+?)\s*#*\s*$/m)?.[1]?.slice(0, 80) || ''; }
+  t = t || humanizeFile(p); cache.set(p, t); return t;
+}

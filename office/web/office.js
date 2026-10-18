@@ -1,4 +1,4 @@
-import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate } from './model.mjs';
+import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary } from './model.mjs';
 import { liveClient } from './liveclient.mjs';
 
 const $ = (s) => document.querySelector(s);
@@ -51,7 +51,7 @@ async function loadOp(op) {
   S.playing = false; $('#play').textContent = '▶'; follow(null); select(null);
 }
 function setEvents(events, reset) {
-  S.events = events; S.byId = new Map(events.map((e) => [e.id, e]));
+  S.events = events; S.byId = new Map(events.map((e) => [e.id, e])); S.titles = new Map(events.filter((e) => e.target?.title).map((e) => [e.target.path, e.target.title]));
   const ids = new Set(events.flatMap((e) => [e.actor.id, e.target?.kind === 'actor' ? e.target.id : null]));
   S.actors = S.summary.actors.filter((a) => a.permanent || ids.has(a.id)); S.A = new Map(S.actors.map((a) => [a.id, a]));
   S.L = layout(events, S.actors);
@@ -135,8 +135,8 @@ function draw(t) {
   ctx.textAlign = 'left';
   for (const [p, c] of S.L.chips) { if (!touched.has(p) || c.overflow || !shown(c.group)) continue; const [x, y] = P(c.pos), age = t - touched.get(p), hot = age < 1500 * (S.live ? 1 : S.speed);
     const w = 0.08 * W - 4; ctx.fillStyle = hot ? '#1f2a36' : '#141920'; ctx.fillRect(x, y - 8, w, 15); ctx.strokeStyle = hot ? COL.cap : '#262d36'; ctx.strokeRect(x, y - 8, w, 15);
-    ctx.fillStyle = hot ? COL.fg : '#8b949e'; ctx.font = '10px ui-monospace,Menlo,monospace'; ctx.fillText(fit(base(p), w - 6), x + 3, y + 3);
-    hits.push({ x, y: y - 8, w, h: 15, tip: short(p), sel: { type: 'file', id: p } }); }
+    ctx.fillStyle = hot ? COL.fg : '#8b949e'; ctx.font = '10px ui-monospace,Menlo,monospace'; ctx.fillText(fit(S.titles?.get(p) || base(p), w - 6), x + 3, y + 3);
+    hits.push({ x, y: y - 8, w, h: 15, tip: `${S.titles?.get(p) || base(p)} — ${short(p)}`, sel: { type: 'file', id: p } }); }
   // edges: only active ones, bundled per (from, to) pair, curved
   const bundles = new Map();
   for (const ed of st.edges) { const e = S.byId.get(ed.id); if (!e || (vis && (!shown(e.actor.id) || (e.target?.kind === 'actor' && !shown(e.target.id)) || (e.target?.group && !shown(e.target.group))))) continue; const ep = endpoints(e, S.L); if (!ep) continue;
@@ -150,8 +150,11 @@ function draw(t) {
     const tip = qpt(a, c, b, 0.94), pre = qpt(a, c, b, 0.86); arrow(pre, tip, col);
     ctx.globalAlpha = 1; for (const { ed } of items) { const [px, py] = qpt(a, c, b, ed.p); ctx.fillStyle = ed.fail ? COL.red : col; ctx.beginPath(); ctx.arc(px, py, ed.fail ? 3.5 : 2.6, 0, 7); ctx.fill(); }
     ctx.restore();
-    if (n > 1) { const [lx, ly] = qpt(a, c, b, 0.5); ctx.fillStyle = '#9da7b1'; ctx.font = '9px ui-monospace,Menlo,monospace'; ctx.fillText('×' + n, lx + 3, ly - 3); }
-    hits.push({ pts: [0, 0.2, 0.4, 0.6, 0.8, 1].map((k) => qpt(a, c, b, k)), tip: `${nameOf(lead.actor.id)} ${lead.verb} ${lead.target?.path ? short(lead.target.path) : nameOf(lead.target?.id)}${n > 1 ? ` (+${n - 1})` : ''}`, sel: { type: 'event', id: lead.id } });
+    // edge label: plain-words summary at the curve's midpoint (active edges only; the full text is in the tooltip)
+    const summary = bundleSummary(items.map((x) => x.e), nameOf), [lx, ly] = qpt(a, c, b, 0.5), hovered = S.hover?.sel?.id === lead.id;
+    ctx.font = '9px system-ui'; ctx.textAlign = 'center'; const label = hovered ? summary : fit(summary, 170), tw = ctx.measureText(label).width;
+    ctx.globalAlpha = Math.max(0.55, alpha); ctx.fillStyle = '#0d1014cc'; ctx.fillRect(lx - tw / 2 - 2, ly - 9, tw + 4, 12); ctx.fillStyle = fail ? COL.red : '#c9d1d9'; ctx.fillText(label, lx, ly); ctx.globalAlpha = 1; ctx.textAlign = 'left';
+    hits.push({ pts: [0, 0.2, 0.4, 0.6, 0.8, 1].map((k) => qpt(a, c, b, k)), tip: `${nameOf(lead.actor.id)}: ${summary}`, sel: { type: 'event', id: lead.id } });
   }
   // actors
   for (const a of S.actors) { if (ARTIFACT.has(a.id) || !shown(a.id)) continue; const s = st.actors.get(a.id), pos = S.L.pos.get(a.id); if (!pos) continue;

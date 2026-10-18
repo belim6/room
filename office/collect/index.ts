@@ -7,7 +7,7 @@ import { parseCodexLog } from './codex';
 import { parseEvents } from './events';
 import { parseManifest, parseDriverState } from './manifests';
 import { parseSpool, spoolFiles, dedupeKey } from './spool';
-import { opTitle, displayName } from './legible';
+import { opTitle, displayName, fileTitle } from './legible';
 
 export interface Coverage { captured: number; derived: number; inferred: number; gaps: number; events: number }
 export interface Operation { id: string; label: string; title: string; packet?: string; inferred: boolean; start: string; end: string; coverage: Coverage; actors: number;
@@ -58,7 +58,8 @@ export function finalize(sink: Sink, cfg: Config, allow: Allowlist, cross: boole
   if (cross) crossCheck(sink);
   const events = sink.events.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
   const groups = new Map<string, string>(); // which permanent artifact node a file target sits under (metadata)
-  for (const e of events) if (e.target?.kind === 'file' && e.target.path) e.target = { ...e.target, group: groups.get(e.target.path) ?? groups.set(e.target.path, allow.group(e.target.path)).get(e.target.path)! } as any;
+  const titles = new Map<string, string>(); // file display names (first heading or the name in words): metadata for chips and edge labels
+  for (const e of events) if (e.target?.kind === 'file' && e.target.path) e.target = { ...e.target, group: groups.get(e.target.path) ?? groups.set(e.target.path, allow.group(e.target.path)).get(e.target.path)!, title: fileTitle(e.target.path, allow, titles) } as any;
     else if (e.target && (e.target.kind === 'turn' || e.target.kind === 'branch')) e.target = { ...e.target, group: 'rooms' } as any;
   const byActor = new Map<string, OfficeEvent[]>(); for (const e of events) (byActor.get(e.actor.id) || byActor.set(e.actor.id, []).get(e.actor.id)!).push(e);
   for (const a of sink.actors.values()) if (!a.permanent) a.name = displayName(a, byActor.get(a.id) || events.filter(e => e.target?.id === a.id));

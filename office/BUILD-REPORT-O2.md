@@ -222,3 +222,21 @@ These supersede the sections above where they differ. Each fix has a test in `of
    A stored `prose: true` is still honoured; a missing one is not trusted. **Test `recheck 2`:** records written without the flag (agent message, reasoning, final message, `last_assistant_message`) stay out of default Expand, and the third-click route returns them.
 
 **Results:** `npm run test:office` passes 33 of 33, `npx tsc --noEmit` is clean, and `npm run test:workbench` passes 150 of 150.
+
+## Edge labels and friendly file names (Deniz, 2026-10-18)
+**Edge labels.**
+- Every drawn edge carries a short plain-words summary at its midpoint, e.g. "reads rubric", "writes verdict for T-3911f729", "sends a packet to Critic (Codex)", "rules NO-GO (3 findings)", "dispatches 12 turns".
+- The summaries come from `edgeSummary` and `bundleSummary` in `web/model.mjs`: deterministic templates over metadata only (verb, the target's friendly name, the event label, the outcome, the findings count). There is no content, no agent prose and no model call.
+- A bundled edge shows its count and its objects, e.g. "reads 3 files: labeler instructions, transcript T-…, rubric", or the latest summary.
+- Labels exist only on active edges, as edges always do. They are truncated on the floor; hovering shows the full text, and the tooltip has it too.
+
+**File names.**
+- A file target carries a `title`. For an allowlisted `.md` file it is the file's first `# heading`. Files under `restricted/` are never read for a title, and the unmasking key is never used.
+- Otherwise the title is the file name in words: dashes to spaces, extension dropped, with blind ids like `T-3911f729` kept intact.
+- File chips, edge labels and narration use the title (`fileTitle` in `collect/legible.ts`).
+
+**Tests:**
+- `edge labels:` covers ten exact summaries and two bundles, each repeated to check determinism.
+- `file names:` covers a heading, the name in words, blind ids kept opaque, and `restricted/` files titled by name only. Planted body content, Codex prose, an unmasked room name and a restricted heading never appear in any edge label, file title or agent name.
+
+**Results:** `npm run test:office` passes 35 of 35, `npx tsc --noEmit` is clean, and `npm run test:workbench` passes 150 of 150. I checked it visually on a temporary 4319 server, now stopped. The 4318 preview server was not touched.

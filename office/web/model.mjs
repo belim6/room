@@ -116,11 +116,11 @@ export function descendants(id, actors) { const out = []; let frontier = [id]; w
 // Narration: one plain sentence per event, from templates over metadata only (no model call, no content).
 const FILE_WORDS = [[/labeler-prompt\.md$/, 'the labeler instructions'], [/rubric[^/]*\.md$/, 'the rubric'], [/\/blind\/(T-[0-9a-f]+)\.md$/, 'transcript $1'],
   [/\/labels\/[^/]+\/(T-[0-9a-f]+)\.json$/, 'its verdict for $1'], [/restricted\/key\.json$/, 'the unmasking key'], [/manifest-[\w-]+\.jsonl$/, 'the driver manifest'], [/events\.jsonl$/, 'the handoff log']];
-export function fileWords(p = '') { for (const [re, w] of FILE_WORDS) { const m = p.match(re); if (m) return w.replace('$1', m[1] || ''); } return p.split('/').pop() || p; }
+export function fileWords(p = '', title = '') { for (const [re, w] of FILE_WORDS) { const m = p.match(re); if (m) return w.replace('$1', m[1] || ''); } return title || p.split('/').pop() || p; }
 const OUTCOME = { verdict: 'returned its verdict', done: 'finished', 'no-go': 'ruled NO-GO', go: 'ruled GO', 'conditional-go': 'ruled conditional GO', error: 'failed', 'no-output': 'ended without output',
   'extraction-failed': 'returned output that could not be parsed', 'extraction-failed-repaired': 'returned output that had to be repaired', stopped: 'was stopped' };
 export function narrate(e, nameOf, opTitle = (x) => x) {
-  const who = nameOf(e.actor.id), tgt = e.target, them = tgt?.kind === 'actor' ? nameOf(tgt.id) : '', file = tgt?.kind === 'file' ? fileWords(tgt.path) : '';
+  const who = nameOf(e.actor.id), tgt = e.target, them = tgt?.kind === 'actor' ? nameOf(tgt.id) : '', file = tgt?.kind === 'file' ? fileWords(tgt.path, tgt.title) : '';
   const tag = e.provenance === 'derived' ? ' (derived)' : e.provenance === 'inferred' ? ' (inferred)' : '';
   switch (e.verb) {
     case 'spawn': return `${who} started ${them}${tag}.`;
@@ -139,4 +139,37 @@ export function narrate(e, nameOf, opTitle = (x) => x) {
     case 'deviation': return `Coverage gap: ${e.label}.`;
     default: return `${who} ${e.verb} ${file || them}.`;
   }
+}
+
+// Edge labels: what an edge is, in a few plain words, from the same metadata as the narration (verb, target name, event
+// label, outcome). Deterministic; no content, no agent prose.
+const short = (s, n = 40) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const lastPart = (name = '') => name.split(' · ').pop();
+export function edgeSummary(e, nameOf = (x) => x) {
+  const t = e.target, them = t?.kind === 'actor' ? nameOf(t.id) : '', file = t?.kind === 'file' ? fileWords(t.path, t.title).replace(/^the /, '') : '';
+  const fail = e.outcome === 'error' ? ' (failed)' : '';
+  switch (e.verb) {
+    case 'read': return `reads ${file || 'a file'}${fail}`;
+    case 'write': return t?.kind === 'branch' ? 'creates a room branch' : `writes ${/^its verdict/.test(fileWords(t?.path, t?.title)) ? fileWords(t.path, t.title).replace(/^its /, '') : file || 'a file'}${fail}`;
+    case 'spawn': return `starts ${lastPart(them) || 'an agent'}`;
+    case 'end': { const f = e.findings ? ` (${e.findings} finding${e.findings === 1 ? '' : 's'})` : '';
+      return e.outcome === 'no-go' ? `rules NO-GO${f}` : e.outcome === 'go' ? `rules GO${f}` : e.outcome === 'conditional-go' ? `rules conditional GO${f}` : e.outcome === 'verdict' ? 'returns its verdict'
+        : /error|fail|no-output/.test(e.outcome || '') ? `ends: ${e.outcome}` : 'reports back'; }
+    case 'message': return e.label === 'packet' ? `sends a packet to ${lastPart(them) || 'review'}` : e.label === 'review' ? 'returns a review' : t?.id === 'deniz' ? 'writes to Deniz' : e.actor.id === 'deniz' ? 'writes to the coordinator' : e.label?.startsWith('result') ? 'reports back' : `messages ${lastPart(them) || 'an agent'}`;
+    case 'dispatch': return t?.id === 'server' ? `dispatches ${e.label && /\bt\d+\b/.test(e.label) ? 'a turn' : e.label || 'work'}` : t?.id === 'providers' ? 'starts a Codex run' : `runs ${short(e.label || 'a command', 30)}${fail}`;
+    case 'turn': return 'produces a turn';
+    case 'block': return `blocked${e.label ? ': ' + short(e.label, 30) : ''}`;
+    case 'error': return e.outcome === 'missing' ? 'missing label' : 'error';
+    case 'deviation': return 'coverage gap';
+    default: return e.verb;
+  }
+}
+// Bundled edges (same pair): the count, then the latest summary, with the distinct objects when they differ.
+export function bundleSummary(items, nameOf = (x) => x) {
+  const sums = items.map((e) => edgeSummary(e, nameOf)), latest = sums[sums.length - 1];
+  if (items.length === 1) return latest;
+  const verb = latest.split(' ')[0], same = sums.every((s) => s.split(' ')[0] === verb);
+  if (same && (verb === 'reads' || verb === 'writes')) { const objs = [...new Set(sums.map((s) => s.slice(verb.length + 1)))]; return `${verb} ${items.length} file${items.length === 1 ? '' : 's'}: ${objs.join(', ')}`; }
+  if (same && verb === 'dispatches') return `dispatches ${items.length} turns`;
+  return `${items.length}×, latest: ${latest}`;
 }

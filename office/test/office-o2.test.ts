@@ -403,3 +403,49 @@ test('recheck 2: prose is decided on read; spool records without a stored prose 
     for (const m of ['OLD-PROSE-MSG', 'OLD-PROSE-REASON', 'OLD-PROSE-FINAL', 'OLD-PROSE-LAST']) { assert.ok(!def.includes(m), 'default Expand shows ' + m); assert.ok(third.includes(m), 'third click lacks ' + m); }
   } finally { await new Promise(r => srv.close(r)); }
 });
+
+// ---- edge labels and friendly file names (Deniz, 2026-10-18) ------------------------------------------------------------
+test('edge labels: deterministic plain-words summaries; bundles show count and objects', async () => {
+  const M: any = await import(path.join(OFFICE, 'web/model.mjs')), n = (id: string) => ({ critic: 'Critic (Codex)', 'agent:x': 'labeler · Claude · date labeling · T-1' } as any)[id] || id;
+  const E = (o: any) => ({ actor: { id: 'agent:x', kind: 'labeler' }, provenance: 'captured', ...o }), f = (p: string, title?: string) => ({ kind: 'file', path: p, ...(title ? { title } : {}) });
+  const cases: [any, string][] = [
+    [E({ verb: 'read', target: f('/c/d/rubric-v1.md') }), 'reads rubric'],
+    [E({ verb: 'read', target: f('/c/d/labeler-prompt.md') }), 'reads labeler instructions'],
+    [E({ verb: 'read', target: f('/c/d/70-date-baseline-results.md', 'Date room baseline: results') }), 'reads Date room baseline: results'],
+    [E({ verb: 'write', target: f('/c/d/labels/claude/T-1a2b3c4d.json') }), 'writes verdict for T-1a2b3c4d'],
+    [E({ verb: 'spawn', actor: { id: 'coordinator' }, target: { kind: 'actor', id: 'agent:x' } }), 'starts T-1'],
+    [E({ verb: 'end', actor: { id: 'critic:y', kind: 'critic' }, outcome: 'no-go', findings: 3 }), 'rules NO-GO (3 findings)'],
+    [E({ verb: 'end', outcome: 'verdict' }), 'returns its verdict'],
+    [E({ verb: 'message', actor: { id: 'coordinator' }, label: 'packet', target: { kind: 'actor', id: 'critic' } }), 'sends a packet to Critic (Codex)'],
+    [E({ verb: 'dispatch', actor: { id: 'driver:x' }, label: 'baseline·v0·r01 t3 → Jake', target: { kind: 'actor', id: 'server' } }), 'dispatches a turn'],
+    [E({ verb: 'deviation', actor: { id: 'coordinator' } }), 'coverage gap'],
+  ];
+  for (const [e, want] of cases) { assert.equal(M.edgeSummary(e, n), want); assert.equal(M.edgeSummary(e, n), want); }
+  const reads = ['/c/d/labeler-prompt.md', '/c/d/blind/T-1a2b3c4d.md', '/c/d/rubric-v1.md'].map(p => E({ verb: 'read', target: f(p) }));
+  assert.equal(M.bundleSummary(reads, n), 'reads 3 files: labeler instructions, transcript T-1a2b3c4d, rubric');
+  const turns = Array.from({ length: 12 }, (_, i) => E({ verb: 'dispatch', actor: { id: 'driver:x' }, label: `r01 t${i + 1} → Jake`, target: { kind: 'actor', id: 'server' } }));
+  assert.equal(M.bundleSummary(turns, n), 'dispatches 12 turns');
+});
+test('file names: first heading if allowlisted, else the name in words; no content, no prose, blind ids stay opaque', async () => {
+  const { cfg, D } = fixture(), M: any = await import(path.join(OFFICE, 'web/model.mjs')), allow = new Allowlist(cfg), now = '2026-10-18T13:00:00.000Z';
+  fs.writeFileSync(path.join(D, 'notes-without-heading.md'), 'BODY-CONTENT-MARKER\nmore body\n');
+  fs.mkdirSync(path.join(D, 'restricted'), { recursive: true }); fs.writeFileSync(path.join(D, 'restricted/key.json'), JSON.stringify({ 'T-3911f729': { room: 'SECRET-ROOM-NAME' } }));
+  fs.writeFileSync(path.join(D, 'restricted/map.md'), '# RESTRICTED-HEADING\nT-3911f729 = SECRET-ROOM-NAME\n');
+  const meta = { role: 'labeler', label: 'Codex labeler T-3911f729', operation: '2026-10-17/date/labeling', cwd: D };
+  append(cfg.spool!, 'codex', [
+    { v: 1, src: 'codex', ts: now, run: 'r-e', seq: 0, kind: 'start', ...meta, id: 'r-e:start', args: ['-'] },
+    codexRecord({ type: 'item.completed', item: { type: 'command_execution', command: "bash -lc 'cat notes-without-heading.md blind/T-3911f729.md restricted/map.md restricted/key.json 70x.md'", aggregated_output: 'BODY-CONTENT-MARKER', exit_code: 0 } }, 'r-e', 1, allow, D, meta, now),
+    codexRecord({ type: 'item.completed', item: { type: 'agent_message', text: 'PROSE-EDGE-MARKER' } }, 'r-e', 2, allow, D, meta, now),
+    { v: 1, src: 'codex', ts: now, run: 'r-e', seq: 3, kind: 'end', id: 'r-e:end', exit: { code: 0, signal: null }, ...meta, sections: [{ title: 'final message', text: 'PROSE-EDGE-MARKER' }] },
+  ], now);
+  const c = collect(cfg), title = (p: string) => c.events.find(e => e.target?.path === path.join(D, p))?.target?.title;
+  assert.equal(title('notes-without-heading.md'), 'notes without heading');
+  assert.equal(title('blind/T-3911f729.md'), 'Transcript T-3911f729');
+  assert.equal(title('restricted/map.md'), 'map', 'restricted files: never read for a title');
+  assert.equal(title('restricted/key.json'), 'key');
+  assert.equal(c.events.find(e => e.target?.path === path.join(cfg.coordination, '2026-10-17/70-date-baseline-results.md'))?.target?.title ?? 'Date room baseline: results', 'Date room baseline: results');
+  const n = (id: string) => c.actors.get(id)?.name || id, sums = c.events.map(e => M.edgeSummary(e, n)), bundles = M.bundleSummary(c.events.filter(e => e.verb === 'read'), n);
+  const labels = JSON.stringify([sums, bundles, c.events.map(e => e.target?.title), [...c.actors.values()].map(a => a.name)]);
+  for (const m of ['BODY-CONTENT-MARKER', 'PROSE-EDGE-MARKER', 'SECRET-ROOM-NAME', 'RESTRICTED-HEADING']) assert.ok(!labels.includes(m), 'label shows ' + m);
+  assert.ok(sums.includes('reads Transcript T-3911f729') || sums.includes('reads transcript T-3911f729'), 'blind id kept as given');
+});
