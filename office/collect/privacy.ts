@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export interface Config { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; coordinatorSession?: string; home: string }
+export interface Config { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; coordinatorSession?: string; home: string; spool?: string }
 export function config(env: NodeJS.ProcessEnv = process.env): Config {
   const home = env.OFFICE_HOME || os.homedir(), room = env.OFFICE_ROOM || path.join(home, 'dev/room');
   return {
@@ -11,6 +11,7 @@ export function config(env: NodeJS.ProcessEnv = process.env): Config {
     roomData: env.OFFICE_ROOM_DATA || path.join(room, '.room-data'),
     claudeProject: env.OFFICE_CLAUDE_PROJECT || path.join(home, '.claude/projects', room.replace(/[/.]/g, '-')),
     coordinatorSession: env.OFFICE_COORDINATOR_SESSION || undefined,
+    spool: env.OFFICE_SPOOL || path.join(room, 'office-spool'),
   };
 }
 
@@ -30,11 +31,13 @@ export const ROOM_KINDS = /^(revisions|turns|attempts|outcomes|branches|vault-[a
 
 export interface Opened { fd: number; size: number }
 export class Allowlist {
-  roots: { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string };
+  roots: { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; spool: string };
+  cfg: Config;
   // Test seam: runs between the allowlist check and the open, so a symlink swap there can be simulated.
   beforeOpen?: (canonicalPath: string) => void;
-  constructor(public cfg: Config) {
-    this.roots = { coordination: real(cfg.coordination), promptKnowledge: real(cfg.promptKnowledge), roomData: real(cfg.roomData), claudeProject: real(cfg.claudeProject) };
+  constructor(cfg: Config) {
+    this.cfg = cfg;
+    this.roots = { coordination: real(cfg.coordination), promptKnowledge: real(cfg.promptKnowledge), roomData: real(cfg.roomData), claudeProject: real(cfg.claudeProject), spool: real(cfg.spool || path.join(cfg.home, 'dev/room/office-spool')) };
   }
   canonical(p: string, cwd?: string) { return canonical(p, this.cfg.home, cwd); }
   // Raw sources whose text embeds other files' contents (transcripts, Codex/driver logs): readable by the collector and the
@@ -45,12 +48,14 @@ export class Allowlist {
     return (rel.length === 1 && /^[0-9a-f-]{36}\.jsonl$/.test(last)) || (rel.length >= 3 && rel[1] === 'subagents' && /^agent-[A-Za-z0-9_-]+\.jsonl$/.test(last));
   }
   isRawLog(p: string, cwd?: string) { const c = this.canonical(p, cwd); return under(c, this.roots.coordination) && /\.log$/.test(c); }
-  allowsSource(p: string, cwd?: string) { return this.isTranscript(p, cwd) || this.allows(p, cwd) || this.isRawLog(p, cwd); }
+  // The Office's own spool: already filtered at write, read only per event (path-only on the file route).
+  isSpool(p: string, cwd?: string) { const c = this.canonical(p, cwd); return under(c, this.roots.spool) && /\.jsonl$/.test(c); }
+  allowsSource(p: string, cwd?: string) { return this.isTranscript(p, cwd) || this.allows(p, cwd) || this.isRawLog(p, cwd) || this.isSpool(p, cwd); }
   // Content tier: may this path's own content be shown? Transcripts and raw logs: no (path only).
   allows(p: string, cwd?: string) {
     if (!p || p.includes('\0')) return false;
     const c = this.canonical(p, cwd), r = this.roots;
-    if (/\.log$/.test(c)) return false;
+    if (/\.log$/.test(c) || under(c, r.spool)) return false;
     if (under(c, r.coordination) || under(c, r.promptKnowledge)) return true;
     if (under(c, r.roomData)) { const rel = path.relative(r.roomData, c).split(path.sep); return rel.length === 2 && ROOM_KINDS.test(rel[0]) && rel[1].endsWith('.json'); }
     return false;
@@ -81,7 +86,7 @@ export class Allowlist {
   }
   read(p: string, cwd?: string, max = 400_000): { path: string; allowed: boolean; content?: string; truncated?: boolean; missing?: boolean; note?: string } {
     const c = this.canonical(p, cwd);
-    if (!this.allows(c)) return { path: c, allowed: false, ...(this.isTranscript(c) || this.isRawLog(c) ? { note: 'raw transcript/log: content only through per-event Expand' } : {}) };
+    if (!this.allows(c)) return { path: c, allowed: false, ...(this.isTranscript(c) || this.isRawLog(c) || this.isSpool(c) ? { note: 'raw transcript/log: content only through per-event Expand' } : {}) };
     const o = this.openVerified(c, x => this.allows(x));
     if (o === 'missing') return { path: c, allowed: true, missing: true };
     if (o === 'refused') return { path: c, allowed: false, note: 'refused: path changed between check and open' };
@@ -117,6 +122,6 @@ const RULES: [RegExp, (m: string, ...g: string[]) => string][] = [
 export function redact(s: string): string { if (!s) return s; for (const [re, f] of RULES) s = s.replace(re, f as any); return s; }
 export function redactPath(s: string): string { if (!s) return s; for (const [re, f] of PREFIX) s = s.replace(re, f as any); return s; }
 // Path-like fields get only the key-prefix rules, so the generic secret rule can't mangle a path or id.
-const PATHISH = new Set(['path', 'id', 'source', 'file', 'ref', 'agentFile', 'launch', 'of', 'parent']);
+const PATHISH = new Set(['path', 'id', 'source', 'file', 'ref', 'agentFile', 'launch', 'of', 'parent', 'target', 'transcript', 'cwd', 'reads', 'writes', 'session', 'run', 'thread', 'toolUseId', 'agent', 'agentId']);
 export const redactDeep = <T>(v: T, key = ''): T => typeof v === 'string' ? (PATHISH.has(key) ? redactPath(v) : redact(v)) as any : Array.isArray(v) ? v.map(x => redactDeep(x, key)) as any :
   v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactDeep(x, k)])) as any : v;

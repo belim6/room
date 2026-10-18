@@ -1,0 +1,4 @@
+#!/bin/sh
+# Drop-in for `codex exec …` that also spools sanitized JSON events for the Office. See office/BUILD-REPORT-O2.md.
+here="$(cd "$(dirname "$0")" && pwd)"
+exec node --no-warnings "$here/../capture/codex-wrapper.ts" "$@"

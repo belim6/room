@@ -31,6 +31,7 @@ export function execOf(lines: string[], sec: Section) {
 }
 export function finalMessage(lines: string[], s: CodexSession) { const c = s.sections.filter(x => x.kind === 'codex').pop(); return c ? lines.slice(c.start + 1, c.end).join('\n').trim() : ''; }
 export const parseTokens = (s: string) => { const n = Number(String(s).replace(/[.,\s]/g, '')); return Number.isFinite(n) ? n : undefined; };
+export const findingsOf = (text: string) => (text.match(/^\s*(?:\d+\.|[-*]\s+\*\*P\d|\*\*P\d)/gm) || []).length;
 export function verdictOf(text: string) {
   if (/\bNO[- ]GO\b/.test(text)) return 'no-go'; if (/\bconditional GO\b/i.test(text)) return 'conditional-go'; if (/\bGO\b/.test(text)) return 'go'; return undefined;
 }
@@ -72,6 +73,6 @@ export function parseCodexLog(file: string, role: 'labeler' | 'critic', sink: Si
     const outcome = errAfter || (errs && !fin) ? 'error' : role === 'critic' ? (verdictOf(fin) || (fin ? 'done' : 'no-output')) : (fin && jsonOk(fin) ? 'verdict' : !fin ? 'no-output' : fs.existsSync(path.join(dir, base + '.json')) ? 'extraction-failed-repaired' : 'extraction-failed');
     const finSec = s.sections.filter(x => x.kind === 'codex').pop();
     push({ ts: k === sessions.length - 1 ? endTs : at(steps), tsSource: k === sessions.length - 1 ? 'mtime' : 'interpolated', verb: 'end', target: { kind: 'actor', id: parent }, outcome,
-      cost: { calls: 1, tokens: tokSec ? parseTokens(lines[tokSec.start + 1]) : undefined } } as any, finSec ? [finSec.start, finSec.end] : [], 'codex-final');
+      cost: { calls: 1, tokens: tokSec ? parseTokens(lines[tokSec.start + 1]) : undefined }, ...(role === 'critic' && findingsOf(fin) ? { findings: findingsOf(fin) } : {}) } as any, finSec ? [finSec.start, finSec.end] : [], 'codex-final');
   });
 }

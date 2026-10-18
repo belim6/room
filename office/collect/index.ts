@@ -6,12 +6,14 @@ import { parseClaude, parseSubagents } from './claude';
 import { parseCodexLog } from './codex';
 import { parseEvents } from './events';
 import { parseManifest, parseDriverState } from './manifests';
+import { parseSpool, spoolFiles, dedupeKey } from './spool';
+import { opTitle, displayName } from './legible';
 
 export interface Coverage { captured: number; derived: number; inferred: number; gaps: number; events: number }
-export interface Operation { id: string; label: string; inferred: boolean; start: string; end: string; coverage: Coverage; actors: number;
+export interface Operation { id: string; label: string; title: string; packet?: string; inferred: boolean; start: string; end: string; coverage: Coverage; actors: number;
   workflow: { template: { source: 'template'; steps: string[] }; run: { source: 'events'; steps: { step: string; first: string; count: number }[] } } }
 export interface Collected { cfg: Config; allow: Allowlist; events: OfficeEvent[]; byId: Map<string, OfficeEvent>; actors: Map<string, Actor>; operations: Operation[];
-  artifacts: Artifact[]; sources: Sink['sources']; lineIndex: Map<string, number[]>; collectedAt: string }
+  artifacts: Artifact[]; sources: Sink['sources']; lineIndex: Map<string, number[]>; collectedAt: string; primarySession?: string }
 
 const walk = (root: string, pick: (p: string) => boolean, out: string[] = []) => {
   if (!fs.existsSync(root)) return out;
@@ -41,16 +43,27 @@ export function collect(cfg: Config = config()): Collected {
   for (const f of coordFiles.filter(f => /\/manifest-[^/]+\.jsonl$/.test(f))) parseManifest(f, sink, allow);
   for (const f of coordFiles.filter(f => /\/driver-state\.json$/.test(f))) parseDriverState(f, sink, allow);
   missingLabels(cfg, sink, coordFiles);
-  // Snapshot actor refs again: placeholders created before a sub-agent's meta was read now have their real labels.
+  // 7. Live spool (hooks + office-codex): transcript copies of the same tool call win.
+  const primarySession = primary?.replace(/\.jsonl$/, ''), known = new Set(sink.events.map(dedupeKey).filter(Boolean));
+  for (const f of spoolFiles(allow.roots.spool)) parseSpool(f, sink, allow, { primarySession, known });
+  const { events, ops } = finalize(sink, cfg, allow, true);
+  const artifacts: Artifact[] = [...coordFiles, ...walk(cfg.promptKnowledge, () => true)].map(p => { const st = fs.statSync(p); return { path: p, group: allow.group(p), size: st.size, mtime: st.mtime.toISOString(), operation: ops.of(p) }; });
+  return { cfg, allow, events, byId: new Map(events.map(e => [e.id, e])), actors: sink.actors, operations: operations(events, sink.actors, allow), artifacts, sources: sink.sources, lineIndex: sink.lineIndex, collectedAt: new Date().toISOString(), primarySession };
+}
+
+// Shared tail of a full collect and of a live increment: actor refs, operations, (cross-check), order, groups, names.
+export function finalize(sink: Sink, cfg: Config, allow: Allowlist, cross: boolean) {
   for (const e of sink.events) e.actor = sink.ref(e.actor.id);
   const ops = inferOperations(cfg, sink, allow);
-  crossCheck(sink);
+  if (cross) crossCheck(sink);
   const events = sink.events.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
   const groups = new Map<string, string>(); // which permanent artifact node a file target sits under (metadata)
   for (const e of events) if (e.target?.kind === 'file' && e.target.path) e.target = { ...e.target, group: groups.get(e.target.path) ?? groups.set(e.target.path, allow.group(e.target.path)).get(e.target.path)! } as any;
     else if (e.target && (e.target.kind === 'turn' || e.target.kind === 'branch')) e.target = { ...e.target, group: 'rooms' } as any;
-  const artifacts: Artifact[] = [...coordFiles, ...walk(cfg.promptKnowledge, () => true)].map(p => { const st = fs.statSync(p); return { path: p, group: allow.group(p), size: st.size, mtime: st.mtime.toISOString(), operation: ops.of(p) }; });
-  return { cfg, allow, events, byId: new Map(events.map(e => [e.id, e])), actors: sink.actors, operations: operations(events, sink.actors), artifacts, sources: sink.sources, lineIndex: sink.lineIndex, collectedAt: new Date().toISOString() };
+  const byActor = new Map<string, OfficeEvent[]>(); for (const e of events) (byActor.get(e.actor.id) || byActor.set(e.actor.id, []).get(e.actor.id)!).push(e);
+  for (const a of sink.actors.values()) if (!a.permanent) a.name = displayName(a, byActor.get(a.id) || events.filter(e => e.target?.id === a.id));
+  for (const e of events) e.actor = sink.ref(e.actor.id);
+  return { events, ops };
 }
 
 // A labeling folder (blind/*.md plus labels/<family>/) where a family has no <id>.json: a failed or missing label.
@@ -69,7 +82,7 @@ function missingLabels(cfg: Config, sink: Sink, files: string[]) {
   }
 }
 
-function inferOperations(cfg: Config, sink: Sink, allow: Allowlist) {
+export function inferOperations(cfg: Config, sink: Sink, allow: Allowlist) {
   const coord = allow.roots.coordination, subs = new Map<string, string[]>();
   if (fs.existsSync(coord)) for (const d of fs.readdirSync(coord).filter(n => /^20\d\d-\d\d-\d\d$/.test(n))) subs.set(d, fs.readdirSync(path.join(coord, d)).filter(n => fs.lstatSync(path.join(coord, d, n)).isDirectory()));
   const norm = (s: string) => s.split(coord + '/').join('coordination/').split(cfg.coordination + '/').join('coordination/').replace(/~\/dev\/room\/coordination\//g, 'coordination/');
@@ -146,7 +159,7 @@ const STEP = (e: OfficeEvent, actors: Map<string, Actor>): string | undefined =>
   if (e.actor.id === 'coordinator' && e.verb === 'write' && /\/\d\d[a-z]?-[^/]*\.md$/.test(p)) return 'plan';
   if (e.actor.id === 'coordinator' && (e.verb === 'spawn' || e.verb === 'dispatch') && e.target?.kind === 'actor') return 'dispatch';
 };
-function operations(events: OfficeEvent[], actors: Map<string, Actor>): Operation[] {
+export function operations(events: OfficeEvent[], actors: Map<string, Actor>, allow?: Allowlist): Operation[] {
   const ids = new Set<string>(); for (const e of events) if (e.operation) { const parts = e.operation.split('/'); for (let i = 1; i <= parts.length; i++) ids.add(parts.slice(0, i).join('/')); }
   return [...ids].sort().map(id => {
     const evs = events.filter(e => e.operation === id || e.operation?.startsWith(id + '/'));
@@ -154,7 +167,8 @@ function operations(events: OfficeEvent[], actors: Map<string, Actor>): Operatio
     for (const e of evs) if (e.gap) cov.gaps++; else cov[e.provenance as Provenance]++;
     const run: { step: string; first: string; count: number }[] = []; let last = '';
     for (const e of evs) { const s = STEP(e, actors); if (!s || s === last) continue; last = s; const r = run.find(x => x.step === s && run[run.length - 1] === x); if (r) r.count++; else run.push({ step: s, first: e.ts, count: 1 }); }
-    return { id, label: id.replace(/\//g, ' · '), inferred: evs.every(e => e.opInferred !== false), start: evs[0]?.ts || '', end: evs[evs.length - 1]?.ts || '', coverage: cov,
+    const t = opTitle(id, allow);
+    return { id, label: id.replace(/\//g, ' · '), title: t.title, ...(t.packet ? { packet: t.packet } : {}), inferred: evs.every(e => e.opInferred !== false), start: evs[0]?.ts || '', end: evs[evs.length - 1]?.ts || '', coverage: cov,
       actors: new Set(evs.map(e => e.actor.id)).size, workflow: { template: { source: 'template' as const, steps: TEMPLATE }, run: { source: 'events' as const, steps: run } } };
   }).filter(o => o.coverage.events);
 }

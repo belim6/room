@@ -92,3 +92,51 @@ export function stateAt(events, actors, t, { travel = 1500, pulse = 2500 } = {})
   }
   return { actors: st, edges, marks };
 }
+
+// ---- O2: focus, follow, narration ------------------------------------------------------------------------------
+// Focus: only actors with activity in (t - window, t], actors still open at t, and failed actors in the window; plus the
+// permanent hub nodes those actors touched in the window. Everything else is hidden (not dimmed). Pure, like stateAt.
+export function visibleAt(events, actors, t, { window = 10 * 60e3, follow = null } = {}) {
+  const A = new Map(actors.map((a) => [a.id, a])), open = new Map(), vis = new Set(), hubs = new Set(), recent = [];
+  for (const e of events) {
+    const ts = T(e.ts); if (ts > t) break;
+    if (e.verb === 'spawn' && e.target?.kind === 'actor') open.set(e.target.id, true);
+    if (e.verb === 'end') open.set(e.actor.id, false);
+    if (t - ts <= window) recent.push(e);
+  }
+  for (const [id, o] of open) if (o) vis.add(id);
+  for (const e of recent) { vis.add(e.actor.id); if (e.target?.kind === 'actor') vis.add(e.target.id); }
+  if (follow) { const keep = new Set([follow, ...descendants(follow, actors)]); for (const id of [...vis]) if (!keep.has(id) && !A.get(id)?.permanent) vis.delete(id); for (const id of keep) if (open.get(id) !== undefined || recent.some((e) => e.actor.id === id)) vis.add(id); }
+  for (const e of recent) if (vis.has(e.actor.id)) { if (A.get(e.actor.id)?.permanent) hubs.add(e.actor.id); const g = e.target?.group || (e.target?.kind === 'actor' && A.get(e.target.id)?.permanent ? e.target.id : null); if (g) hubs.add(g); if (e.verb === 'spawn' && A.get(e.actor.id)?.permanent) hubs.add(e.actor.id); }
+  for (const id of [...vis]) { const p = A.get(id)?.parent; if (p && A.get(p)?.permanent) hubs.add(p); if (A.get(id)?.permanent) { vis.delete(id); hubs.add(id); } }
+  return { actors: vis, hubs };
+}
+export function descendants(id, actors) { const out = []; let frontier = [id]; while (frontier.length) { const next = actors.filter((a) => frontier.includes(a.parent)).map((a) => a.id).filter((x) => !out.includes(x)); out.push(...next); frontier = next; } return out; }
+
+// Narration: one plain sentence per event, from templates over metadata only (no model call, no content).
+const FILE_WORDS = [[/labeler-prompt\.md$/, 'the labeler instructions'], [/rubric[^/]*\.md$/, 'the rubric'], [/\/blind\/(T-[0-9a-f]+)\.md$/, 'transcript $1'],
+  [/\/labels\/[^/]+\/(T-[0-9a-f]+)\.json$/, 'its verdict for $1'], [/restricted\/key\.json$/, 'the unmasking key'], [/manifest-[\w-]+\.jsonl$/, 'the driver manifest'], [/events\.jsonl$/, 'the handoff log']];
+export function fileWords(p = '') { for (const [re, w] of FILE_WORDS) { const m = p.match(re); if (m) return w.replace('$1', m[1] || ''); } return p.split('/').pop() || p; }
+const OUTCOME = { verdict: 'returned its verdict', done: 'finished', 'no-go': 'ruled NO-GO', go: 'ruled GO', 'conditional-go': 'ruled conditional GO', error: 'failed', 'no-output': 'ended without output',
+  'extraction-failed': 'returned output that could not be parsed', 'extraction-failed-repaired': 'returned output that had to be repaired', stopped: 'was stopped' };
+export function narrate(e, nameOf, opTitle = (x) => x) {
+  const who = nameOf(e.actor.id), tgt = e.target, them = tgt?.kind === 'actor' ? nameOf(tgt.id) : '', file = tgt?.kind === 'file' ? fileWords(tgt.path) : '';
+  const tag = e.provenance === 'derived' ? ' (derived)' : e.provenance === 'inferred' ? ' (inferred)' : '';
+  switch (e.verb) {
+    case 'spawn': return `${who} started ${them}${tag}.`;
+    case 'end': { const o = OUTCOME[e.outcome] || e.outcome || 'finished'; const f = e.findings ? ` (${e.findings} finding${e.findings === 1 ? '' : 's'})` : '';
+      return e.actor.kind === 'critic' && /go/.test(e.outcome || '') ? `The critic ${o}${e.operation ? ' on ' + opTitle(e.operation) : ''}${f}.` : `${who} ${o}${f}${tag}.`; }
+    case 'read': return `${who} opened ${file || them || 'something'}${tag}.`;
+    case 'write': return tgt?.kind === 'branch' ? `${who} created a room branch.` : `${who} wrote ${file || 'a file'}${tag}.`;
+    case 'message': return e.actor.id === 'deniz' ? `Deniz wrote to ${them || 'the coordinator'}.` : tgt?.id === 'deniz' ? `${who} wrote to Deniz.` : e.label?.startsWith('result') ? `${who} reported back to ${them}.` : `${who} sent ${them || 'someone'} a message${e.label && !/^(packet|review|result)$/.test(e.label) ? '' : e.label ? ' (' + e.label + ')' : ''}.`;
+    case 'dispatch': return tgt?.id === 'providers' ? `${who} started a Codex run.` : tgt?.id === 'server' ? `${who} asked the stable server for ${e.label || 'a turn'}.` : `${who} ran ${e.label || 'a command'}${e.outcome === 'error' ? ' (it failed)' : ''}.`;
+    case 'turn': return `The stable server produced ${e.label || 'a turn'}.`;
+    case 'rule': return `${who}: ${e.label || 'check'}.`;
+    case 'wait': return `${who} is waiting on ${them || 'something'}.`;
+    case 'block': return `${who} is blocked${e.label ? ': ' + e.label : ''}.`;
+    case 'unblock': return `${who} is unblocked.`;
+    case 'error': return e.outcome === 'missing' ? `Missing: ${e.label}.` : `${who} hit an error${e.label ? ': ' + e.label : ''}.`;
+    case 'deviation': return `Coverage gap: ${e.label}.`;
+    default: return `${who} ${e.verb} ${file || them}.`;
+  }
+}

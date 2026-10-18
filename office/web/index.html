@@ -15,6 +15,10 @@
   <button id="play" title="Play / pause (space)">▶</button>
   <span id="speeds"><button data-s="1">1×</button><button data-s="10" class="on">10×</button><button data-s="100">100×</button></span>
   <label title="Collapse idle stretches over 30 s to 3 s"><input type="checkbox" id="compress" checked> skip idle</label>
+  <span class="sep"></span>
+  <button id="live" title="Follow new events as they arrive (server-sent events)">● Live</button>
+  <label title="Hide actors with no activity in the last 10 minutes of the timeline"><input type="checkbox" id="focus" checked> focus</label>
+  <span id="following" class="mono"></span>
   <span id="clock" class="mono"></span>
   <span class="grow"></span>
   <span id="legend" class="mono"></span>
@@ -24,7 +28,7 @@
   <section id="floorwrap"><canvas id="floor"></canvas><div id="tip"></div></section>
   <aside id="inspector"><div class="empty">Click a node, an edge, a chip or an event.</div></aside>
 </main>
-<footer id="log"></footer>
+<footer id="log"><div id="logbar"><label><input type="checkbox" id="raw"> raw events</label></div><div id="logrows"></div></footer>
 <script type="module" src="office.js"></script>
 </body>
 </html>

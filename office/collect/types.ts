@@ -2,8 +2,8 @@ import crypto from 'node:crypto';
 
 export type Provenance = 'captured' | 'derived' | 'inferred';
 export type Verb = 'spawn' | 'end' | 'read' | 'write' | 'message' | 'dispatch' | 'turn' | 'rule' | 'wait' | 'block' | 'unblock' | 'error' | 'deviation';
-export interface ActorRef { id: string; kind: string; label: string; parent?: string }
-export interface Actor extends ActorRef { permanent?: boolean; operation?: string; parentInferred?: boolean; source?: string }
+export interface ActorRef { id: string; kind: string; label: string; parent?: string; name?: string }
+export interface Actor extends ActorRef { name?: string; permanent?: boolean; operation?: string; parentInferred?: boolean; source?: string }
 export interface Target { kind: string; id: string; path?: string; group?: string }
 // Points back to the exact source lines; Expand re-reads them. kind names the expander.
 export interface DetailRef { kind: string; file: string; lines: number[]; key?: string; extra?: Record<string, unknown> }
@@ -12,7 +12,7 @@ export interface OfficeEvent {
   operation?: string; opInferred?: boolean; cost?: { calls?: number; tokens?: number; ms?: number };
   detailRef: DetailRef; source: string; derived: boolean; provenance: Provenance;
   outcome?: string; tsSource?: 'record' | 'mtime' | 'interpolated' | 'linked'; label?: string;
-  hints?: string[]; gap?: { direction: 'log-without-action' | 'action-without-log'; ref?: string };
+  findings?: number;   hints?: string[]; gap?: { direction: 'log-without-action' | 'action-without-log'; ref?: string };
 }
 export interface SourceStat { kind: string; path: string; records: number; events: number; unparsed: number; note?: string }
 export interface Artifact { path: string; group: string; size: number; mtime: string; operation?: string }
@@ -43,7 +43,7 @@ export class Sink {
   coordinatorCalls: OfficeEvent[] = []; // coordinator tool-call events, for cross-checks and codex linking
   constructor() { for (const a of PERMANENT) this.actors.set(a.id, a); }
   actor(a: Actor) { const cur = this.actors.get(a.id); if (!cur) this.actors.set(a.id, a); else Object.assign(cur, Object.fromEntries(Object.entries(a).filter(([, v]) => v !== undefined))); return this.actors.get(a.id)!; }
-  ref(id: string): ActorRef { const a = this.actors.get(id) || this.actor({ id, kind: id.startsWith('agent:') ? 'engineer' : 'unknown', label: id.replace(/^\w+:/, '').slice(0, 24) }); return { id: a.id, kind: a.kind, label: a.label, ...(a.parent ? { parent: a.parent } : {}) }; }
+  ref(id: string): ActorRef { const a = this.actors.get(id) || this.actor({ id, kind: id.startsWith('agent:') ? 'engineer' : 'unknown', label: id.replace(/^\w+:/, '').slice(0, 24) }); return { id: a.id, kind: a.kind, label: a.label, ...(a.name ? { name: a.name } : {}), ...(a.parent ? { parent: a.parent } : {}) }; }
   private ids = new Set<string>();
   push(e: Omit<OfficeEvent, 'id' | 'seq' | 'derived'>) {
     const base = hid(e.source, e.detailRef.lines.join(','), e.verb, e.actor.id, e.target?.id || '', e.target?.path || '');

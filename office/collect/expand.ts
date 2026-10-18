@@ -2,16 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Collected } from './index';
 import type { OfficeEvent } from './types';
-import { redact } from './privacy';
-import { shellFacts, verifyCommand, offAllowlistWrites } from './shell';
 import { codexSessions, execOf } from './codex';
+import { clip, toolSections, commandSections, type Section } from './withhold';
+export type { Section };
 
 // The content tier. Every text that leaves here is (a) from an allowlisted source file, (b) about an allowlisted target
 // (or explicitly withheld with the path only), and (c) redacted. Summaries never call this.
-export interface Section { title: string; text?: string; path?: string; allowed?: boolean; note?: string; truncated?: boolean }
-const CAP = 120_000;
-const clip = (s: string, cap = CAP): { text: string; truncated?: boolean } => s.length > cap ? { text: redact(s.slice(0, cap)), truncated: true } : { text: redact(s) };
-
 // Source files are opened with the same open-then-verify rule as content reads.
 function openSource(c: Collected, file: string) { const o = c.allow.openVerified(c.allow.canonical(file), p => c.allow.allowsSource(p)); return typeof o === 'string' ? null : o; }
 export function lineAt(c: Collected, file: string, n: number): string {
@@ -21,19 +17,16 @@ export function lineAt(c: Collected, file: string, n: number): string {
     fs.readSync(o.fd, buf, 0, buf.length, offs[n]); return buf.toString('utf8');
   } finally { fs.closeSync(o.fd); }
 }
-const WITHHELD = 'output withheld (unverifiable)';
-const verify = (c: Collected, cmd: string, cwd: string) => verifyCommand(cmd, cwd, c.allow.cfg.home, p => c.allow.allows(p), p => c.allow.allowsDir(p));
-// The command text itself, unless it writes off-allowlist: then the payload is in the arguments and only the targets are shown.
-const commandSection = (c: Collected, title: string, cmd: string, cwd: string): Section => {
-  const w = offAllowlistWrites(cmd, cwd, c.allow.cfg.home, p => c.allow.allows(p));
-  return w.withhold ? { title, allowed: false, note: `writes to ${w.targets.join(', ')} (content withheld)` } : { title, ...clip(cmd) };
-};
 const json = (s: string) => { try { return JSON.parse(s); } catch { return undefined; } };
 const textOf = (c: any): string => typeof c === 'string' ? c : Array.isArray(c) ? c.map(b => b?.type === 'text' ? b.text : b?.type === 'image' ? '[image]' : '').join('\n') : '';
 const fileLines = (c: Collected, file: string) => { const o = openSource(c, file); if (!o) return []; try { const b = Buffer.alloc(o.size); fs.readSync(o.fd, b, 0, o.size, 0); return b.toString('utf8').split('\n'); } finally { fs.closeSync(o.fd); } };
 
 export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source: { file: string; lines: number[] }; sections: Section[] } {
   const d = e.detailRef, out: Section[] = [], allow = c.allow, src = { file: d.file, lines: d.lines.map(n => n + 1) };
+  if (d.kind === 'room-notice') { // Room live feed: read the turn record directly (allowlisted kind), never the feed itself
+    const t = allow.read(path.join(allow.cfg.roomData, 'turns', String(d.key) + '.json'));
+    return { id: e.id, source: src, sections: t.allowed && t.content ? [{ title: 'turn record (.room-data)', path: t.path, allowed: true, ...clip(t.content) }] : [{ title: 'turn record', path: t.path, allowed: t.allowed, note: t.missing ? 'not found' : 'off-allowlist: path only' }] };
+  }
   if (!allow.allowsSource(d.file)) return { id: e.id, source: src, sections: [{ title: 'source', path: d.file, allowed: false, note: 'source file is outside the allowlist: path only' }] };
   const add = (title: string, s: string | undefined, extra: Partial<Section> = {}) => { if (s != null && s !== '') out.push({ title, ...clip(s), ...extra }); };
   const gate = (title: string, p: string, s: string | undefined) => { if (!allow.allows(p)) out.push({ title, path: p, allowed: false, note: 'off-allowlist: path only' }); else add(title, s, { path: p, allowed: true }); };
@@ -45,28 +38,9 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       const results = d.lines.slice(1).map(n => json(lineAt(c, d.file, n))).filter(Boolean);
       const result = results.map(r => Array.isArray(r.message?.content) ? r.message.content.filter((b: any) => b.type === 'tool_result' && b.tool_use_id === d.key).map((b: any) => textOf(b.content)).join('\n') : textOf(r.message?.content)).join('\n---\n');
       const name = use?.name;
-      if (name === 'Read' || name === 'NotebookRead') { gate('file read (as the agent saw it)', tgtPath!, result); break; }
-      if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(name)) {
-        if (!tgtPath || !allow.allows(tgtPath)) { out.push({ title: 'written', path: tgtPath, allowed: false, note: `writes to ${tgtPath || 'an unknown path'} (content withheld)` }); break; }
-        add('written', inp.content ?? (inp.old_string != null ? `--- old\n${inp.old_string}\n+++ new\n${inp.new_string}` : JSON.stringify(inp.edits || inp, null, 1)), { path: tgtPath, allowed: true }); add('result', result); break;
-      }
-      if (name === 'Bash') {
-        const cmd = String(inp.command || ''), cwd = rec?.cwd || allow.cfg.home, v = verify(c, cmd, cwd);
-        add('description', inp.description);
-        out.push(commandSection(c, 'command', cmd, cwd));
-        if (!v.ok) out.push({ title: 'output', allowed: false, note: `${WITHHELD}: ${v.reason}` }); else add('output', result);
-        break;
-      }
-      if (name === 'Agent' || name === 'Task') { add('description', inp.description); add('prompt', inp.prompt); add('launch result', result.replace(/agentId: \S+.*$/gm, '')); if (e.target?.id.startsWith('agent:')) out.push(...actorContext(c, e.target.id, false)); break; }
-      if (name === 'SendMessage') { add('message', inp.message ?? JSON.stringify(inp, null, 1)); add('result', result); break; }
-      if (name === 'Grep' || name === 'Glob') {
-        const where = String(inp.path || rec?.cwd || ''), pat = String(inp.glob || (name === 'Glob' ? inp.pattern : '') || '');
-        add('input', JSON.stringify(inp, null, 1));
-        const why = !where || !(allow.allows(where) || allow.allowsDir(where)) ? 'search root is off-allowlist: ' + where : /(^|\/)\.\.(\/|$)|^[/~]/.test(pat) ? 'pattern can leave the search root' : '';
-        if (why) out.push({ title: 'result', allowed: false, note: `${WITHHELD}: ${why}` }); else add('result', result);
-        break;
-      }
-      add('input', JSON.stringify(inp, null, 1)); out.push({ title: 'result', allowed: false, note: `${WITHHELD}: ${name} results are not checked against the allowlist` }); break;
+      out.push(...toolSections(allow, name, inp, result, rec?.cwd || allow.cfg.home, tgtPath));
+      if ((name === 'Agent' || name === 'Task') && e.target?.id.startsWith('agent:')) out.push(...actorContext(c, e.target.id, false));
+      break;
     }
     case 'claude-text': { const r = json(lineAt(c, d.file, d.lines[0])); add('text', textOf(r?.message?.content)); break; }
     case 'claude-user': case 'claude-notification': { const r = json(lineAt(c, d.file, d.lines[0])); add('message', textOf(r?.message?.content)); break; }
@@ -82,12 +56,26 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       }
       const body = L.slice(d.lines[0], d.lines[1]).join('\n');
       if (d.kind === 'codex-exec') {
-        const x = execOf(L, { kind: 'exec', start: d.lines[0], end: d.lines[1] }), cwd = x.cwd || '/', v = x.wrapped ? verify(c, x.inner, cwd) : { ok: false, reason: 'command wrapper not understood' };
-        const cs = commandSection(c, 'command (derived from log text)', x.inner, cwd); if (cs.text != null) cs.text = redact(x.raw + (x.cwd ? `\n  in ${x.cwd}` : ''));
-        out.push(cs); add('status', x.status.trim());
-        if (!v.ok) out.push({ title: 'output', allowed: false, note: `${WITHHELD}: ${v.reason}` }); else add('output (derived from log text)', x.output);
+        const x = execOf(L, { kind: 'exec', start: d.lines[0], end: d.lines[1] }), cwd = x.cwd || '/';
+        const secs = commandSections(allow, x.inner, cwd, x.output, { title: 'command (derived from log text)', outTitle: 'output (derived from log text)', shown: x.raw + (x.cwd ? `\n  in ${x.cwd}` : ''), understood: x.wrapped });
+        out.push(secs[0]); add('status', x.status.trim()); out.push(...secs.slice(1));
       } else add(d.kind === 'codex-final' ? 'final message (derived from log text)' : 'log section', body);
       if (d.kind === 'codex-final') out.push(...actorContext(c, e.actor.id, false));
+      break;
+    }
+    case 'spool-hook': case 'spool-codex': { // records were filtered + redacted at write; clip() redacts again at read
+      const recs = d.lines.map(n => json(lineAt(c, d.file, n))).filter(Boolean);
+      const resec = (x: Section) => x.text != null ? { ...x, ...clip(String(x.text)) } : x;
+      if (d.kind === 'spool-codex' && d.key && (e.verb === 'spawn' || e.verb === 'end')) {
+        const all = fileLines(c, d.file).map(json).filter((r: any) => r?.run === d.key).sort((a: any, b: any) => a.seq - b.seq);
+        const st = all.find((r: any) => r.kind === 'start'); if (st) out.push({ title: 'run', ...clip(`role: ${st.role || '?'}  label: ${st.label || '?'}\ncwd: ${st.cwd}\nargs: ${(st.args || []).join(' ')}`) });
+        for (const r of all) for (const x of (r.item?.sections || r.sections || []) as Section[]) out.push(resec({ ...x, title: r.kind === 'end' ? 'final message' : x.title }));
+        break;
+      }
+      const last = recs[recs.length - 1];
+      for (const x of ((last?.item?.sections || last?.sections || []) as Section[])) out.push(resec(x));
+      if (e.verb === 'spawn' && e.target?.id.startsWith('agent:')) out.push(...actorContext(c, e.target.id, false));
+      if (!out.length) out.push({ title: 'event', note: 'no content recorded for this event' });
       break;
     }
     case 'handoff': { add('events.jsonl line', lineAt(c, d.file, d.lines[0])); const ref = d.extra?.ref as string | undefined; if (ref) { const r = allow.read(ref); r.allowed ? add('ref', r.content, { path: r.path, allowed: true, note: r.missing ? 'missing' : 'current file content' }) : out.push({ title: 'ref', path: r.path, allowed: false, note: 'off-allowlist: path only' }); } break; }
@@ -125,7 +113,7 @@ export function actorContext(c: Collected, actorId: string, withPrompt = true): 
   for (const e of evs.filter(e => e.verb === 'read' && e.target?.kind === 'file')) {
     const p = e.target!.path!;
     if (!c.allow.allows(p)) { out.push({ title: 'read', path: p, allowed: false, note: 'off-allowlist: path only' }); continue; }
-    if (e.detailRef.kind === 'codex-exec') { // one command read several files: its output is shown once, not split by guesswork
+    if (e.detailRef.kind === 'codex-exec' || e.detailRef.kind === 'spool-codex') { // one command read several files: its output is shown once, not split by guesswork
       const k = e.detailRef.lines.join(',');
       if (!shown.has(k)) { shown.add(k); const secs = expandEvent(c, e).sections; out.push(...secs.filter(s => /^(command|output)/.test(s.title)).map(s => ({ ...s, title: s.title.startsWith('command') ? 'command' : s.title }))); }
       out.push({ title: 'read', path: p, allowed: true, note: 'content is in the command output above (derived)' }); continue;

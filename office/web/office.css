@@ -45,3 +45,9 @@ main { display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
 .lc, .p-captured { color: var(--cap); } .ld, .p-derived { color: var(--der); } .li, .p-inferred { color: var(--inf); } .lr { color: var(--red); }
 .rows .future { opacity: .4; }
 .fatal { color: var(--red); padding: 10px; }
+#bar button.live-on { border-color: var(--red); color: var(--red); }
+#following { color: var(--amber); }
+#logbar { position: sticky; top: 0; background: var(--panel); color: var(--dim); font-size: 11px; padding: 2px 0; z-index: 1; }
+#logrows .rows div { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 12px; }
+#logrows.raw .rows div { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.rows .fresh { color: var(--fg); }
