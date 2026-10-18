@@ -48,7 +48,7 @@ export function hookRecord(h: any, allow: Allowlist, now = new Date().toISOStrin
     base.tool = name; base.toolUseId = h.tool_use_id ? String(h.tool_use_id) : undefined;
     const target = FILE_TOOLS.has(name) && (inp.file_path || inp.notebook_path) ? allow.canonical(String(inp.file_path || inp.notebook_path), cwd) : undefined;
     if (target) base.target = target;
-    if (name === 'Bash') { const f = shellFacts(String(inp.command || ''), cwd, allow.cfg.home); base.reads = f.reads; base.writes = f.writes; base.label = inp.description ? redact(String(inp.description)).slice(0, 200) : undefined; }
+    if (name === 'Bash') { const f = shellFacts(String(inp.command || ''), cwd, allow.cfg.home); base.reads = f.reads; base.writes = f.writes; } // the description is agent text: only in sections (prose tier)
     if (name === 'Agent' || name === 'Task') { base.label = inp.description ? redact(String(inp.description)).slice(0, 200) : undefined; base.agentType = inp.subagent_type || base.agentType; }
     if (name === 'SendMessage') base.to = typeof inp.to === 'string' ? inp.to.slice(0, 80) : undefined;
     const result = event === 'PostToolUse' ? responseText(name, h.tool_response) : '';

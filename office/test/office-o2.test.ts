@@ -440,7 +440,7 @@ test('file names: first heading if allowlisted, else the name in words; no conte
   ], now);
   const c = collect(cfg), title = (p: string) => c.events.find(e => e.target?.path === path.join(D, p))?.target?.title;
   assert.equal(title('notes-without-heading.md'), 'notes without heading');
-  assert.equal(title('blind/T-3911f729.md'), 'Transcript T-3911f729');
+  assert.equal(title('blind/T-3911f729.md'), 'T-3911f729', 'blind files: opaque id, heading never read');
   assert.equal(title('restricted/map.md'), 'map', 'restricted files: never read for a title');
   assert.equal(title('restricted/key.json'), 'key');
   assert.equal(c.events.find(e => e.target?.path === path.join(cfg.coordination, '2026-10-17/70-date-baseline-results.md'))?.target?.title ?? 'Date room baseline: results', 'Date room baseline: results');
@@ -448,4 +448,22 @@ test('file names: first heading if allowlisted, else the name in words; no conte
   const labels = JSON.stringify([sums, bundles, c.events.map(e => e.target?.title), [...c.actors.values()].map(a => a.name)]);
   for (const m of ['BODY-CONTENT-MARKER', 'PROSE-EDGE-MARKER', 'SECRET-ROOM-NAME', 'RESTRICTED-HEADING']) assert.ok(!labels.includes(m), 'label shows ' + m);
   assert.ok(sums.includes('reads Transcript T-3911f729') || sums.includes('reads transcript T-3911f729'), 'blind id kept as given');
+});
+
+test('critic P1s: agent-written Bash descriptions and blind-file headings never reach labels', async () => {
+  const { cfg, D } = fixture(), M: any = await import(path.join(OFFICE, 'web/model.mjs')), allow = new Allowlist(cfg), now = '2026-10-18T14:00:00.000Z';
+  fs.writeFileSync(path.join(D, 'blind/T-3911f729.md'), '# REVEALING-HEADING Megan and Jake, room r02\nbody\n');
+  const sess = path.join(cfg.claudeProject, S + '.jsonl'), rec = (o: any) => JSON.stringify({ parentUuid: null, isSidechain: false, cwd: D, sessionId: S, ...o }) + '\n';
+  fs.appendFileSync(sess, rec({ type: 'assistant', uuid: 'd1', timestamp: '2026-10-17T18:20:00.000Z', message: { id: 'msg_d', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_d', name: 'Bash', input: { command: 'cat blind/T-3911f729.md', description: 'DESC-MARKER peek at Megan' } },
+    { type: 'tool_use', id: 'toolu_d2', name: 'Bash', input: { command: 'true', description: 'DESC-MARKER two' } }, { type: 'tool_use', id: 'toolu_d3', name: 'SendMessage', input: { to: 'a1234567890abcdef', summary: 'DESC-MARKER summary', message: 'x' } }] } }));
+  append(cfg.spool!, 'hooks', [hookRecord({ hook_event_name: 'PreToolUse', session_id: S, cwd: D, tool_name: 'Bash', tool_use_id: 'th', tool_input: { command: 'ls', description: 'DESC-MARKER hook' } }, allow, now)], now);
+  const o = createOffice(cfg), srv = o.app.listen(0, '127.0.0.1'); await new Promise(r => srv.once('listening', r));
+  try {
+    const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, evs = (await (await fetch(base + '/api/events?op=*')).json()).events, sum = await (await fetch(base + '/api/summary')).text();
+    const actors = JSON.parse(sum).actors, n = (id: string) => actors.find((a: any) => a.id === id)?.name || id;
+    const labels = JSON.stringify([evs.map((e: any) => [M.edgeSummary(e, n), M.narrate(e, n), e.label, e.target?.title]), M.bundleSummary(evs.filter((e: any) => e.verb === 'dispatch'), n), actors.map((a: any) => a.name)]);
+    for (const m of ['DESC-MARKER', 'REVEALING-HEADING', 'Megan and Jake']) { assert.ok(!labels.includes(m), 'label shows ' + m); assert.ok(!JSON.stringify(evs).includes(m) && !sum.includes(m), 'summary tier shows ' + m); }
+    const d = evs.find((e: any) => e.detailRef?.key === 'toolu_d2'), def = await (await fetch(base + '/api/expand/event/' + d.id)).text(), third = await (await fetch(base + '/api/expand/event/' + d.id + '/prose')).text();
+    assert.ok(!def.includes('DESC-MARKER') && third.includes('DESC-MARKER'), 'the description is only on the third click');
+  } finally { await new Promise(r => srv.close(r)); }
 });

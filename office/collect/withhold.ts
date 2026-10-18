@@ -43,7 +43,7 @@ export function toolSections(allow: Allowlist, name: string, inp: any, result: s
     if (!target || !allow.allows(target)) return [{ title: 'written', path: target, allowed: false, note: `writes to ${target || 'an unknown path'} (content withheld)` }];
     add('written', inp.content ?? (inp.old_string != null ? `--- old\n${inp.old_string}\n+++ new\n${inp.new_string}` : JSON.stringify(inp.edits || inp, null, 1)), { path: target, allowed: true }); add('result', result); return out;
   }
-  if (name === 'Bash') { add('description', inp.description); out.push(...commandSections(allow, String(inp.command || ''), cwd, result)); return out; }
+  if (name === 'Bash') { add('description', inp.description, { prose: true }); out.push(...commandSections(allow, String(inp.command || ''), cwd, result)); return out; }
   if (name === 'Agent' || name === 'Task') { add('description', inp.description); add('prompt', inp.prompt); add('launch result', String(result || '').replace(/agentId: \S+.*$/gm, ''), { prose: true }); /* a synchronous agent returns its prose here */ return out; }
   if (name === 'SendMessage') { add('message', inp.message ?? JSON.stringify(inp, null, 1)); add('result', result); return out; }
   if (name === 'Grep' || name === 'Glob') {

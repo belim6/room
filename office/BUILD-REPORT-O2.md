@@ -240,3 +240,14 @@ These supersede the sections above where they differ. Each fix has a test in `of
 - `file names:` covers a heading, the name in words, blind ids kept opaque, and `restricted/` files titled by name only. Planted body content, Codex prose, an unmasked room name and a restricted heading never appear in any edge label, file title or agent name.
 
 **Results:** `npm run test:office` passes 35 of 35, `npx tsc --noEmit` is clean, and `npm run test:workbench` passes 150 of 150. I checked it visually on a temporary 4319 server, now stopped. The 4318 preview server was not touched.
+
+## Critic fixes on fdaa3bb
+1. **Agent-written text is out of the labels.**
+   - Bash `description` and SendMessage `summary` are no longer copied into `event.label`, whether from transcripts or from the hook spool.
+   - `edgeSummary` now only compares `e.label` and never prints it. Command edges read "runs a command", "runs <tool name>" or "runs a workflow"; server dispatches read "dispatches a turn" or "dispatches work"; blocks read "is blocked".
+   - In Expand, the Bash description is a prose section, so it appears only behind the third click.
+2. **Files under `blind/` or `restricted/` are titled from their opaque name only** (e.g. `T-3911f729`). Their heading is never read.
+
+**Test:** `critic P1s:` plants a revealing heading in a blind file and markers in Bash descriptions and a SendMessage summary, in a transcript and in a hook. None of them appears in any edge label, narration line, event label, file title or agent name, or anywhere in `/api/events` or `/api/summary`. The description appears only on the third-click route.
+
+**Results:** `npm run test:office` passes 36 of 36, `npx tsc --noEmit` is clean, and `npm run test:workbench` passes 150 of 150.

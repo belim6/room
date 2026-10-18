@@ -143,7 +143,6 @@ export function narrate(e, nameOf, opTitle = (x) => x) {
 
 // Edge labels: what an edge is, in a few plain words, from the same metadata as the narration (verb, target name, event
 // label, outcome). Deterministic; no content, no agent prose.
-const short = (s, n = 40) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 const lastPart = (name = '') => name.split(' · ').pop();
 export function edgeSummary(e, nameOf = (x) => x) {
   const t = e.target, them = t?.kind === 'actor' ? nameOf(t.id) : '', file = t?.kind === 'file' ? fileWords(t.path, t.title).replace(/^the /, '') : '';
@@ -156,9 +155,10 @@ export function edgeSummary(e, nameOf = (x) => x) {
       return e.outcome === 'no-go' ? `rules NO-GO${f}` : e.outcome === 'go' ? `rules GO${f}` : e.outcome === 'conditional-go' ? `rules conditional GO${f}` : e.outcome === 'verdict' ? 'returns its verdict'
         : /error|fail|no-output/.test(e.outcome || '') ? `ends: ${e.outcome}` : 'reports back'; }
     case 'message': return e.label === 'packet' ? `sends a packet to ${lastPart(them) || 'review'}` : e.label === 'review' ? 'returns a review' : t?.id === 'deniz' ? 'writes to Deniz' : e.actor.id === 'deniz' ? 'writes to the coordinator' : e.label?.startsWith('result') ? 'reports back' : `messages ${lastPart(them) || 'an agent'}`;
-    case 'dispatch': return t?.id === 'server' ? `dispatches ${e.label && /\bt\d+\b/.test(e.label) ? 'a turn' : e.label || 'work'}` : t?.id === 'providers' ? 'starts a Codex run' : `runs ${short(e.label || 'a command', 30)}${fail}`;
+    // e.label is only compared, never printed: labels can carry agent-written text
+    case 'dispatch': return t?.id === 'server' ? (e.label && /\bt\d+\b/.test(e.label) ? 'dispatches a turn' : 'dispatches work') : t?.id === 'providers' ? 'starts a Codex run' : t?.kind === 'tool' && /^[\w.-]+$/.test(t.id) ? `runs ${t.id}${fail}` : t?.kind === 'workflow' ? 'runs a workflow' : `runs a command${fail}`;
     case 'turn': return 'produces a turn';
-    case 'block': return `blocked${e.label ? ': ' + short(e.label, 30) : ''}`;
+    case 'block': return 'is blocked';
     case 'error': return e.outcome === 'missing' ? 'missing label' : 'error';
     case 'deviation': return 'coverage gap';
     default: return e.verb;

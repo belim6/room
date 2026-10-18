@@ -52,6 +52,7 @@ export function humanizeFile(p: string) {
 export function fileTitle(p: string, allow: Allowlist, cache: Map<string, string>) {
   const hit = cache.get(p); if (hit != null) return hit;
   let t = '';
-  if (/\.md$/i.test(p) && !/\/restricted\//i.test(p) && allow.allows(p)) { const r = allow.read(p, undefined, 4096); t = r.content?.match(/^#\s+(.+?)\s*#*\s*$/m)?.[1]?.slice(0, 80) || ''; }
+  // blind/ and restricted/ files are titled from their opaque name only: a heading could reveal identity, so it is never read
+  if (/\.md$/i.test(p) && !/\/(blind|restricted)\//i.test(p) && allow.allows(p)) { const r = allow.read(p, undefined, 4096); t = r.content?.match(/^#\s+(.+?)\s*#*\s*$/m)?.[1]?.slice(0, 80) || ''; }
   t = t || humanizeFile(p); cache.set(p, t); return t;
 }

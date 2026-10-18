@@ -43,7 +43,7 @@ export function parseClaude(o: ClaudeOpts, sink: Sink, allow: Allowlist) {
         else if (['Write', 'Edit', 'NotebookEdit', 'MultiEdit'].includes(b.name)) made.push(ev({ ...base, verb: 'write', target: file(inp.file_path || inp.notebook_path || '', cwd) }));
         else if (b.name === 'Glob' || b.name === 'Grep') made.push(ev({ ...base, verb: 'read', target: file(inp.path || cwd || '.', cwd), provenance: 'derived' }));
         else if (b.name === 'Agent' || b.name === 'Task') made.push(ev({ ...base, verb: 'spawn', target: { kind: 'actor', id: 'tool:' + b.id }, label: inp.description }));
-        else if (b.name === 'SendMessage') made.push(ev({ ...base, verb: 'message', target: { kind: 'actor', id: /^a[0-9a-f]{10,}$/.test(inp.to || '') ? 'agent:' + inp.to : 'name:' + (inp.to || '?') }, label: inp.summary }));
+        else if (b.name === 'SendMessage') made.push(ev({ ...base, verb: 'message', target: { kind: 'actor', id: /^a[0-9a-f]{10,}$/.test(inp.to || '') ? 'agent:' + inp.to : 'name:' + (inp.to || '?') } }));
         else if (b.name === 'AskUserQuestion') made.push(ev({ ...base, verb: 'message', target: { kind: 'actor', id: 'deniz' }, label: 'question' }));
         else if (b.name === 'Workflow') made.push(ev({ ...base, verb: 'dispatch', target: { kind: 'workflow', id: b.id }, label: 'workflow' }));
         else if (b.name === 'Bash') {
@@ -51,7 +51,7 @@ export function parseClaude(o: ClaudeOpts, sink: Sink, allow: Allowlist) {
           for (const p of f.reads) made.push(ev({ ...base, verb: 'read', target: file(p), provenance: 'derived' }));
           for (const p of f.writes) made.push(ev({ ...base, verb: 'write', target: file(p), provenance: 'derived' }));
           const toServer = /127\.0\.0\.1:4317|localhost:4317|driver\.mjs/.test(cmd), codex = /\bcodex\s+exec\b|codexlabel/.test(cmd);
-          if (!made.length || toServer || codex) made.push(ev({ ...base, verb: 'dispatch', target: codex ? { kind: 'actor', id: 'providers' } : toServer ? { kind: 'actor', id: 'server' } : { kind: 'command', id: b.id }, label: inp.description }));
+          if (!made.length || toServer || codex) made.push(ev({ ...base, verb: 'dispatch', target: codex ? { kind: 'actor', id: 'providers' } : toServer ? { kind: 'actor', id: 'server' } : { kind: 'command', id: b.id } })); // no description: agent-written text stays out of labels
           made.forEach(e => e.hints = [...f.reads, ...f.writes, f.cwd, cmd.slice(0, 4000)]);
         } else made.push(ev({ ...base, verb: 'dispatch', target: { kind: 'tool', id: b.name }, label: b.name }));
         if (made[0].target?.kind === 'file' && !made[0].hints) made[0].hints = [made[0].target.path!];
