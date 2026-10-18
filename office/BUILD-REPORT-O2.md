@@ -202,3 +202,23 @@ These supersede the sections above where they differ. Each fix has a test in `of
   Most of the remaining withheld outputs come from commands that use `$variables`, heredocs, interpreters (`node -e`, `python3`) or paths outside the repo, like the scratchpad and `~/.codex`. That is fail-closed by design.
 
 **Results:** `npm run test:office` passes 31 of 31, `npx tsc --noEmit` and `npx tsc -p office` are clean, and `npm run test:workbench` passes 150 of 150. My temp servers on 4319 are stopped. PID 2333 on 4318 was left alone.
+
+## Recheck fixes (after the NO-GO on 2a81fa0)
+1. **HIGH: case variants could bypass the exclusions, now fixed.**
+   - Canonical paths now come from `fs.realpathSync.native`, which returns the on-disk case. This applies to `canonical`, the root paths, and the open-then-verify re-check.
+   - Every allowlist, root and exclusion comparison is now also case-insensitive:
+     - `under` and the relative-path segments use lowercased paths;
+     - `EXCLUDED_SEGMENT`, `ROOM_KINDS`, `.env*`, `.log`, transcript and spool name patterns all use `/i`.
+   - **Test `recheck 1`** runs on a case-insensitive temp volume. It skips itself on a case-sensitive one.
+     - Path-only, whether read directly, through `/api/expand/file`, or in a shell command: `.ENV`, `.Env`, `.Git/config`, `.GIT/CONFIG`, `OFFICE-SPOOL/…`, `Office-Spool/…`, `.Room-Data/Trash/…`, `.ROOM-DATA/trash/…`, `NODE_MODULES/…`, `Node_Modules/…`, `SAVES/…` and `Saves/…`.
+     - An allowed file asked for in another case (`SRC/X.TS`) is still readable.
+     - A symlink swapped in between check and open, under a case-variant request, is refused.
+   - **Real data:** `.ENV`, `.GIT/config`, `Office-Spool/…`, `.ROOM-DATA/trash`, `Node_Modules` and `Saves` under `~/dev/room` are now path-only. `SRC/workbench/server.ts` is readable.
+2. **LOW: prose is now decided on read.** A spool section counts as prose if any of these hold:
+   - its item type is `agent_message`, `assistant_message`, `reasoning` or `error`;
+   - its record is an `error` or `turn.failed` record, a run's `end` record, or a `SubagentStop` record;
+   - its title is a final message or output, a launch result, reasoning or thinking.
+
+   A stored `prose: true` is still honoured; a missing one is not trusted. **Test `recheck 2`:** records written without the flag (agent message, reasoning, final message, `last_assistant_message`) stay out of default Expand, and the third-click route returns them.
+
+**Results:** `npm run test:office` passes 33 of 33, `npx tsc --noEmit` is clean, and `npm run test:workbench` passes 150 of 150.

@@ -365,3 +365,41 @@ test('decision B: the repo is on the allowlist, with its exclusions path-only', 
     for (const p of ['.env', 'saves/s.md', '.git/config', 'office-spool/hooks-2026-10-18.jsonl']) { const r = await get(p); assert.equal(r.content, undefined, p); assert.equal(r.allowed, false, p); }
   } finally { await new Promise(r => srv.close(r)); }
 });
+
+// ---- recheck of 2a81fa0 -----------------------------------------------------------------------------------------------
+test('recheck 1: case variants cannot reach excluded paths (case-insensitive volumes), including through open-then-verify', async () => {
+  const { root, cfg } = fixture(), R = path.join(root, 'repo'), w = (p: string, t: string) => { fs.mkdirSync(path.dirname(path.join(R, p)), { recursive: true }); fs.writeFileSync(path.join(R, p), t); };
+  w('src/x.ts', 'REPO-SOURCE'); w('.env', 'ENV-SECRET'); w('.git/config', 'GITCONF'); w('office-spool/hooks-2026-10-18.jsonl', '{"v":1,"RAW":1}'); w('.room-data/trash/t.json', 'TRASH'); w('node_modules/m/i.js', 'NM'); w('saves/s.md', 'SAVES');
+  if (!fs.existsSync(path.join(R, '.ENV'))) return; // case-sensitive volume: the variants simply don't exist
+  const c2: Config = { ...cfg, repos: [R], spool: path.join(R, 'office-spool'), roomData: path.join(R, '.room-data') }, al = new Allowlist(c2);
+  assert.equal(al.canonical(path.join(R, '.GIT/CONFIG')), path.join(R, '.git/config'), 'canonical path carries the on-disk case');
+  const variants = ['.ENV', '.Env', '.Git/config', '.GIT/CONFIG', 'OFFICE-SPOOL/hooks-2026-10-18.jsonl', 'Office-Spool/hooks-2026-10-18.jsonl', '.Room-Data/Trash/t.json', '.ROOM-DATA/trash/t.json', 'NODE_MODULES/m/i.js', 'Node_Modules/m/i.js', 'SAVES/s.md', 'Saves/s.md'];
+  for (const p of variants) { const r = al.read(path.join(R, p)); assert.equal(r.allowed, false, p); assert.equal(r.content, undefined, p); assert.equal(al.allows(path.join(R, p)), false, p); }
+  assert.equal(al.read(path.join(R, 'SRC/X.TS')).content, 'REPO-SOURCE', 'an allowed file in another case is still the allowed file');
+  assert.equal(verifyCommand('cat .ENV', R, c2.home, p => al.allows(p), p => al.allowsDir(p)).ok, false);
+  assert.equal(verifyCommand('cd .GIT && cat config', R, c2.home, p => al.allows(p), p => al.allowsDir(p)).ok, false);
+  // through the server's file route as well, and with a symlink swapped in between check and open
+  const o = createOffice(c2), srv = o.app.listen(0, '127.0.0.1'); await new Promise(r => srv.once('listening', r));
+  try { const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    for (const p of variants) { const r = await (await fetch(base + '/api/expand/file?path=' + encodeURIComponent(path.join(R, p)))).json(); assert.equal(r.content, undefined, p); }
+  } finally { await new Promise(r => srv.close(r)); }
+  const f = path.join(R, 'src/x.ts'); al.beforeOpen = (p) => { if (p.toLowerCase() === f.toLowerCase()) { fs.renameSync(f, f + '.moved'); fs.symlinkSync(path.join(R, '.env'), f); } };
+  const sw = al.read(path.join(R, 'SRC/x.ts')); assert.equal(sw.content, undefined); assert.equal(sw.allowed, false);
+});
+
+test('recheck 2: prose is decided on read; spool records without a stored prose flag stay behind the third click', async () => {
+  const { cfg, D } = fixture(), now = '2026-10-18T12:30:00.000Z', meta = { role: 'labeler', label: 'old run', operation: '2026-10-17/date/labeling', cwd: D };
+  append(cfg.spool!, 'codex', [ // as written before the flag existed: no `prose` anywhere
+    { v: 1, src: 'codex', ts: now, run: 'r-old', seq: 0, kind: 'start', ...meta, id: 'r-old:start', args: ['-'] },
+    { v: 1, src: 'codex', ts: now, run: 'r-old', seq: 1, kind: 'event', type: 'item.completed', item: { type: 'agent_message', sections: [{ title: 'message', text: 'OLD-PROSE-MSG' }] }, id: 'r-old:1' },
+    { v: 1, src: 'codex', ts: now, run: 'r-old', seq: 2, kind: 'event', type: 'item.completed', item: { type: 'reasoning', sections: [{ title: 'reasoning', text: 'OLD-PROSE-REASON' }] }, id: 'r-old:2' },
+    { v: 1, src: 'codex', ts: now, run: 'r-old', seq: 3, kind: 'end', exit: { code: 0, signal: null }, ...meta, sections: [{ title: 'final message', text: 'OLD-PROSE-FINAL' }], id: 'r-old:end' },
+  ], now);
+  append(cfg.spool!, 'hooks', [{ v: 1, src: 'hook', ts: now, event: 'SubagentStop', session: S, agent: 'a88888888888888888', cwd: D, sections: [{ title: 'final output', text: 'OLD-PROSE-LAST' }], id: 'h-old' }], now);
+  const o = createOffice(cfg), srv = o.app.listen(0, '127.0.0.1'); await new Promise(r => srv.once('listening', r));
+  try {
+    const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, evs = (await (await fetch(base + '/api/events?op=*')).json()).events.filter((e: any) => e.source.includes('/spool/'));
+    let def = '', third = ''; for (const e of evs) { def += await (await fetch(base + '/api/expand/event/' + e.id)).text(); third += await (await fetch(base + '/api/expand/event/' + e.id + '/prose')).text(); }
+    for (const m of ['OLD-PROSE-MSG', 'OLD-PROSE-REASON', 'OLD-PROSE-FINAL', 'OLD-PROSE-LAST']) { assert.ok(!def.includes(m), 'default Expand shows ' + m); assert.ok(third.includes(m), 'third click lacks ' + m); }
+  } finally { await new Promise(r => srv.close(r)); }
+});

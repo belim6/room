@@ -23,19 +23,21 @@ export const expandHome = (p: string, home: string) => p === '~' ? home : p.star
 export function canonical(p: string, home: string, cwd = '/') {
   const abs = path.resolve(cwd, expandHome(p, home)); const rest: string[] = []; let cur = abs;
   for (;;) {
-    try { return path.join(fs.realpathSync(cur), ...rest.reverse()); }
+    try { return path.join(fs.realpathSync.native(cur), ...rest.reverse()); } // .native: the on-disk case, not the requested one
     catch { const up = path.dirname(cur); if (up === cur) return abs; rest.push(path.basename(cur)); cur = up; }
   }
 }
-const real = (p: string) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
-const under = (p: string, root: string) => p === root || p.startsWith(root + path.sep);
-export const ROOM_KINDS = /^(revisions|turns|attempts|outcomes|branches|vault-[a-z-]+|experiment[a-z-]*)$/;
+const real = (p: string) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
+// macOS volumes are case-insensitive: every root/exclusion comparison ignores case as well (belt and braces with .native).
+const under = (p: string, root: string) => { const a = p.toLowerCase(), b = root.toLowerCase(); return a === b || a.startsWith(b + path.sep); };
+const relSegs = (root: string, c: string) => path.relative(root.toLowerCase(), c.toLowerCase()).split(path.sep);
+export const ROOM_KINDS = /^(revisions|turns|attempts|outcomes|branches|vault-[a-z-]+|experiment[a-z-]*)$/i;
 
 export interface Opened { fd: number; size: number }
 // git worktrees of the repo only (a worktree has a .git *file*): room-backups and other look-alikes are not code
 const siblings = (dir: string, name: string) => { try { return fs.readdirSync(dir).filter(n => n.startsWith(name + '-')).map(n => path.join(dir, n)).filter(p => { try { return fs.statSync(path.join(p, '.git')).isFile(); } catch { return false; } }); } catch { return []; } };
 // Inside the repos, these stay path-only wherever they occur (.room-data is handled by its own record-kind rule).
-export const EXCLUDED_SEGMENT = /^(saves|saved|oldsaves|prompt-archive|_dead|node_modules|\.git|office-spool|\.room-data)$/;
+export const EXCLUDED_SEGMENT = /^(saves|saved|oldsaves|prompt-archive|_dead|node_modules|\.git|office-spool|\.room-data)$/i;
 export class Allowlist {
   roots: { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; spool: string; repos: string[] };
   cfg: Config;
@@ -50,24 +52,24 @@ export class Allowlist {
   // per-event expander only, never served whole.
   isTranscript(p: string, cwd?: string) {
     const c = this.canonical(p, cwd), r = this.roots; if (!under(c, r.claudeProject)) return false;
-    const rel = path.relative(r.claudeProject, c).split(path.sep), last = rel[rel.length - 1];
-    return (rel.length === 1 && /^[0-9a-f-]{36}\.jsonl$/.test(last)) || (rel.length >= 3 && rel[1] === 'subagents' && /^agent-[A-Za-z0-9_-]+\.jsonl$/.test(last));
+    const rel = relSegs(r.claudeProject, c), last = rel[rel.length - 1];
+    return (rel.length === 1 && /^[0-9a-f-]{36}\.jsonl$/i.test(last)) || (rel.length >= 3 && rel[1] === 'subagents' && /^agent-[A-Za-z0-9_-]+\.jsonl$/i.test(last));
   }
-  isRawLog(p: string, cwd?: string) { const c = this.canonical(p, cwd); return under(c, this.roots.coordination) && /\.log$/.test(c); }
+  isRawLog(p: string, cwd?: string) { const c = this.canonical(p, cwd); return under(c, this.roots.coordination) && /\.log$/i.test(c); }
   // The Office's own spool: already filtered at write, read only per event (path-only on the file route).
-  isSpool(p: string, cwd?: string) { const c = this.canonical(p, cwd); return under(c, this.roots.spool) && /\.jsonl$/.test(c); }
+  isSpool(p: string, cwd?: string) { const c = this.canonical(p, cwd); return under(c, this.roots.spool) && /\.jsonl$/i.test(c); }
   allowsSource(p: string, cwd?: string) { return this.isTranscript(p, cwd) || this.allows(p, cwd) || this.isRawLog(p, cwd) || this.isSpool(p, cwd); }
   // Content tier: may this path's own content be shown? Transcripts and raw logs: no (path only).
   allows(p: string, cwd?: string) {
     if (!p || p.includes('\0')) return false;
     const c = this.canonical(p, cwd), r = this.roots;
-    if (/\.log$/.test(c) || under(c, r.spool) || /^\.env/.test(path.basename(c))) return false; // .env* anywhere: path only
-    if (under(c, r.roomData)) { const rel = path.relative(r.roomData, c).split(path.sep); return rel.length === 2 && ROOM_KINDS.test(rel[0]) && rel[1].endsWith('.json'); }
+    if (/\.log$/i.test(c) || under(c, r.spool) || /^\.env/i.test(path.basename(c))) return false; // .env* anywhere: path only
+    if (under(c, r.roomData)) { const rel = relSegs(r.roomData, c); return rel.length === 2 && ROOM_KINDS.test(rel[0]) && rel[1].endsWith('.json'); }
     if (under(c, r.coordination) || under(c, r.promptKnowledge)) return true;
     return this.inRepo(c);
   }
   private inRepo(c: string) {
-    for (const root of this.roots.repos) if (under(c, root)) return !path.relative(root, c).split(path.sep).some(seg => EXCLUDED_SEGMENT.test(seg) || /^\.env/.test(seg));
+    for (const root of this.roots.repos) if (under(c, root)) return !relSegs(root, c).some(seg => EXCLUDED_SEGMENT.test(seg) || /^\.env/i.test(seg));
     return false;
   }
   // A directory a shell command may run in (or list) without escaping the content tier.
@@ -77,9 +79,9 @@ export class Allowlist {
     const c = this.canonical(p, cwd), r = this.roots;
     if (under(c, r.coordination)) return 'archive';
     if (under(c, r.promptKnowledge)) return 'ledger';
-    if (under(c, r.roomData)) return /^vault-/.test(path.relative(r.roomData, c)) ? 'vault' : 'rooms';
+    if (under(c, r.roomData)) return /^vault-/i.test(relSegs(r.roomData, c)[0]) ? 'vault' : 'rooms';
     if (under(c, r.claudeProject)) return 'transcripts';
-    if (under(c, path.dirname(r.coordination)) && !/\/\.(env|git)/.test(c)) return 'repo';
+    if (under(c, path.dirname(r.coordination)) && !/\/\.(env|git)/i.test(c)) return 'repo';
     return 'outside';
   }
   // Open-then-verify (no TOCTOU): open without following a final symlink, then require that the path still resolves to
@@ -89,7 +91,7 @@ export class Allowlist {
     let fd: number; try { fd = fs.openSync(c, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)); } catch (e: any) { return e?.code === 'ENOENT' ? 'missing' : 'refused'; }
     try {
       const fst = fs.fstatSync(fd); let rp: string, st: fs.Stats;
-      try { rp = fs.realpathSync(c); st = fs.statSync(rp); } catch { fs.closeSync(fd); return 'refused'; }
+      try { rp = fs.realpathSync.native(c); st = fs.statSync(rp); } catch { fs.closeSync(fd); return 'refused'; }
       if (rp !== c || !ok(rp) || st.dev !== fst.dev || st.ino !== fst.ino || !fst.isFile()) { fs.closeSync(fd); return 'refused'; }
       return { fd, size: fst.size };
     } catch { fs.closeSync(fd); return 'refused'; }

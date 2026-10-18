@@ -66,15 +66,19 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
     }
     case 'spool-hook': case 'spool-codex': { // records were filtered + redacted at write; clip() redacts again at read
       const recs = d.lines.map(n => json(lineAt(c, d.file, n))).filter(Boolean);
-      const resec = (x: Section) => x.text != null ? { ...x, ...clip(String(x.text)) } : x;
+      // prose is decided here, on read, from the record (item type, record kind, hook event, section): a stored flag is not trusted
+      const PROSE_ITEMS = /^(agent_message|assistant_message|reasoning|error)$/;
+      const isProse = (r: any, x: Section) => !!x.prose || PROSE_ITEMS.test(r?.item?.type || '') || r?.type === 'error' || r?.type === 'turn.failed' || r?.kind === 'end'
+        || r?.event === 'SubagentStop' || /^(final message|final output|launch result|reasoning|thinking)/.test(x.title);
+      const resec = (x: Section, r?: any) => { const y = x.text != null ? { ...x, ...clip(String(x.text)) } : { ...x }; if (isProse(r, x)) y.prose = true; else delete y.prose; return y; };
       if (d.kind === 'spool-codex' && d.key && (e.verb === 'spawn' || e.verb === 'end')) {
         const all = fileLines(c, d.file).map(json).filter((r: any) => r?.run === d.key).sort((a: any, b: any) => a.seq - b.seq);
         const st = all.find((r: any) => r.kind === 'start'); if (st) out.push({ title: 'run', ...clip(`role: ${st.role || '?'}  label: ${st.label || '?'}\ncwd: ${st.cwd}\nargs: ${(st.args || []).join(' ')}`) });
-        for (const r of all) for (const x of (r.item?.sections || r.sections || []) as Section[]) out.push(resec({ ...x, title: r.kind === 'end' ? 'final message' : x.title }));
+        for (const r of all) for (const x of (r.item?.sections || r.sections || []) as Section[]) out.push(resec({ ...x, title: r.kind === 'end' ? 'final message' : x.title }, r));
         break;
       }
       const last = recs[recs.length - 1];
-      for (const x of ((last?.item?.sections || last?.sections || []) as Section[])) out.push(resec(x));
+      for (const x of ((last?.item?.sections || last?.sections || []) as Section[])) out.push(resec(x, last));
       if (e.verb === 'spawn' && e.target?.id.startsWith('agent:')) out.push(...actorContext(c, e.target.id, false));
       if (!out.length) out.push({ title: 'event', note: 'no content recorded for this event' });
       break;
