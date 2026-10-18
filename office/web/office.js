@@ -1,4 +1,4 @@
-import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary } from './model.mjs';
+import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory } from './model.mjs';
 import { liveClient } from './liveclient.mjs';
 
 const $ = (s) => document.querySelector(s);
@@ -19,6 +19,7 @@ const nameOf = (id) => { const a = S.A.get(id); return a?.name || a?.label || id
 const opTitleOf = (id) => S.opTitle.get(id) || id;
 
 async function init() {
+  S.loadedAt = Date.now();
   S.summary = await get('/api/summary'); fillOps();
   const sel = $('#op'), ops = S.summary.operations;
   const want = decodeURIComponent((location.hash.match(/op=([^&]+)/) || [])[1] || '');
@@ -31,6 +32,7 @@ async function init() {
   $('#focus').onchange = (e) => { S.focus = e.target.checked; };
   $('#raw').onchange = (e) => { S.raw = e.target.checked; $('#logrows').classList.toggle('raw', S.raw); S.lastLog = ''; };
   $('#live').onclick = toggleLive;
+  for (const b of document.querySelectorAll('#views button')) b.onclick = () => showView(b.dataset.v);
   addEventListener('keydown', (e) => { if (e.key === ' ' && e.target === document.body) { e.preventDefault(); togglePlay(); } if (e.key === 'Escape') follow(null); });
   $('#legend').append('read artifact→actor · write actor→artifact · ', h('span', { class: 'lc' }, '— captured '), h('span', { class: 'ld' }, '- - derived '), h('span', { class: 'li' }, '··· inferred '), h('span', { class: 'lr' }, '■ fail/gap'));
   setupCanvas(); setupTimeline();
@@ -47,10 +49,11 @@ async function loadOp(op) {
   if (S.live) { live.stop(); live.start(); } // re-subscribe so the catch-up targets the new operation
   S.op = op; location.hash = 'op=' + encodeURIComponent(op);
   const { events } = await get('/api/events?op=' + encodeURIComponent(op));
-  setEvents(events, true);
+  S.filter = null; $('#filterbar').replaceChildren(); setEvents(events, true); if (S.view && S.view !== 'floor') showView(S.view);
   S.playing = false; $('#play').textContent = '▶'; follow(null); select(null);
 }
 function setEvents(events, reset) {
+  S.base = events; if (S.filter) events = events.filter((e) => S.filter.ids.has(e.id));
   S.events = events; S.byId = new Map(events.map((e) => [e.id, e])); S.titles = new Map(events.filter((e) => e.target?.title).map((e) => [e.target.path, e.target.title]));
   const ids = new Set(events.flatMap((e) => [e.actor.id, e.target?.kind === 'actor' ? e.target.id : null]));
   S.actors = S.summary.actors.filter((a) => a.permanent || ids.has(a.id)); S.A = new Map(S.actors.map((a) => [a.id, a]));
@@ -82,7 +85,7 @@ function toggleLive() {
 export function applyLive(msg) {
   for (const a of msg.actors || []) { const i = S.summary.actors.findIndex((x) => x.id === a.id); if (i >= 0) S.summary.actors[i] = a; else S.summary.actors.push(a); }
   if (msg.operations) { S.summary.operations = msg.operations; fillOps(); }
-  const rm = new Set(msg.removes || []), byId = new Map(S.events.filter((e) => !rm.has(e.id)).map((e) => [e.id, e]));
+  const rm = new Set(msg.removes || []), byId = new Map((S.base || S.events).filter((e) => !rm.has(e.id)).map((e) => [e.id, e]));
   for (const e of msg.upserts || []) if (inOp(e, S.op)) byId.set(e.id, e); else byId.delete(e.id);
   setEvents([...byId.values()].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.seq - b.seq)), false);
 }
@@ -216,7 +219,8 @@ function drawLog(t) {
   const past = []; for (let i = idx; i >= 0 && past.length < 80; i--) if (pick(S.events[i])) past.unshift(i);
   const next = []; for (let i = idx + 1; i < S.events.length && next.length < 3; i++) if (pick(S.events[i])) next.push(i);
   const rows = [...past, ...next].map((i) => row(S.events[i], i === past[past.length - 1], i > idx));
-  const box = h('div', { class: 'rows' }, rows); $('#logrows').replaceChildren(box); const cur = box.querySelector('.now'); if (cur) cur.scrollIntoView({ block: 'end' });
+  const story = S.follow ? agentStory(S.base || S.events, S.follow, nameOf, Date.now()) : '';
+  const box = h('div', { class: 'rows' }, story ? h('div', { class: 'story' }, story) : '', rows); $('#logrows').replaceChildren(box); const cur = box.querySelector('.now'); if (cur) cur.scrollIntoView({ block: 'end' });
 }
 const PROV = { captured: '●', derived: '◐', inferred: '○' };
 function row(e, now, future) {
@@ -256,7 +260,8 @@ function actorCard(id) {
   const a = S.A.get(id) || { id, label: id, kind: '?' }, own = S.events.filter((e) => e.actor.id === id), spawn = S.events.find((e) => e.verb === 'spawn' && e.target?.id === id), end = own.find((e) => e.verb === 'end');
   const verbs = {}; for (const e of own) verbs[e.verb] = (verbs[e.verb] || 0) + 1; const prov = {}; for (const e of own) prov[e.provenance] = (prov[e.provenance] || 0) + 1;
   const fails = own.filter(isFailure).length, cost = end?.cost, kids = descendants(id, S.actors);
-  return h('div', {}, h('h3', {}, nameOf(id), outBadge(end?.outcome)),
+  const story = a.permanent ? '' : agentStory(S.base || S.events, id, nameOf);
+  return h('div', {}, h('h3', {}, nameOf(id), outBadge(end?.outcome)), story ? h('div', { class: 'story' }, story) : '',
     !a.permanent ? h('button', { on: { click: () => follow(S.follow === id ? null : id) } }, S.follow === id ? 'Stop following' : 'Follow this agent') : '',
     kv([['kind', a.kind], ['label', a.label !== a.name ? a.label : ''], ['parent', a.parent ? nameOf(a.parent) + (a.parentInferred ? ' (inferred)' : '') : ''], ['operation', a.operation ? opTitleOf(a.operation) : ''],
     ['children', kids.length || ''], ['spawned', spawn ? `${spawn.ts} ${spawn.provenance}` : a.permanent ? 'permanent' : 'no spawn event (unknown)'], ['ended', end ? `${end.ts} (${end.tsSource})` : a.permanent ? '' : 'no end event'],
@@ -281,6 +286,75 @@ const section = (s) => h('details', { open: s.hidden ? null : '' }, h('summary',
   s.allowed === false ? h('div', { class: 'withheld' }, s.note || 'off-allowlist: path only', s.path ? h('div', { class: 'path mono' }, s.path) : '') : s.note ? h('div', { class: 'note' }, s.note) : '',
   s.text != null ? h('pre', {}, s.text) : s.content != null ? h('pre', {}, s.content) : '');
 
+// ---- O3 views: workflow graph, experiment fans, archive -------------------------------------------------------------------
+function showView(v) {
+  S.view = v; for (const b of document.querySelectorAll('#views button')) b.classList.toggle('on', b.dataset.v === v);
+  const box = $('#view'); if (v === 'floor') { box.hidden = true; return; }
+  box.hidden = false; box.replaceChildren(h('div', { class: 'sub' }, 'loading…'));
+  (v === 'workflow' ? workflowView : v === 'rooms' ? roomsView : archiveView)(box).catch((e) => box.replaceChildren(h('pre', { class: 'fatal' }, e.message)));
+}
+// filter the floor and narration to one step's events (clicking a step)
+function setFilter(ids, label) {
+  S.filter = ids ? { ids: new Set(ids), label } : null;
+  $('#filterbar').replaceChildren(ids ? h('span', {}, `step: ${label} (${ids.length} events) `, h('button', { on: { click: () => setFilter(null) } }, '✕')) : '');
+  setEvents(S.base || S.events, true); showView('floor');
+}
+const SVGNS = 'http://www.w3.org/2000/svg';
+const sv = (tag, attrs = {}, ...kids) => { const n = document.createElementNS(SVGNS, tag); for (const [k, v] of Object.entries(attrs)) if (v != null) k === 'on' ? Object.entries(v).forEach(([e, f]) => n.addEventListener(e, f)) : n.setAttribute(k, v); for (const c of kids.flat()) if (c != null) n.append(c instanceof Node ? c : document.createTextNode(String(c))); return n; };
+const chipOf = (o) => h('span', { class: 'chip ' + (o === 'no-go' ? 'nogo' : /go/.test(o) ? 'go' : 'other') }, o === 'no-go' ? 'NO-GO' : o === 'go' ? 'GO' : o);
+async function workflowView(box) {
+  if (S.op === '*') return box.replaceChildren(h('div', { class: 'sub' }, 'Pick an operation to see its workflow.'));
+  const { workflow: w } = await get('/api/workflow?op=' + encodeURIComponent(S.op));
+  if (!w) return box.replaceChildren(h('div', { class: 'sub' }, 'No workflow template applies to this operation.'));
+  const out = [h('h2', {}, `${w.template.title} — ${opTitleOf(S.op)}`), h('div', { class: 'sub' }, w.template.about || '', ' · outline = template, solid = run, dashed = heuristic match, solid border = direct match. Click a step to filter the floor.')];
+  for (const r of w.rounds) {
+    const W = 128, H = 38, gap = 16, steps = r.steps, width = steps.length * (W + gap) + 20, top = 46;
+    const svg = sv('svg', { width, height: top + H + 30, viewBox: `0 0 ${width} ${top + H + 30}` });
+    steps.forEach((st, i) => { const x = 10 + i * (W + gap);
+      if (i) svg.append(sv('path', { class: 'wf-arrow', d: `M${x - gap} ${top + H / 2} L${x - 3} ${top + H / 2}`, 'marker-end': 'url(#ah)' }));
+      const nogo = st.outcomes.includes('no-go') && !st.outcomes.includes('go'), go = st.outcomes.includes('go'), heur = st.status === 'done' && st.heuristic > 0 && st.direct === 0;
+      const g = sv('g', { class: ['wf-step', st.status, heur ? 'heur' : '', nogo ? 'nogo' : go ? 'go' : '', st.current ? 'current' : ''].join(' '), on: { click: () => st.events.length ? setFilter(st.events, st.title) : null } },
+        sv('title', {}, `${st.title}: ${st.status}${st.status === 'done' ? ` · ${st.direct} direct, ${st.heuristic} heuristic${st.evidence.length ? ' (from ' + st.evidence.map((p) => p.split('/').pop()).join(', ') + ')' : ''}` : ' (nothing yet)'}`),
+        sv('rect', { x, y: top, width: W, height: H, rx: 5 }), sv('text', { x: x + 8, y: top + 16 }, st.title), sv('text', { x: x + 8, y: top + 30, class: 'dim small' }, st.status === 'done' ? `${st.events.length || st.evidence.length} · ${st.direct ? st.direct + ' direct ' : ''}${st.heuristic ? st.heuristic + ' heuristic' : ''}` : 'not yet'));
+      svg.append(g); });
+    for (const l of r.loops) { const def = w.template.loops.find((x) => x.id === l.id) || { steps: [] }, ix = steps.map((s, i) => (def.steps.includes(s.id) ? i : -1)).filter((i) => i >= 0); if (!ix.length || !l.count) continue;
+      const x0 = 10 + ix[0] * (W + gap) + 10, x1 = 10 + ix[ix.length - 1] * (W + gap) + W - 10;
+      svg.append(sv('path', { class: 'wf-loop', d: `M${x1} ${top} C ${x1} ${top - 30}, ${x0} ${top - 30}, ${x0} ${top}`, 'marker-end': 'url(#lh)' }), sv('text', { x: (x0 + x1) / 2 - 60, y: top - 24, class: 'wf-loop-label' }, `${l.title} ×${l.count}: ${l.direct} direct, ${l.heuristic} heuristic`)); }
+    svg.prepend(sv('defs', {}, sv('marker', { id: 'ah', markerWidth: 8, markerHeight: 8, refX: 6, refY: 3, orient: 'auto' }, sv('path', { d: 'M0,0 L6,3 L0,6 Z', fill: '#4a5560' })),
+      sv('marker', { id: 'lh', markerWidth: 8, markerHeight: 8, refX: 6, refY: 3, orient: 'auto' }, sv('path', { d: 'M0,0 L6,3 L0,6 Z', fill: '#f0b429' }))));
+    const verdicts = r.loops.filter((l) => l.count).map((l) => h('div', { class: 'sub' }, `${l.title}: `, l.verdicts.map(chipOf)));
+    out.push(h('h2', {}, `Round ${r.n}${r.plan ? ' — ' + (S.titles?.get(r.plan) || r.plan.split('/').pop()) : ''}`), svg, ...verdicts);
+  }
+  out.push(h('h2', {}, `Unplanned (${w.unplanned.length})`), h('div', { class: 'sub' }, 'Events that fit no step, or more than one (never assigned arbitrarily).'),
+    h('div', { class: 'rows' }, w.unplanned.map((u) => { const e = S.byId.get(u.id) || (S.base || []).find((x) => x.id === u.id);
+      return h('div', { on: { click: () => e && select({ type: 'event', id: u.id }) } }, h('span', { class: 't' }, u.ts.slice(0, 19).replace('T', ' '), ' '), e ? narrate(e, nameOf, opTitleOf) : u.id, h('span', { class: 'note' }, `  [${u.reason}${u.candidates ? ': ' + u.candidates.join(' | ') : ''}]`)); })));
+  box.replaceChildren(...out);
+}
+async function roomsView(box) {
+  const { runs } = await get('/api/rooms?op=' + encodeURIComponent(S.op));
+  if (!runs.length) return box.replaceChildren(h('div', { class: 'sub' }, 'No driver runs in this operation.'));
+  const out = [];
+  for (const run of runs) {
+    out.push(h('h2', {}, run.manifest.replace(/^manifest-|\.jsonl$/g, '') + ' run'), h('div', { class: run.masked ? 'sub masked' : 'sub' }, run.masked ? `Arms masked: ${run.unmask.reason}. Rooms are lettered A/B inside each pair.` : 'Unmasked by a valid restricted/unmask.json.'));
+    for (const p of run.pairs) out.push(h('div', { class: 'pair' }, h('div', { class: 'note' }, `pair ${p.pair}`), p.lanes.map((L) => h('div', { class: 'lane' + (L.stopped ? ' stopped' : '') }, h('span', { class: 'nm' }, L.name + (L.stopped ? ' (stopped)' : '')),
+      L.ticks.map((t) => h('span', { class: 'tick' + (t.fail ? ' fail' : ''), 'data-ts': Date.parse(t.ts), title: `t${t.turn} ${t.speaker} · ${t.ts.slice(11, 19)}`, on: { click: () => t.eventId && select({ type: 'event', id: t.eventId }) } }))))));
+  }
+  box.replaceChildren(...out);
+}
+async function archiveView(box) {
+  const search = h('input', { placeholder: 'search titles…', value: S.archiveQ || '' }), list = h('div', {});
+  const load = async () => { S.archiveQ = search.value; const { items, now } = await get(`/api/archive?op=${encodeURIComponent(S.op)}&q=${encodeURIComponent(search.value)}`), fresh = Date.parse(now) - 15 * 60e3;
+    let op = null; const rows = [];
+    for (const a of items) { if (a.operation !== op) { op = a.operation; rows.push(h('div', { class: 'op' }, op ? opTitleOf(op) : 'no operation')); }
+      rows.push(h('div', { class: 'row' + (Date.parse(a.mtime) > fresh || Date.parse(a.mtime) > S.loadedAt ? ' new' : ''), title: a.path },
+        h('a', { on: { click: () => select({ type: 'file', id: a.path }) } }, a.title), h('span', { class: 'note' }, a.mtime.slice(0, 16).replace('T', ' ')),
+        a.writer ? h('a', { on: { click: () => select({ type: 'event', id: a.writer.id }) } }, `written by ${a.writer.actor}`) : h('span', { class: 'note' }, 'writer not seen'),
+        a.readerCount ? h('a', { on: { click: () => select({ type: 'event', id: a.readers[a.readers.length - 1].id }) } }, `cited by ${a.readerCount}`) : h('span', { class: 'note' }, '—'))); }
+    list.replaceChildren(...rows, items.length ? '' : h('div', { class: 'sub' }, 'nothing matches')); };
+  search.addEventListener('input', () => { clearTimeout(S.archiveT); S.archiveT = setTimeout(load, 200); });
+  box.replaceChildren(h('div', { class: 'arch' }, h('h2', {}, `Archive — ${S.op === '*' ? 'all operations' : opTitleOf(S.op)}`), search, list)); await load();
+}
+
 // ---- loop ----------------------------------------------------------------------------------------------------------------
 let prev = performance.now(), lastCard = '';
 function frame(now) {
@@ -291,6 +365,8 @@ function frame(now) {
     const t = S.live ? Math.max(Date.now(), S.tl.end) : S.tl.toReal(S.c); draw(t); drawTimeline(); drawLog(t);
     // the Inspector tracks a followed agent as its events arrive
     if (S.follow && S.sel?.type === 'actor' && S.sel.id === S.follow && lastCard !== `${S.follow}|${S.changed}`) { lastCard = `${S.follow}|${S.changed}`; select(S.sel); }
+    // rooms view: turns tick in with the replay clock (ticks after the playhead are dimmed)
+    if (S.view === 'rooms' && now - (S.tickAt || 0) > 200) { S.tickAt = now; for (const el of document.querySelectorAll('#view .tick')) el.classList.toggle('future', +el.dataset.ts > t); }
     $('#clock').textContent = S.live ? `${fmtT(t)}  ·  live` : S.tl.duration ? `${fmtT(t)}  ·  ${((S.c / S.tl.duration) * 100).toFixed(0)}%` : 'no events';
   }
   requestAnimationFrame(frame);

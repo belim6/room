@@ -173,3 +173,25 @@ export function bundleSummary(items, nameOf = (x) => x) {
   if (same && verb === 'dispatches') return `dispatches ${items.length} turns`;
   return `${items.length}×, latest: ${latest}`;
 }
+
+// ---- O3: agent-side narrative --------------------------------------------------------------------------------------------
+// A running plain-words summary of what one agent has done, from templates over its events (never from its prose).
+const list = (xs, max = 4) => { const u = [...new Set(xs)]; if (!u.length) return ''; const head = u.slice(0, max), more = u.length - head.length;
+  const body = head.length > 1 ? `${head.slice(0, -1).join(', ')} and ${head[head.length - 1]}` : head[0]; return more > 0 ? `${body} (+${more} more)` : body; };
+const dur = (ms) => (ms < 90e3 ? `${Math.max(0, Math.round(ms / 1000))} s` : ms < 90 * 60e3 ? `${Math.round(ms / 60e3)} min` : `${(ms / 3600e3).toFixed(1)} h`);
+export function agentStory(events, actorId, nameOf = (x) => x, now = Date.now()) {
+  const own = events.filter((e) => e.actor.id === actorId), spawn = events.find((e) => e.verb === 'spawn' && e.target?.id === actorId), end = own.find((e) => e.verb === 'end');
+  if (!own.length && !spawn) return '';
+  const parts = [], reads = own.filter((e) => e.verb === 'read' && e.target?.kind === 'file').map((e) => fileWords(e.target.path, e.target.title).replace(/^the /, 'the '));
+  const writes = own.filter((e) => e.verb === 'write' && e.target?.kind === 'file').map((e) => fileWords(e.target.path, e.target.title));
+  if (reads.length) parts.push(`read ${list(reads)}`);
+  if (writes.length) parts.push(`wrote ${list(writes)}`);
+  const kids = own.filter((e) => e.verb === 'spawn').length; if (kids) parts.push(`started ${kids} agent${kids === 1 ? '' : 's'}`);
+  const cmds = own.filter((e) => e.verb === 'dispatch').length; if (cmds) parts.push(`ran ${cmds} command${cmds === 1 ? '' : 's'}`);
+  const msgs = own.filter((e) => e.verb === 'message').length; if (msgs) parts.push(`sent ${msgs} message${msgs === 1 ? '' : 's'}`);
+  const errs = own.filter((e) => e.verb === 'error' || e.outcome === 'error').length; if (errs) parts.push(`hit ${errs} error${errs === 1 ? '' : 's'}`);
+  const t0 = Date.parse((spawn || own[0]).ts);
+  if (end) { const o = OUTCOME[end.outcome] || 'finished', f = end.findings ? ` (${end.findings} finding${end.findings === 1 ? '' : 's'})` : ''; parts.push(`${o}${f}`); parts.push(`finished in ${dur(Date.parse(end.ts) - t0)}`); }
+  else parts.push(`working for ${dur(now - t0)} so far`);
+  return `${nameOf(actorId)}: ${parts.join('; ')}.`;
+}

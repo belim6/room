@@ -12,7 +12,7 @@ export interface OfficeEvent {
   operation?: string; opInferred?: boolean; cost?: { calls?: number; tokens?: number; ms?: number };
   detailRef: DetailRef; source: string; derived: boolean; provenance: Provenance;
   outcome?: string; tsSource?: 'record' | 'mtime' | 'interpolated' | 'linked'; label?: string;
-  findings?: number;   hints?: string[]; gap?: { direction: 'log-without-action' | 'action-without-log'; ref?: string };
+  findings?: number; step?: string;   hints?: string[]; gap?: { direction: 'log-without-action' | 'action-without-log'; ref?: string };
 }
 export interface SourceStat { kind: string; path: string; records: number; events: number; unparsed: number; note?: string }
 export interface Artifact { path: string; group: string; size: number; mtime: string; operation?: string }

@@ -4,6 +4,9 @@ import { collect, type Collected } from './collect/index';
 import { config, redact, redactDeep, type Config } from './collect/privacy';
 import { expandEvent } from './collect/expand';
 import { hideProse, onlyProse } from './collect/withhold';
+import { matchWorkflow, stepNames } from './collect/workflow';
+import { fans, maskerFor, maskDeep } from './collect/rooms';
+import { fileTitle } from './collect/legible';
 import type { OfficeEvent } from './collect/types';
 import { Live, type LiveOpts } from './live';
 
@@ -25,7 +28,8 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
     if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
     next();
   });
-  const send = (res: any, v: unknown) => res.json(redactDeep(v)); // last line of defence: every API string passes redaction
+  // last line of defence: every API string passes redaction, and trajectory ids of masked operations are masked
+  const send = (res: any, v: unknown) => res.json(redactDeep(maskDeep(data.allow)(v)));
   app.get('/api/summary', (_req, res) => send(res, {
     collectedAt: data.collectedAt, operations: data.operations, actors: [...data.actors.values()],
     sources: data.sources.map(s => ({ ...s })), counts: { events: data.events.length, artifacts: data.artifacts.length },
@@ -36,12 +40,31 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   // Default Expand: agent prose is replaced by a stub. It is served only by the explicit third-click route below.
   app.get('/api/expand/event/:id', (req, res) => { const e = data.byId.get(req.params.id); if (!e) return res.status(404).json({ error: 'No such event' }); const x = expandEvent(data, e); send(res, { event: meta(e), ...x, sections: hideProse(x.sections) }); });
   app.get('/api/expand/event/:id/prose', (req, res) => { const e = data.byId.get(req.params.id); if (!e) return res.status(404).json({ error: 'No such event' }); const x = expandEvent(data, e); send(res, { id: e.id, source: x.source, sections: onlyProse(x.sections) }); });
-  app.get('/api/expand/file', (req, res) => { const p = String(req.query.path || ''); if (!p) return res.status(400).json({ error: 'path required' }); send(res, data.allow.read(p)); });
+  app.get('/api/expand/file', (req, res) => { const p = String(req.query.path || ''); if (!p) return res.status(400).json({ error: 'path required' });
+    // a driver's own records map rooms to arms: path only until the operation has a valid unmask record
+    const c = data.allow.canonical(p), rel = path.relative(data.allow.roots.coordination, c).split(path.sep);
+    if (rel.length === 3 && /^\d{4}-\d\d-\d\d$/.test(rel[0]) && /^(manifest-[\w-]+\.jsonl|driver-state\.json|checkpoints\.json)$/i.test(rel[2])) {
+      const dir = path.dirname(c); if (maskerFor(data.allow, dir, rel.slice(0, 2).join('/')).masked) return send(res, { path: c, allowed: false, note: 'masked until a valid unmask record (it maps rooms to arms)' }); }
+    send(res, data.allow.read(p)); });
+  // ---- O3: workflow graph, experiment fans, archive (metadata tier: ids, names, counts, outcomes; no content) ----------
+  const opDirOf = (op: string) => /^\d{4}-\d\d-\d\d\/[^/]+/.test(op) ? path.join(data.allow.roots.coordination, op.split('/').slice(0, 2).join('/')) : '';
+  app.get('/api/workflow', (req, res) => { const op = String(req.query.op || ''); const w = op && op !== '*' ? matchWorkflow(data, op) : null; send(res, { workflow: w, stepNames: stepNames() }); });
+  app.get('/api/rooms', (req, res) => { const op = String(req.query.op || ''), dir = opDirOf(op); send(res, { op, runs: dir ? fans(data.allow, data.events, dir, op.split('/').slice(0, 2).join('/')) : [] }); });
+  app.get('/api/archive', (req, res) => {
+    const op = String(req.query.op || ''), q = String(req.query.q || '').toLowerCase(), titles = new Map<string, string>(), by = new Map<string, OfficeEvent[]>();
+    for (const e of data.events) if (e.target?.kind === 'file' && e.target.path && (e.verb === 'write' || e.verb === 'read')) (by.get(e.target.path) || by.set(e.target.path, []).get(e.target.path)!).push(e);
+    const ref = (e: OfficeEvent) => ({ id: e.id, ts: e.ts, actor: e.actor.name || e.actor.label, provenance: e.provenance });
+    const items = data.artifacts.filter(a => !op || op === '*' || a.operation === op || a.operation?.startsWith(op + '/')).map(a => {
+      const evs = by.get(a.path) || [], w = evs.find(e => e.verb === 'write'), readers = evs.filter(e => e.verb === 'read' && e !== w);
+      return { path: a.path, title: fileTitle(a.path, data.allow, titles), group: a.group, mtime: a.mtime, operation: a.operation, size: a.size, writer: w ? ref(w) : null, readers: readers.slice(-20).map(ref), readerCount: readers.length };
+    }).filter(a => !q || a.title.toLowerCase().includes(q)).sort((a, b) => (a.operation || '').localeCompare(b.operation || '') || a.mtime.localeCompare(b.mtime));
+    send(res, { op, items: items.slice(0, 3000), now: new Date().toISOString() });
+  });
   app.get('/api/recollect', (_req, res) => { live.full(); send(res, { collectedAt: data.collectedAt, events: data.events.length }); });
   // Server-sent events: upserts/removals as the live tier merges them. Same metadata tier and redaction as /api/events.
   app.get('/api/live', (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    const push = (type: string, v: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(redactDeep(v))}\n\n`);
+    const push = (type: string, v: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(redactDeep(maskDeep(data.allow)(v)))}\n\n`);
     push('hello', { version: live.version, collectedAt: data.collectedAt });
     live.clients.add(push);
     const beat = setInterval(() => res.write(': beat\n\n'), 15000); beat.unref();

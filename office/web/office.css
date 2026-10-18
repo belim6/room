@@ -52,3 +52,24 @@ main { display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
 #logrows.raw .rows div { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .rows .fresh { color: var(--fg); }
 .prose-gate { margin: 4px 0; padding: 4px; border: 1px dashed var(--amber); border-radius: 3px; }
+#views button.on { border-color: var(--cap); color: var(--cap); }
+#filterbar { color: var(--cap); }
+#view { position: absolute; inset: 0; overflow: auto; background: var(--bg); padding: 10px 14px; }
+#view h2 { font-size: 13px; margin: 8px 0 4px; } #view .sub { color: var(--dim); margin-bottom: 8px; }
+#view svg text { font: 11px system-ui, sans-serif; fill: var(--fg); } #view svg .dim { fill: var(--dim); } #view svg .small { font-size: 9px; }
+.wf-step { cursor: pointer; } .wf-step rect { fill: #0f1318; stroke: #3a434d; stroke-dasharray: 4 3; }
+.wf-step.done rect { fill: #17283a; stroke: var(--cap); stroke-dasharray: none; } .wf-step.done.heur rect { stroke-dasharray: 5 3; }
+.wf-step.nogo rect { fill: #3a1717; stroke: var(--red); } .wf-step.go rect { stroke: var(--ok); }
+.wf-step.current rect { animation: pulse 1.4s ease-in-out infinite; } @keyframes pulse { 50% { stroke-width: 3; } }
+.wf-arrow { stroke: #4a5560; fill: none; } .wf-loop { stroke: var(--amber); fill: none; } .wf-loop-label { fill: var(--amber) !important; }
+.chip { display: inline-block; padding: 0 5px; border-radius: 3px; margin: 0 3px 0 0; font-size: 10px; border: 1px solid; }
+.chip.nogo { color: var(--red); } .chip.go { color: var(--ok); } .chip.other { color: var(--dim); }
+.lane { display: flex; align-items: center; gap: 6px; margin: 1px 0; } .lane .nm { width: 210px; color: var(--dim); font-family: ui-monospace, Menlo, monospace; font-size: 10px; flex: none; }
+.lane.stopped .nm { color: var(--red); } .tick { width: 7px; height: 12px; background: #2b4a66; border-radius: 1px; cursor: pointer; flex: none; } .tick.fail { background: var(--red); } .tick:hover { background: var(--cap); }
+.pair { border-left: 2px solid #2b3540; padding: 2px 0 2px 8px; margin: 6px 0; } .masked { color: var(--amber); }
+.arch input { background: #1b2129; color: var(--fg); border: 1px solid var(--line); border-radius: 3px; padding: 3px 6px; width: 320px; }
+.arch .row { display: grid; grid-template-columns: 1fr 130px 230px 110px; gap: 8px; padding: 2px 4px; border-bottom: 1px solid #161b22; }
+.arch .row.new { box-shadow: inset 3px 0 0 var(--cap); background: #13202b; animation: glow 2s ease-in-out 3; } @keyframes glow { 50% { background: #1d3346; } }
+.arch a { color: var(--cap); cursor: pointer; text-decoration: none; } .arch .op { margin-top: 10px; color: var(--amber); }
+.story { color: var(--fg); background: #13202b; padding: 3px 6px; border-left: 2px solid var(--amber); margin: 4px 0; }
+.tick.future { opacity: .15; }

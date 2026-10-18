@@ -65,6 +65,8 @@ export class Allowlist {
     const c = this.canonical(p, cwd), r = this.roots;
     if (/\.log$/i.test(c) || under(c, r.spool) || /^\.env/i.test(path.basename(c))) return false; // .env* anywhere: path only
     if (under(c, r.roomData)) { const rel = relSegs(r.roomData, c); return rel.length === 2 && ROOM_KINDS.test(rel[0]) && rel[1].endsWith('.json'); }
+    // restricted/ (keys, unmask records, read sides) is never served: the Office validates it internally (rooms.ts)
+    if (/(^|\/)restricted(\/|$)/i.test(c)) return false;
     if (under(c, r.coordination) || under(c, r.promptKnowledge)) return true;
     return this.inRepo(c);
   }

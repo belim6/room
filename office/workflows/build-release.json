@@ -1,0 +1,136 @@
+{
+  "id": "build-release",
+  "title": "Build / release",
+  "about": "spec \u2192 critic \u2192 build \u2192 review \u2192 [fix \u2192 re-review]* \u2192 critic release \u2192 deploy",
+  "applies": "^(office-o\\d+|[a-z][\\w-]*)$",
+  "round": "spec",
+  "steps": [
+    {
+      "id": "spec",
+      "title": "spec",
+      "rules": [
+        {
+          "actor": "coordinator",
+          "verb": "write",
+          "file": "/\\d\\d[a-z]?-[^/]*spec[^/]*\\.md$",
+          "newPacket": true
+        },
+        {
+          "actor": "coordinator",
+          "verb": "write",
+          "file": "/\\d\\d[a-z]?-[^/]*spec[^/]*\\.md$",
+          "planPacket": true,
+          "before": "critic"
+        }
+      ]
+    },
+    {
+      "id": "critic",
+      "title": "critic on the spec",
+      "loop": "spec-critic",
+      "rules": [
+        {
+          "actorKind": "critic",
+          "verb": "end",
+          "verdict": true,
+          "before": "build"
+        }
+      ]
+    },
+    {
+      "id": "build",
+      "title": "build",
+      "rules": [
+        {
+          "source": "handoff",
+          "kind": "build"
+        },
+        {
+          "actor": "coordinator",
+          "verb": "spawn",
+          "targetKind": "engineer"
+        }
+      ]
+    },
+    {
+      "id": "review",
+      "title": "review",
+      "loop": "review",
+      "rules": [
+        {
+          "actorKind": "reviewer",
+          "verb": "end"
+        },
+        {
+          "source": "handoff",
+          "kind": "review",
+          "fromNot": "critic"
+        }
+      ]
+    },
+    {
+      "id": "fix",
+      "title": "fix",
+      "loop": "review",
+      "rules": [
+        {
+          "actor": "coordinator",
+          "verb": "message",
+          "targetKind": "engineer",
+          "after": "review"
+        }
+      ]
+    },
+    {
+      "id": "critic-release",
+      "title": "critic release review",
+      "rules": [
+        {
+          "actorKind": "critic",
+          "verb": "end",
+          "verdict": true,
+          "after": "build"
+        }
+      ]
+    },
+    {
+      "id": "deploy",
+      "title": "deploy",
+      "rules": [
+        {
+          "source": "handoff",
+          "kind": "dispatch",
+          "after": "build"
+        },
+        {
+          "actor": "coordinator",
+          "hint": "merge --ff-only|launchctl kickstart",
+          "after": "build"
+        }
+      ]
+    }
+  ],
+  "loops": [
+    {
+      "id": "spec-critic",
+      "steps": [
+        "critic"
+      ],
+      "title": "spec critic loop",
+      "count": [
+        "critic"
+      ]
+    },
+    {
+      "id": "review",
+      "steps": [
+        "review",
+        "fix"
+      ],
+      "title": "review loop",
+      "count": [
+        "review"
+      ]
+    }
+  ]
+}

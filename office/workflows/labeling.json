@@ -1,0 +1,54 @@
+{
+  "id": "labeling",
+  "title": "Labeling",
+  "about": "packet \u2192 labelers fan out \u2192 validate \u2192 lock {phase} in a file rule is the sub-operation's suffix (labeling-compare \u2192 compare).",
+  "applies": "/labeling[\\w-]*$",
+  "round": "packet",
+  "steps": [
+    {
+      "id": "packet",
+      "title": "freeze labeling packet",
+      "rules": [
+        {
+          "verb": "write",
+          "file": "/label-freeze-{phase}\\.json$"
+        },
+        {
+          "source": "handoff",
+          "kind": "dispatch"
+        }
+      ]
+    },
+    {
+      "id": "fan-out",
+      "title": "labelers fan out",
+      "rules": [
+        {
+          "actorKind": "labeler"
+        }
+      ]
+    },
+    {
+      "id": "validate",
+      "title": "validate",
+      "rules": [
+        {
+          "actor": "coordinator",
+          "verb": "read",
+          "file": "/labels/[^/]+/T-[0-9a-f]{8}\\.json$"
+        }
+      ]
+    },
+    {
+      "id": "lock",
+      "title": "labels locked",
+      "rules": [
+        {
+          "verb": "write",
+          "file": "/labels-lock-{phase}\\.json$"
+        }
+      ]
+    }
+  ],
+  "loops": []
+}

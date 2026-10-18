@@ -1,0 +1,189 @@
+{
+  "id": "experiment-cycle",
+  "title": "Experiment cycle",
+  "about": "plan \u2192 critic \u2192 [NO-GO \u2192 fix \u2192 recheck]* \u2192 Deniz go \u2192 freeze \u2192 dispatch \u2192 label \u2192 lock \u2192 unmask \u2192 results \u2192 critic \u2192 Deniz read. A new plan packet starts a new round.",
+  "applies": "^\\d{4}-\\d\\d-\\d\\d/[^/]+$",
+  "round": "plan",
+  "steps": [
+    {
+      "id": "plan",
+      "title": "plan packet",
+      "rules": [
+        {
+          "actor": "coordinator",
+          "verb": "write",
+          "file": "/\\d\\d[a-z]?-[^/]*(plan|proposal|spec)[^/]*\\.md$",
+          "newPacket": true
+        },
+        {
+          "actor": "coordinator",
+          "verb": "write",
+          "file": "/\\d\\d[a-z]?-[^/]*(plan|proposal|spec)[^/]*\\.md$",
+          "planPacket": true,
+          "before": "critic"
+        }
+      ]
+    },
+    {
+      "id": "critic",
+      "title": "critic review",
+      "loop": "critic",
+      "rules": [
+        {
+          "actorKind": "critic",
+          "verb": "end",
+          "verdict": true,
+          "firstInRound": true,
+          "before": "dispatch"
+        }
+      ]
+    },
+    {
+      "id": "fix",
+      "title": "fix / amend",
+      "loop": "critic",
+      "rules": [
+        {
+          "actor": "coordinator",
+          "verb": "write",
+          "file": "/\\d\\d[a-z]?-[^/]*\\.md$",
+          "planPacket": true,
+          "after": "critic",
+          "before": "dispatch"
+        }
+      ]
+    },
+    {
+      "id": "recheck",
+      "title": "recheck",
+      "loop": "critic",
+      "rules": [
+        {
+          "actorKind": "critic",
+          "verb": "end",
+          "verdict": true,
+          "notFirstInRound": true,
+          "before": "dispatch"
+        }
+      ]
+    },
+    {
+      "id": "deniz-go",
+      "title": "Deniz go",
+      "rules": [
+        {
+          "actor": "deniz",
+          "source": "handoff",
+          "kind": "dispatch|packet"
+        }
+      ]
+    },
+    {
+      "id": "freeze",
+      "title": "freeze",
+      "rules": [
+        {
+          "verb": "write",
+          "file": "/(hashes|checkpoints|critic-go)\\.json$"
+        }
+      ]
+    },
+    {
+      "id": "dispatch",
+      "title": "dispatch",
+      "rules": [
+        {
+          "verb": "spawn",
+          "targetKind": "driver"
+        }
+      ]
+    },
+    {
+      "id": "label",
+      "title": "labeling",
+      "rules": [
+        {
+          "actorKind": "labeler",
+          "verb": "end"
+        },
+        {
+          "verb": "write",
+          "file": "/label-freeze-[^/]*\\.json$"
+        },
+        {
+          "source": "handoff",
+          "file": "/label-freeze-[^/]*\\.json$"
+        }
+      ]
+    },
+    {
+      "id": "lock",
+      "title": "labels locked",
+      "rules": [
+        {
+          "verb": "write",
+          "file": "/labels-lock-[^/]*\\.json$"
+        }
+      ]
+    },
+    {
+      "id": "unmask",
+      "title": "unmask",
+      "rules": [
+        {
+          "verb": "write",
+          "file": "/restricted/unmask\\.json$"
+        }
+      ]
+    },
+    {
+      "id": "results",
+      "title": "results packet",
+      "rules": [
+        {
+          "actor": "coordinator",
+          "verb": "write",
+          "file": "/\\d\\d[a-z]?-[^/]*results[^/]*\\.md$"
+        }
+      ]
+    },
+    {
+      "id": "critic-results",
+      "title": "critic on results",
+      "rules": [
+        {
+          "actorKind": "critic",
+          "verb": "end",
+          "verdict": true,
+          "after": "results"
+        }
+      ]
+    },
+    {
+      "id": "deniz-read",
+      "title": "Deniz's read",
+      "rules": [
+        {
+          "actor": "deniz",
+          "source": "handoff",
+          "kind": "result|review"
+        }
+      ]
+    }
+  ],
+  "loops": [
+    {
+      "id": "critic",
+      "steps": [
+        "critic",
+        "fix",
+        "recheck"
+      ],
+      "title": "critic loop",
+      "count": [
+        "critic",
+        "recheck"
+      ]
+    }
+  ]
+}

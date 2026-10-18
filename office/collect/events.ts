@@ -23,7 +23,7 @@ export function parseEvents(file: string, sink: Sink, allow: Allowlist) {
     const verb = HANDOFF_VERB[r.kind] || 'message', ref = r.ref ? path.resolve(allow.cfg.coordination, String(r.ref)) : undefined;
     const outcome = r.kind === 'review' || r.kind === 'result' ? verdictOf(String(r.note || '')) : r.kind === 'blocked' ? 'blocked' : undefined;
     sink.push({ ts: new Date(r.at).toISOString(), actor: sink.ref(who(sink, String(r.from))), verb, target: r.to ? { kind: 'actor', id: who(sink, String(r.to)), ...(ref ? { path: allow.canonical(ref) } : {}) } : undefined,
-      ...(r.operation ? { operation: String(r.operation), opInferred: false } : {}), detailRef: { kind: 'handoff', file, lines: [i], ...(ref ? { extra: { ref: allow.canonical(ref) } } : {}) },
+      ...(r.operation ? { operation: String(r.operation), opInferred: false } : {}), ...(typeof r.step === 'string' && /^[a-z][a-z0-9-]{0,40}$/.test(r.step) ? { step: r.step } : {}), detailRef: { kind: 'handoff', file, lines: [i], ...(ref ? { extra: { ref: allow.canonical(ref) } } : {}) },
       source: file, provenance: 'captured', tsSource: 'record', label: r.kind, ...(outcome ? { outcome } : {}), hints: [ref || '', String(r.ref || '')] });
     stat.events++;
   });

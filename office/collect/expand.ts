@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Collected } from './index';
 import type { OfficeEvent } from './types';
 import { codexSessions, execOf } from './codex';
+import { maskerFor } from './rooms';
 import { clip, toolSections, commandSections, type Section } from './withhold';
 export type { Section };
 
@@ -84,9 +85,12 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       break;
     }
     case 'handoff': { add('events.jsonl line', lineAt(c, d.file, d.lines[0])); const ref = d.extra?.ref as string | undefined; if (ref) { const r = allow.read(ref); r.allowed ? add('ref', r.content, { path: r.path, allowed: true, note: r.missing ? 'missing' : 'current file content' }) : out.push({ title: 'ref', path: r.path, allowed: false, note: 'off-allowlist: path only' }); } break; }
-    case 'manifest': add('manifest line', lineAt(c, d.file, d.lines[0])); break;
-    case 'manifest-turn': {
-      const r = json(lineAt(c, d.file, d.lines[0])); add('manifest line', JSON.stringify(r, null, 1));
+    case 'manifest': case 'manifest-turn': {
+      // before a valid unmask record: only the turn's shape, with the trajectory masked (ids such as speakerId can tell arms apart)
+      const raw = lineAt(c, d.file, d.lines[0]), r = json(raw), dir = path.dirname(d.file), M = maskerFor(allow, dir, path.relative(allow.cfg.coordination, dir));
+      if (!M.masked) add('manifest line', d.kind === 'manifest' ? raw : JSON.stringify(r, null, 1));
+      else add('manifest line (arms masked until a valid unmask record)', JSON.stringify({ at: r?.at, kind: r?.kind, ...(r?.traj ? { room: M.name(r.traj) } : {}), ...(r?.turn != null ? { turn: r.turn } : {}), ...(r?.pick?.label ? { speaker: r.pick.label } : {}), ...(r?.phase ? { phase: r.phase } : {}) }, null, 1));
+      if (d.kind === 'manifest') break;
       if (r?.outputRevision && /^[\w-]+$/.test(r.outputRevision)) {
         const f = path.join(allow.cfg.roomData, 'revisions', r.outputRevision + '.json'), rd = allow.read(f);
         if (!rd.allowed) out.push({ title: 'room message', path: rd.path, allowed: false, note: 'off-allowlist: path only' });
@@ -96,7 +100,8 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       }
       break;
     }
-    case 'driver-state': { const r = allow.read(d.file); add('driver-state.json', r.content); break; }
+    case 'driver-state': { const dir = path.dirname(d.file), M = maskerFor(allow, dir, path.relative(allow.cfg.coordination, dir));
+      if (M.masked) out.push({ title: 'driver-state.json', path: d.file, allowed: false, note: 'masked until a valid unmask record (it maps rooms to arms)' }); else add('driver-state.json', allow.read(d.file).content); break; }
     case 'missing-label': gate('the transcript that has no label', d.file, allow.read(d.file).content); break;
     case 'gap': { const of = c.byId.get(String(d.extra?.of)); out.push({ title: 'gap', note: `${e.label}. Neither side is presumed complete.` }); if (of) out.push(...expandEvent(c, of).sections.map(s => ({ ...s, title: 'unmatched: ' + s.title }))); break; }
     default: add('raw line', d.lines.length ? lineAt(c, d.file, d.lines[0]) : '');

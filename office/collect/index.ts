@@ -87,7 +87,11 @@ export function inferOperations(cfg: Config, sink: Sink, allow: Allowlist) {
   const coord = allow.roots.coordination, subs = new Map<string, string[]>();
   if (fs.existsSync(coord)) for (const d of fs.readdirSync(coord).filter(n => /^20\d\d-\d\d-\d\d$/.test(n))) subs.set(d, fs.readdirSync(path.join(coord, d)).filter(n => fs.lstatSync(path.join(coord, d, n)).isDirectory()));
   const norm = (s: string) => s.split(coord + '/').join('coordination/').split(cfg.coordination + '/').join('coordination/').replace(/~\/dev\/room\/coordination\//g, 'coordination/');
-  const pickSub = (date: string, name: string) => (subs.get(date) || []).filter(s => name.includes(s)).sort((a, b) => b.length - a.length)[0];
+  // a day-level packet belongs to a sub-operation its file name names, or else its first heading names ("# Date room, step 0")
+  const headings = new Map<string, string>();
+  const heading = (date: string, file: string) => { const p = path.join(coord, date, file); if (!headings.has(p)) headings.set(p, /^\d\d[a-z]?-[^/]*\.md$/.test(file) ? (allow.read(p, undefined, 4096).content?.match(/^#\s+(.+)$/m)?.[1] || '').toLowerCase() : ''); return headings.get(p)!; };
+  const pickSub = (date: string, name: string) => (subs.get(date) || []).filter(s => name.includes(s)).sort((a, b) => b.length - a.length)[0]
+    || (subs.get(date) || []).filter(s => new RegExp(`\\b${s.replace(/[^\w]/g, '')}\\b`).test(heading(date, name))).sort((a, b) => b.length - a.length)[0];
   const opsIn = (text: string): string[] => {
     const out: string[] = [], s = norm(text);
     for (const m of s.matchAll(/coordination\/(20\d\d-\d\d-\d\d)(?:\/([^/\s'"`;|&)<>]+))?(\/[^\s'"`;|&)<>]*)?/g)) {

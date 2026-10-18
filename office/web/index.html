@@ -9,6 +9,7 @@
 <body>
 <header id="bar">
   <strong>Office</strong>
+  <span id="views"><button data-v="floor" class="on">Floor</button><button data-v="workflow">Workflow</button><button data-v="rooms">Rooms</button><button data-v="archive">Archive</button></span>
   <select id="op" title="Operation"></select>
   <span id="coverage" class="cov" title="Coverage for this operation: events by provenance, and gaps between events.jsonl and the session transcript"></span>
   <span class="sep"></span>
@@ -19,13 +20,14 @@
   <button id="live" title="Follow new events as they arrive (server-sent events)">● Live</button>
   <label title="Hide actors with no activity in the last 10 minutes of the timeline"><input type="checkbox" id="focus" checked> focus</label>
   <span id="following" class="mono"></span>
+  <span id="filterbar" class="mono"></span>
   <span id="clock" class="mono"></span>
   <span class="grow"></span>
   <span id="legend" class="mono"></span>
 </header>
 <div id="scrub"><canvas id="tl"></canvas></div>
 <main>
-  <section id="floorwrap"><canvas id="floor"></canvas><div id="tip"></div></section>
+  <section id="floorwrap"><canvas id="floor"></canvas><div id="tip"></div><div id="view" hidden></div></section>
   <aside id="inspector"><div class="empty">Click a node, an edge, a chip or an event.</div></aside>
 </main>
 <footer id="log"><div id="logbar"><label><input type="checkbox" id="raw"> raw events</label></div><div id="logrows"></div></footer>
