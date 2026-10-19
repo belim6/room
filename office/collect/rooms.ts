@@ -50,7 +50,13 @@ export function armMasker(allow: Allowlist, opDir: string, opId: string, trajs: 
   for (const t of new Set(trajs)) { const p = parseTraj(t); if (!p) continue; const k = `${p.phase}·${p.pair}`; (byPair.get(k) || byPair.set(k, []).get(k)!).push(t); }
   for (const [k, ts] of byPair) ts.map(t => ({ t, h: sha(salt + '|' + t) })).sort((a, b) => a.h.localeCompare(b.h)).forEach(({ t }, i) => map.set(t, u.valid ? t : `${k}·room ${String.fromCharCode(65 + i)}`));
   const maskText = (s: string) => { if (u.valid || !s) return s; let out = s; for (const [t, m] of map) out = out.split(t).join(m); return out; };
-  return { masked: !u.valid, unmask: u, name: (t: string) => map.get(t) || (u.valid ? t : maskText(t)), maskText };
+  // arms named in restricted/key.json (trajectory values, or arm/condition/variant fields): masked by pattern in maskAll
+  const arms = new Set<string>(); let key: any; try { key = JSON.parse(readWithin(allow, opDir, 'restricted/key.json')?.toString('utf8') || 'null'); } catch {}
+  const visit = (v: any, k = '') => { if (typeof v === 'string') { const p = parseTraj(v); if (p) arms.add(p.arm); else if (/^(arm|condition|variant)$/i.test(k) && v.length <= 40) arms.add(v); } else if (v && typeof v === 'object') for (const [kk, x] of Object.entries(v)) visit(x, kk); };
+  visit(key); for (const t of map.keys()) arms.add(parseTraj(t)!.arm);
+  // a trajectory the masker never learned is masked anyway (fail closed): its arm is never shown
+  const name = (t: string) => map.get(t) || (u.valid ? t : (() => { const p = parseTraj(t); return p ? `${p.phase}·${p.pair}·room ?` : maskText(t); })());
+  return { masked: !u.valid, unmask: u, name, maskText, trajs: [...map.keys()], arms: [...arms] };
 }
 
 // The operation folder a path sits in: coordination/<day>/<sub> or (O4) work/<thing>. Unmask records and masking are per folder.
@@ -62,40 +68,102 @@ export function opFolderOf(allow: Allowlist, p: string): { dir: string; id: stri
   if (rw[0] && rw[0] !== '..' && !path.isAbsolute(rw[0]) && isDir(path.join(allow.roots.work, rw[0]))) return { dir: path.join(allow.roots.work, rw[0]), id: 'work/' + rw[0] };
   return null;
 }
-// Driver manifests of an operation folder: top level for coordination/<day>/<sub>, up to three levels down for work/<thing>.
-export function manifestsIn(opDir: string, opId: string) {
-  const out: string[] = [], walk = (d: string, depth: number) => { let ns: string[] = []; try { ns = fs.readdirSync(d).sort(); } catch { return; }
-    for (const n of ns) { const p = path.join(d, n); let st: fs.Stats; try { st = fs.lstatSync(p); } catch { continue; }
-      if (st.isFile() && /^manifest-[\w-]+\.jsonl$/.test(n)) out.push(p); else if (st.isDirectory() && depth > 0 && !n.startsWith('.') && n !== 'restricted') walk(p, depth - 1); } };
-  walk(opDir, opId.startsWith('work/') ? 3 : 0); return out;
+// The collector's own walk (index.ts): every depth, skipping dot directories and node_modules. The masker sees exactly the
+// manifests the collector parses, so no trajectory it shows can be one the masker never learned (review P1-b).
+export function walkFiles(root: string, pick: (p: string) => boolean, out: string[] = []) {
+  let ns: string[] = []; try { ns = fs.readdirSync(root).sort(); } catch { return out; }
+  for (const n of ns) { const p = path.join(root, n); let st: fs.Stats; try { st = fs.lstatSync(p); } catch { continue; }
+    if (st.isDirectory() && n !== 'node_modules' && !n.startsWith('.')) walkFiles(p, pick, out); else if (st.isFile() && pick(p)) out.push(p); }
+  return out;
+}
+export const isManifest = (p: string) => /\/manifest-[^/]+\.jsonl$/.test(p);
+export function manifestsIn(opDir: string, _opId?: string) { return walkFiles(opDir, isManifest); }
+// Every operation folder that needs a masker: any folder holding a manifest the collector parses (at any depth), and any
+// coordination/<day>/<sub> or work/<thing> with a restricted/ directory.
+let foldersMemo: { key: string; at: number; v: { dir: string; id: string }[] } | null = null;
+export function opFolders(allow: Allowlist) {
+  const key = allow.roots.coordination + '|' + allow.roots.work; if (foldersMemo && foldersMemo.key === key && Date.now() - foldersMemo.at < 2000) return foldersMemo.v;
+  const v = opFoldersNow(allow); foldersMemo = { key, at: Date.now(), v }; return v;
+}
+function opFoldersNow(allow: Allowlist) {
+  const out = new Map<string, { dir: string; id: string }>(), coord = allow.roots.coordination;
+  for (const f of [...walkFiles(coord, isManifest), ...walkFiles(allow.roots.work, isManifest)]) {
+    const o = opFolderOf(allow, f) || { dir: path.dirname(f), id: path.relative(coord, path.dirname(f)) }; out.set(o.dir, o); }
+  const ls = (d: string) => { try { return fs.readdirSync(d); } catch { return []; } }, has = (d: string) => { try { return fs.statSync(path.join(d, 'restricted')).isDirectory(); } catch { return false; } };
+  for (const d of ls(coord).filter(n => /^\d{4}-\d\d-\d\d$/.test(n))) for (const s of ls(path.join(coord, d))) { const dir = path.join(coord, d, s); if (has(dir)) out.set(dir, { dir, id: `${d}/${s}` }); }
+  for (const t of ls(allow.roots.work)) { const dir = path.join(allow.roots.work, t); if (has(dir)) out.set(dir, { dir, id: 'work/' + t }); }
+  return [...out.values()];
 }
 // One masker per operation folder, over every trajectory in its manifests (so letters agree across the floor, Expand
-// and the fans); cached on the manifests' sizes and the restricted files' mtimes.
+// and the fans); cached on the manifests' sizes, the restricted files and the current hashes of the locks it names.
 const cache = new Map<string, { sig: string; m: ReturnType<typeof armMasker> }>();
 export function maskerFor(allow: Allowlist, opDir: string, opId: string) {
   const names = manifestsIn(opDir, opId);
   const st = (p: string) => { try { const s = fs.statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; } };
-  const sig = [...names.map(n => n + ':' + st(n)), st(path.join(opDir, 'restricted/unmask.json')), st(path.join(opDir, 'restricted/key.json'))].join('|') + '|' + opId;
+  let locks = ''; try { const u = JSON.parse(fs.readFileSync(path.join(opDir, 'restricted/unmask.json'), 'utf8'));
+    locks = [u?.labelsLock?.file, u?.responseLock?.file].map(f => { try { return typeof f === 'string' ? sha(fs.readFileSync(path.join(opDir, f))) : '-'; } catch { return '-'; } }).join(','); } catch {}
+  const sig = [...names.map(n => n + ':' + st(n)), st(path.join(opDir, 'restricted/unmask.json')), st(path.join(opDir, 'restricted/key.json')), locks].join('|') + '|' + opId;
   const hit = cache.get(opDir); if (hit && hit.sig === sig) return hit.m;
   const trajs: string[] = []; for (const n of names) for (const m of fs.readFileSync(n, 'utf8').matchAll(/"traj":"([^"]+)"/g)) trajs.push(m[1]);
   const m = armMasker(allow, opDir, opId, trajs); cache.set(opDir, { sig, m }); return m;
 }
 
 // Every masked operation folder's masker: content anywhere (a Read of a manifest, a command's output, a packet quoting a
-// trajectory) passes through all of them before it leaves the server.
+// trajectory) passes through all of them before it leaves the server. Defence in depth (review P1-a): while any operation is
+// masked, any `x·vN·y` token, or one carrying an arm named in a masked folder's restricted/key.json, is masked by pattern,
+// unless it is a trajectory id of an operation that has a valid unmask record.
 export function maskAll(allow: Allowlist) {
-  const ms: ReturnType<typeof armMasker>[] = [], root = allow.roots.coordination;
-  let days: string[] = []; try { days = fs.readdirSync(root).filter(n => /^\d{4}-\d\d-\d\d$/.test(n)); } catch {}
-  for (const d of days) { let subs: string[] = []; try { subs = fs.readdirSync(path.join(root, d)); } catch {}
-    for (const s of subs) { const dir = path.join(root, d, s); try { if (!fs.statSync(dir).isDirectory() || !fs.readdirSync(dir).some(n => /^manifest-[\w-]+\.jsonl$/.test(n))) continue; } catch { continue; }
-      const m = maskerFor(allow, dir, `${d}/${s}`); if (m.masked) ms.push(m); } }
-  let things: string[] = []; try { things = fs.readdirSync(allow.roots.work); } catch {}
-  for (const t of things) { const dir = path.join(allow.roots.work, t); try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
-    if (!manifestsIn(dir, 'work/' + t).length) continue; const m = maskerFor(allow, dir, 'work/' + t); if (m.masked) ms.push(m); }
-  return (text: string) => { let t = text; for (const m of ms) t = m.maskText(t); return t; };
+  const all = opFolders(allow).map(o => maskerFor(allow, o.dir, o.id)), ms = all.filter(m => m.masked);
+  if (!ms.length) return (text: string) => text;
+  const keep = new Set(all.filter(m => !m.masked).flatMap(m => m.trajs)), arms = [...new Set(ms.flatMap(m => m.arms))].filter(a => a.length >= 2 && !/^v\d+$/.test(a)).map(a => a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const re = new RegExp(`([\\w-]*)·(v\\d+${arms.length ? '|' + arms.join('|') : ''})(?![\\w-])((?:·[\\w-]*)?)`, 'g');
+  return (text: string) => { let t = text; for (const m of ms) t = m.maskText(t); return t.replace(re, (full, a, _arm, c) => keep.has(full) ? full : `${a}·arm-masked${c}`); };
 }
 const maskDeepWith = (f: (s: string) => string) => { const go = (v: any, k = ''): any => typeof v === 'string' ? (k === 'path' || k === 'source' || k === 'file' ? v : f(v)) : Array.isArray(v) ? v.map(x => go(x, k)) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([kk, x]) => [kk, go(x, kk)])) : v; return go; };
 export const maskDeep = (allow: Allowlist) => maskDeepWith(maskAll(allow));
+
+// ---- Blinding of room records (review High + P1-a) -------------------------------------------------------------------------
+// While an operation is masked, nothing may let a room be traced to its arm: its .room-data records (turns, attempts, outcomes,
+// revisions, branches), the branch → parent → checkpoint chain and its revisions (whose state.system is the arm template), and
+// the operation's driver, checkpoint and template files are path-only everywhere (Expand, file route, shell output, Read
+// results). The id set: every record id named in a masked folder's driver/checkpoint/template files and restricted/key.json,
+// closed over the branch, revision and turn records those ids reach. A record that names any id in the set is masked too.
+const ROOM_RECORD = /^(turns|attempts|outcomes|revisions|branches)$/i, UUIDS = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+export const isDriverFile = (p: string) => /^(manifest-.+\.jsonl|driver-state\.json|checkpoints?\.json)$|template|checkpoint/i.test(path.basename(p)) && !/\/restricted\//i.test(p);
+let blindCache: { at: number; sig: string; root: string; files: Set<string>; ids: Set<string> } | null = null;
+export function blindIndex(allow: Allowlist, now = Date.now()) {
+  if (blindCache && now - blindCache.at < 1000 && blindCache.root === allow.roots.roomData + allow.roots.coordination) return blindCache; // checked at most once a second
+  // recomputed when the masked set, a masked folder's driver files, or a room-record directory changes (new records)
+  const mt = (p: string) => { try { const x = fs.statSync(p); return `${x.size}:${x.mtimeMs}`; } catch { return '-'; } };
+  const masked = opFolders(allow).filter(o => maskerFor(allow, o.dir, o.id).masked);
+  const sig = [...masked.map(o => o.dir + ':' + walkFiles(o.dir, isDriverFile).map(mt).join(',') + mt(path.join(o.dir, 'restricted/key.json'))).sort(), ...['branches', 'revisions', 'turns', 'attempts'].map(k => mt(path.join(allow.roots.roomData, k)))].join('|');
+  if (blindCache && blindCache.sig === sig) { blindCache.at = now; return blindCache; }
+  const files = new Set<string>(), ids = new Set<string>(), read = (p: string) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
+  const addIds = (text: string) => { const got: string[] = []; for (const m of text.matchAll(UUIDS)) { const x = m[0].toLowerCase(); if (!ids.has(x)) { ids.add(x); got.push(x); } } return got; };
+  const queue: string[] = [];
+  for (const o of masked) {
+    for (const f of walkFiles(o.dir, isDriverFile)) { files.add(f); queue.push(...addIds(read(f))); }
+    queue.push(...addIds(read(path.join(o.dir, 'restricted/key.json'))));
+  }
+  for (let n = 0; n < queue.length && n < 200_000; n++) { const id = queue[n]; for (const k of ['branches', 'revisions', 'turns', 'attempts']) { const t = read(path.join(allow.roots.roomData, k, id + '.json')); if (t) queue.push(...addIds(t)); } }
+  blindCache = { at: now, sig, root: allow.roots.roomData + allow.roots.coordination, files, ids }; return blindCache;
+}
+// The Allowlist hook (set by collect): true = path-only because it would reveal a masked operation's arms.
+export function blindChecker(allow: Allowlist) {
+  const seen = new Map<string, { m: number; b: boolean }>(), rd = () => allow.roots.roomData.toLowerCase() + path.sep;
+  return (c: string) => {
+    const ix = blindIndex(allow); if (!ix.files.size && !ix.ids.size) return false;
+    if (ix.files.has(c)) return true;
+    if (!c.toLowerCase().startsWith(rd())) return false;
+    const rel = c.slice(rd().length).split(path.sep); if (rel.length !== 2 || !ROOM_RECORD.test(rel[0])) return false;
+    if (ix.ids.has(rel[1].replace(/\.json$/i, '').toLowerCase())) return true;
+    let m = 0; try { m = fs.statSync(c).mtimeMs; } catch { return false; }
+    const hit = seen.get(c); if (hit && hit.m === m) return hit.b;
+    let b = false; try { for (const x of fs.readFileSync(c, 'utf8').matchAll(UUIDS)) if (ix.ids.has(x[0].toLowerCase())) { b = true; break; } } catch {}
+    seen.set(c, { m, b }); return b;
+  };
+}
+
 
 // Experiment fans: one lane per room of a driver run, matched pairs side by side, a tick per turn with the speaker's name.
 export function fans(allow: Allowlist, events: OfficeEvent[], opDir: string, opId: string) {

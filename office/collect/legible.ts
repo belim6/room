@@ -40,7 +40,7 @@ const VERB = /^(label|review|build|write|draft|fix|run|check|verify|research|imp
 export function displayName(a: Actor, ev: OfficeEvent[]) {
   if (a.permanent) return a.label;
   if (a.id.startsWith('session:')) return `session ‹${a.id.slice(8)}› (unregistered)`;
-  if (a.id.startsWith('peer:')) return a.label;
+  if (a.id.startsWith('peer:') || a.id.startsWith('actor:')) return a.label;
   const fam = a.id.startsWith('agent:') ? 'Claude' : /^(codex|codexrun|critic):/.test(a.id) ? 'Codex' : a.id.startsWith('driver:') ? '' : a.id.startsWith('session:') ? 'Claude session' : '';
   const kind = a.kind === 'unknown' ? 'agent' : a.kind;
   let subject = a.label || '';

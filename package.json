@@ -13,7 +13,7 @@
     "backup:verify-restore": "node --import tsx scripts/backup.ts verify-restore",
     "discord": "node --import tsx src/discord.ts",
     "office": "node --import tsx office/server.ts",
-    "test:office": "node --import tsx --test office/test/office.test.ts office/test/office-o2.test.ts office/test/office-o3.test.ts office/test/office-o4.test.ts"
+    "test:office": "node --import tsx --test office/test/office.test.ts office/test/office-o2.test.ts office/test/office-o3.test.ts office/test/office-o4.test.ts office/test/office-o4-review.test.ts"
   },
   "keywords": [],
   "author": "",

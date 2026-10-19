@@ -50,6 +50,8 @@ export class Allowlist {
   cfg: Config;
   // Test seam: runs between the allowlist check and the open, so a symlink swap there can be simulated.
   beforeOpen?: (canonicalPath: string) => void;
+  // Blinding (set by the collector, rooms.ts blindChecker): a masked operation's room records and driver/template files are path-only.
+  blind?: (canonicalPath: string) => boolean;
   constructor(cfg: Config) {
     this.cfg = cfg;
     this.roots = { coordination: real(cfg.coordination), promptKnowledge: real(cfg.promptKnowledge), roomData: real(cfg.roomData), claudeProject: real(cfg.claudeProject), spool: real(cfg.spool || path.join(cfg.home, 'dev/room/office-spool')), repos: (cfg.repos || []).map(real),
@@ -66,17 +68,20 @@ export class Allowlist {
   isRawLog(p: string, cwd?: string) { const c = this.canonical(p, cwd); return under(c, this.roots.coordination) && /\.log$/i.test(c); }
   // The Office's own spool: already filtered at write, read only per event (path-only on the file route).
   isSpool(p: string, cwd?: string) { const c = this.canonical(p, cwd); return under(c, this.roots.spool) && /\.jsonl$/i.test(c); }
-  allowsSource(p: string, cwd?: string) { return this.isTranscript(p, cwd) || this.allows(p, cwd) || this.isRawLog(p, cwd) || this.isSpool(p, cwd); }
+  // driver manifests stay readable as a *source* for per-event Expand, which shows them masked; never as content
+  allowsSource(p: string, cwd?: string) { return this.isTranscript(p, cwd) || this.allows(p, cwd) || this.isRawLog(p, cwd) || this.isSpool(p, cwd) || this.isDriverSource(p, cwd); }
+  isDriverSource(p: string, cwd?: string) { const c = this.canonical(p, cwd); return (under(c, this.roots.coordination) || under(c, this.roots.work)) && /\/(manifest-[^/]+\.jsonl|driver-state\.json)$/i.test(c) && !/\/restricted\//i.test(c); }
   // Content tier: may this path's own content be shown? Transcripts and raw logs: no (path only).
   allows(p: string, cwd?: string) {
     if (!p || p.includes('\0')) return false;
     const c = this.canonical(p, cwd), r = this.roots;
     if (/\.log$/i.test(c) || under(c, r.spool) || /^\.env/i.test(path.basename(c))) return false; // .env* anywhere: path only
+    if (this.blind?.(c)) return false;
     if (under(c, r.roomData)) { const rel = relSegs(r.roomData, c); return rel.length === 2 && ROOM_KINDS.test(rel[0]) && rel[1].endsWith('.json'); }
     // restricted/ (keys, unmask records, read sides) is never served: the Office validates it internally (rooms.ts)
     if (/(^|\/)restricted(\/|$)/i.test(c)) return false;
     if (under(c, r.coordination) || under(c, r.promptKnowledge)) return true;
-    for (const root of [r.work, r.research]) if (under(c, root)) return !relSegs(root, c).some(seg => EXCLUDED_SEGMENT.test(seg) || /^\.env/i.test(seg));
+    if (under(c, r.work) || under(c, r.research)) return this.inWorkRoot(c);
     return this.inRepo(c);
   }
   private inRepo(c: string) {
@@ -84,7 +89,8 @@ export class Allowlist {
     return false;
   }
   // A directory a shell command may run in (or list) without escaping the content tier.
-  allowsDir(p: string, cwd?: string) { const c = this.canonical(p, cwd), r = this.roots; return !under(c, r.roomData) && !under(c, r.spool) && (under(c, r.coordination) || under(c, r.promptKnowledge) || under(c, r.work) || under(c, r.research) || this.inRepo(c)); }
+  allowsDir(p: string, cwd?: string) { const c = this.canonical(p, cwd), r = this.roots; return !under(c, r.roomData) && !under(c, r.spool) && (under(c, r.coordination) || under(c, r.promptKnowledge) || this.inWorkRoot(c) || this.inRepo(c)); }
+  private inWorkRoot(c: string) { for (const root of [this.roots.work, this.roots.research]) if (under(c, root)) return !relSegs(root, c).some(seg => EXCLUDED_SEGMENT.test(seg) || /^\.env/i.test(seg)); return false; }
   // Which permanent artifact node a path belongs to (metadata only; works for off-allowlist paths too).
   group(p: string, cwd?: string) {
     const c = this.canonical(p, cwd), r = this.roots;

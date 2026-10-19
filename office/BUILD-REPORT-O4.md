@@ -173,3 +173,54 @@ Peer deliveries were being read as **Deniz writing** to the receiver. Fixed.
 - **Research matching is by file name.** Commission and synthesis are told apart by file name, and the folder ties a synthesis to its commission. That convention needs confirming once A5 lands.
 - **Loops are the greedy chain rule above.** Interleaved hand-offs of two separate threads between the same roles may pair differently than a human would; the split and the click-through to the events show what was counted.
 - **Old `events.jsonl` names** (`claude-engineer`, `labelers`, …) remain `role:<name>` nodes from O1. They are not roles in the O4 sense.
+
+## Review fixes (after the NO-GO on d3663e1 from the Claude reviewer and the Codex privacy reviewer)
+These supersede the sections above where they differ. Tests: `office/test/office-o4-review.test.ts`, plus an updated edge-label test in `office-o4.test.ts`.
+
+**Blinding.** While an operation has no valid unmask record, nothing may reveal which arm a room belongs to, or let it be inferred.
+1. **Room records are path-only while masked** (Codex High, reviewer P1-a). This is `blindIndex` and `blindChecker` in `rooms.ts`, installed as `Allowlist.blind` by `collect()`.
+   - **Which records:** the id set has three sources:
+     - every record id named in a masked folder's driver, checkpoint and template files (`manifest-*`, `driver-state.json`, `checkpoint(s).json`, `*template*`, `*checkpoint*`);
+     - every id in its `restricted/key.json`;
+     - the closure of those ids over the `branches`, `revisions`, `turns` and `attempts` records they reach.
+   - **Covered:** the branch → parent → checkpoint → template chain, and the checkpoint revisions whose `state.system` is the arm template.
+   - **Content rule:** any `turns`, `attempts`, `outcomes`, `revisions` or `branches` record whose id is in the set, or whose content names an id in the set, is **path-only**. That includes records written later.
+   - **Where it applies:**
+     - `/api/expand/file`;
+     - the room-feed Expand;
+     - Read results of `.room-data` files;
+     - shell outputs, because `verifyCommand` uses `allows()`;
+     - hook and Codex spool sections that touch those paths, withheld on read because the hook has no index;
+     - the manifest-turn Expand, which now shows the turn's shape and the room-message path only.
+   - The driver, checkpoint and template files themselves are path-only too. Manifests stay readable as an internal source for the masked per-event Expand only.
+   - Real data: 6 masked operations, 20 driver files and 7,579 record ids. The index takes about 1.5 s to build the first time, then it is cached on the driver files and the record directories, and rechecked at most once a second.
+2. **Pattern masking as defence in depth.** While any operation is masked, `maskAll` also rewrites these tokens in every response to `x·arm-masked·y`:
+   - any `x·vN·y` / `x·vN` token;
+   - any token carrying an arm named in a masked folder's key (trajectory values, or `arm`/`condition`/`variant` fields).
+
+   The one exception is an exact trajectory id of an operation that has a valid unmask record.
+3. **The masker sees the collector's file set and fails closed** (P1-b).
+   - `manifestsIn` and `opFolders` use the collector's own walk: any depth, skipping dot directories and `node_modules`.
+   - The masked folders are every folder holding a manifest, plus every `coordination/<day>/<sub>` or `work/<thing>` that has a `restricted/` directory.
+   - A trajectory the masker never learned is shown as `phase·pair·room ?`, and pattern masking catches it in text.
+   - Tests cover `coordination/<day>/x/run/manifest-*.jsonl` and `work/thing/a/b/c/d/manifest-*.jsonl`.
+4. **Order leak** (P3).
+   - The driver creates rooms in arm order. While masked, their branch events therefore share one coarse time (the run's first branch), carry no manifest line numbers, and are emitted in an order seeded by the key's hash.
+   - Lanes inside a pair are ordered by their seeded room letter. Fans carry no trajectory and no creation time.
+   - Turn-completion order was checked on the real compare run and does not follow the arm: v0 finished first 94 times, v1 86.
+
+**Labels and honesty**
+5. **Unknown `events.jsonl` names** are now `actor:<hash8>`, labelled "unknown actor <hash8>". Only `WHO` names, the role list and `psri` are mapped; free text never becomes a label or a role node. Old names such as `claude-engineer` now show as unknown actors.
+6. **Inter-session edges** show a topic only when the operation is explicit. An inferred operation is dropped, so the edge reads "asks Operator".
+
+**Minor**
+7. The unmask cache key now includes the current SHA-256 of the lock files that `unmask.json` names.
+8. A critic request or ruling whose caller was linked by launch time is marked `callerLinked` and counts as a **heuristic** hand-off.
+9. `allowsDir` applies the repo's excluded segments (`node_modules`, `.git`, `saves`, …, and `.env*`) under `work/` and `research/`, through the same check as `allows`.
+10. Message bodies between sessions (`SendMessage` message and result, delivered bodies, and hook-spooled peer sends) are now prose: they show only on the third click.
+
+**Known residue**
+- The blind index and the operation-folder list are rechecked at most every 1–2 s. A brand-new masked folder could therefore be unprotected for up to about 2 s.
+- Records that name a known masked id are always checked on read.
+
+**Results:** `npm run test:office` passes 56 of 56 (5 new tests). `npx tsc -p office` and `npx tsc --noEmit` are clean, and `npm run test:workbench` passes 150 of 150.

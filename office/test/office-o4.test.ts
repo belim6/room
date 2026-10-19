@@ -149,8 +149,9 @@ test('messages between sessions: send ↔ delivery by msg_id (captured), by sock
     ['role:housekeeper', 'session:cccccccc', 'peer', 'derived', 'delivered']]);
   assert.equal(peer[0].operation, 'work/file-reorganisation', 'operation from the paths the message names');
   const M: any = await import(path.join(OFFICE, 'web/model.mjs')), nameOf = (id: string) => (c.actors.get(id) as any)?.name || c.actors.get(id)?.label || id, opT = (id: string) => c.operations.find(o => o.id === id)?.title || id;
-  assert.equal(M.edgeSummary(peer[0], nameOf, opT), "asks Operator: File reorganisation: from the old layout to ROOM.md's hierarchy");
-  assert.equal(M.edgeSummary(peer[1], nameOf, opT), "replies to Partner: File reorganisation: from the old layout to ROOM.md's hierarchy");
+  assert.equal(peer[0].opInferred, true); assert.equal(M.edgeSummary(peer[0], nameOf, opT), 'asks Operator', 'an inferred topic is dropped (review P2)');
+  assert.equal(M.edgeSummary(peer[1], nameOf, opT), 'replies to Partner');
+  assert.equal(M.edgeSummary({ ...peer[0], opInferred: false }, nameOf, opT), "asks Operator: File reorganisation: from the old layout to ROOM.md's hierarchy", 'an explicit operation keeps its topic');
   assert.equal(M.narrate(peer[0], nameOf, opT), 'Partner asked Operator.'); assert.equal(M.narrate(peer[2], nameOf, opT), 'Housekeeper asked session ‹cccccccc› (unregistered) (derived).');
   const loops = roleLoops(c, '*').loops.map(l => [l.title, l.count, l.direct, l.heuristic]);
   assert.deepEqual(loops.find(l => l[0] === 'Partner → Operator → Partner'), ['Partner → Operator → Partner', 1, 0, 1], 'one loop; heuristic because the reply was resolved by socket');

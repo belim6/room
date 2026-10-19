@@ -162,7 +162,8 @@ export function edgeSummary(e, nameOf = (x) => x, opTitle = (x) => x) {
     case 'end': { const f = e.findings ? ` (${e.findings} finding${e.findings === 1 ? '' : 's'})` : '';
       return e.outcome === 'no-go' ? `rules NO-GO${f}` : e.outcome === 'go' ? `rules GO${f}` : e.outcome === 'conditional-go' ? `rules conditional GO${f}` : e.outcome === 'verdict' ? 'returns its verdict'
         : /error|fail|no-output/.test(e.outcome || '') ? `ends: ${e.outcome}` : 'reports back'; }
-    case 'message': if (e.label === 'peer' || e.label === 'peer-reply') { const op = e.operation ? opTitle(e.operation) : '';
+    // the topic only when the operation is explicit: an inferred one (from paths a message names) is often wrong (review P2)
+    case 'message': if (e.label === 'peer' || e.label === 'peer-reply') { const op = e.operation && e.opInferred === false ? opTitle(e.operation) : '';
         return `${e.label === 'peer' ? 'asks' : 'replies to'} ${lastPart(them) || 'a session'}${op ? ': ' + op : ''}${e.outcome === 'error' ? ' (not delivered)' : ''}`; }
       if (e.label === 'commission') return `commissions research on ${t?.title || 'a brief'}`;
       if (e.label === 'delivery') return `delivers research: ${t?.title || 'a synthesis'}`;

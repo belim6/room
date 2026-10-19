@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { Sink, type Verb } from './types';
+import { Sink, hid, type Verb } from './types';
 import { readLines } from './claude';
 import { verdictOf } from './codex';
 import type { Allowlist } from './privacy';
@@ -11,10 +11,11 @@ export const HANDOFF_VERB: Record<string, Verb> = { packet: 'message', build: 'd
   unblock: 'unblock', unblocked: 'unblock', wait: 'wait', waiting: 'wait', start: 'spawn', end: 'end', spawn: 'spawn', rule: 'rule', ruling: 'rule', error: 'error', deviation: 'deviation', read: 'read', write: 'write', message: 'message' };
 export const WHO: Record<string, string> = { claude: 'coordinator', coordinator: 'coordinator', deniz: 'deniz', critic: 'critic', stable: 'server', server: 'server' };
 export function who(sink: Sink, name: string) {
-  const id = WHO[name]; if (id) return id;
+  const k = name.trim().toLowerCase(), id = WHO[k]; if (id) return id; name = k;
   if (isRole(name)) return ensureRole(sink, name); // O4: the role nodes (partner, operator, …); kinds and labels come from roles.ts
   if (name === 'psri') return 'psri';
-  const a = 'role:' + name; sink.actor({ id: a, kind: /review/.test(name) ? 'reviewer' : /engineer/.test(name) ? 'engineer' : /label/.test(name) ? 'labeler' : /writer/.test(name) ? 'writer' : 'unknown', label: name, parent: 'coordinator', parentInferred: true });
+  // anything else is free text written by an agent: never a label or a role (review item 5). One opaque node per distinct value.
+  const h = hid('events-actor', name).slice(0, 8), a = 'actor:' + h; sink.actor({ id: a, kind: 'unknown', label: 'unknown actor ' + h, parent: 'coordinator', parentInferred: true });
   return a;
 }
 export function parseEvents(file: string, sink: Sink, allow: Allowlist) {

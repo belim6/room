@@ -8,6 +8,7 @@ import { parseEvents } from './events';
 import { parseManifest, parseDriverState } from './manifests';
 import { parseSpool, spoolFiles, dedupeKey } from './spool';
 import { opTitle, displayName, fileTitle } from './legible';
+import { blindChecker } from './rooms';
 import { Identity, readRegistry, roleFromTitle, ensureRole, sessionActorId, UUID } from './roles';
 
 export interface Coverage { captured: number; derived: number; inferred: number; gaps: number; events: number }
@@ -25,7 +26,7 @@ const walk = (root: string, pick: (p: string) => boolean, out: string[] = []) =>
 export const TEMPLATE = ['plan', 'critic', 'dispatch', 'label', 'lock', 'unmask', 'critic', 'deniz'];
 
 export function collect(cfg: Config = config()): Collected {
-  const sink = new Sink(), allow = new Allowlist(cfg);
+  const sink = new Sink(), allow = new Allowlist(cfg); allow.blind = blindChecker(allow);
   // 0. Who is who: the role registry (roles/sessions.json, written only by office/bin/register-session).
   const reg = readRegistry(cfg.sessions);
   if (cfg.sessions) sink.sources.push({ kind: 'role-registry', path: cfg.sessions, records: reg.entries.length, events: 0, unparsed: reg.skipped, ...(reg.error ? { note: reg.error } : {}) });
@@ -97,8 +98,9 @@ export function linkCriticCallers(sink: Sink) {
   const launches = sink.events.filter(e => /^(coordinator|role:[a-z]+|session:[0-9a-f]+)$/.test(e.actor.id) && (e.verb === 'dispatch' || e.verb === 'read' || e.verb === 'write') && (e.hints || []).some(h => /office-codex|ask-critic|\bcodex\s+exec\b/.test(h)));
   for (const m of sink.events.filter(e => e.detailRef.kind === 'spool-codex' && e.verb === 'message' && e.target?.id === 'critic' && e.provenance === 'inferred')) {
     const t = Date.parse(m.ts), l = launches.filter(e => Date.parse(e.ts) <= t + 5e3 && t - Date.parse(e.ts) <= 180e3).sort((a, b) => b.ts.localeCompare(a.ts))[0]; if (!l) continue;
-    m.actor = l.actor; m.provenance = 'derived'; m.derived = true;
-    for (const e of sink.events) if (e.detailRef.kind === 'spool-codex' && e.detailRef.key === m.detailRef.key && e.verb === 'end' && e.actor.id === 'critic') e.target = { kind: 'actor', id: l.actor.id };
+    m.actor = l.actor; m.provenance = 'derived'; m.derived = true; m.detailRef.extra = { ...m.detailRef.extra, callerLinked: true };
+    // the ruling is captured, but whom it went to was linked by launch time: a heuristic hand-off (review item 8)
+    for (const e of sink.events) if (e.detailRef.kind === 'spool-codex' && e.detailRef.key === m.detailRef.key && e.verb === 'end' && e.actor.id === 'critic') { e.target = { kind: 'actor', id: l.actor.id }; e.detailRef.extra = { ...e.detailRef.extra, callerLinked: true }; }
   }
 }
 

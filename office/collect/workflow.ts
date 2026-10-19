@@ -125,7 +125,7 @@ export function roleHandoffs(c: Collected, opId: string) {
   return c.events.filter(e => inOp(e.operation) && e.target?.kind === 'actor' && ROLEISH.test(e.actor.id) && ROLEISH.test(e.target.id) && e.actor.id !== e.target.id
     && !(e.actor.id === 'deniz' || e.target.id === 'deniz') && (e.verb === 'message' || e.verb === 'dispatch' || (e.verb === 'end' && e.actor.id === 'critic')))
     .sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq)
-    .map(e => ({ id: e.id, ts: e.ts, from: e.actor.id, to: e.target!.id, answer: e.verb === 'end' || /^(peer-reply|delivery|review|result)$/.test(e.label || ''), match: (e.detailRef.kind === 'handoff' || (e.provenance === 'captured' && (e.outcome === 'delivered' || e.verb === 'end' || e.label === 'packet'))) ? 'direct' as const : 'heuristic' as const }));
+    .map(e => ({ id: e.id, ts: e.ts, from: e.actor.id, to: e.target!.id, answer: e.verb === 'end' || /^(peer-reply|delivery|review|result)$/.test(e.label || ''), match: (e.detailRef.kind === 'handoff' || (e.provenance === 'captured' && !e.detailRef.extra?.callerLinked && (e.outcome === 'delivered' || e.verb === 'end' || e.label === 'packet'))) ? 'direct' as const : 'heuristic' as const }));
 }
 export function roleLoops(c: Collected, opId: string) {
   const hs = roleHandoffs(c, opId), open: { path: string[]; edges: typeof hs }[] = [], loops = new Map<string, { roles: string[]; count: number; direct: number; heuristic: number; events: string[]; last: string }>();

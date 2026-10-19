@@ -41,12 +41,13 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       const results = d.lines.slice(1).map(n => json(lineAt(c, d.file, n))).filter(Boolean);
       const result = results.map(r => Array.isArray(r.message?.content) ? r.message.content.filter((b: any) => b.type === 'tool_result' && b.tool_use_id === d.key).map((b: any) => textOf(b.content)).join('\n') : textOf(r.message?.content)).join('\n---\n');
       const name = use?.name;
-      out.push(...toolSections(allow, name, inp, result, rec?.cwd || allow.cfg.home, tgtPath));
+      // a message between sessions is agent text (review item 10): third click only
+      out.push(...toolSections(allow, name, inp, result, rec?.cwd || allow.cfg.home, tgtPath).map(x => /^peer/.test(e.label || '') && (x.title === 'message' || x.title === 'result') ? { ...x, prose: true } : x));
       if ((name === 'Agent' || name === 'Task') && e.target?.id.startsWith('agent:')) out.push(...actorContext(c, e.target.id, false));
       break;
     }
     // a message from another session as the receiver got it (the sender's transcript was not found)
-    case 'claude-peer-delivery': { const r = json(lineAt(c, d.file, d.lines[0])); add('message (as delivered)', String(r?.origin?.body ?? textOf(r?.message?.content))); break; }
+    case 'claude-peer-delivery': { const r = json(lineAt(c, d.file, d.lines[0])); add('message (as delivered)', String(r?.origin?.body ?? textOf(r?.message?.content)), { prose: true }); break; }
     case 'research': { const r = allow.read(d.file); r.allowed ? add(e.label === 'commission' ? 'commission' : 'research delivered', r.content, { path: r.path, allowed: true }) : out.push({ title: 'research file', path: r.path, allowed: false, note: 'off-allowlist: path only' }); break; }
     case 'claude-text': { const r = json(lineAt(c, d.file, d.lines[0])); add('text', textOf(r?.message?.content), { prose: true }); break; }
     case 'claude-user': { const r = json(lineAt(c, d.file, d.lines[0])); add('message', textOf(r?.message?.content)); break; }
@@ -74,17 +75,21 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       const recs = d.lines.map(n => json(lineAt(c, d.file, n))).filter(Boolean);
       // prose is decided here, on read, from the record (item type, record kind, hook event, section): a stored flag is not trusted
       const PROSE_ITEMS = /^(agent_message|assistant_message|reasoning|error)$/;
-      const isProse = (r: any, x: Section) => !!x.prose || PROSE_ITEMS.test(r?.item?.type || '') || r?.type === 'error' || r?.type === 'turn.failed' || r?.kind === 'end'
+      const isProse = (r: any, x: Section) => !!x.prose || (r?.tool === 'SendMessage' && !/^a[0-9a-f]{10,}$/.test(String(r?.to || ''))) || PROSE_ITEMS.test(r?.item?.type || '') || r?.type === 'error' || r?.type === 'turn.failed' || r?.kind === 'end'
         || r?.event === 'SubagentStop' || /^(final message|final output|launch result|reasoning|thinking)/.test(x.title);
+      const BLIND = 'withheld: it touches a masked operation\'s room records or driver files';
+      const blindRec = (r: any) => [r?.target, r?.cwd && /\.room-data/.test(r.cwd) ? r.cwd : '', ...(r?.reads || []), ...(r?.writes || []), ...(r?.item?.reads || []), ...(r?.item?.writes || [])].some((p: any) => typeof p === 'string' && !!p && !!allow.blind?.(allow.canonical(p)));
       const resec = (x: Section, r?: any) => { const y = x.text != null ? { ...x, ...clip(String(x.text)) } : { ...x }; if (isProse(r, x)) y.prose = true; else delete y.prose; return y; };
       if (d.kind === 'spool-codex' && d.key && (e.verb === 'spawn' || e.verb === 'end' || (e.verb === 'message' && e.target?.id === 'critic'))) {
         const all = fileLines(c, d.file).map(json).filter((r: any) => r?.run === d.key).sort((a: any, b: any) => a.seq - b.seq);
         const st = all.find((r: any) => r.kind === 'start'); if (st) out.push({ title: 'run', ...clip(`role: ${st.role || '?'}  label: ${st.label || '?'}\ncwd: ${st.cwd}\nargs: ${(st.args || []).join(' ')}`) });
-        for (const r of all) for (const x of (r.item?.sections || r.sections || []) as Section[]) out.push(resec({ ...x, title: r.kind === 'end' ? 'final message' : x.title }, r));
+        for (const r of all) { const b = blindRec(r); for (const x of (r.item?.sections || r.sections || []) as Section[]) out.push(b && !/^command/.test(x.title) ? { title: x.title, allowed: false, note: BLIND } : resec({ ...x, title: r.kind === 'end' ? 'final message' : x.title }, r)); }
         break;
       }
       const last = recs[recs.length - 1];
-      for (const x of ((last?.item?.sections || last?.sections || []) as Section[])) out.push(resec(x, last));
+      // recorded before blinding could be checked (the hook has no blind index): a masked operation's files are withheld on read
+      const blinded = recs.some(blindRec);
+      for (const x of ((last?.item?.sections || last?.sections || []) as Section[])) out.push(blinded && x.title !== 'command' && x.title !== 'description' ? { title: x.title, allowed: false, note: BLIND } : resec(x, last));
       if (e.verb === 'spawn' && e.target?.id.startsWith('agent:')) out.push(...actorContext(c, e.target.id, false));
       if (!out.length) out.push({ title: 'event', note: 'no content recorded for this event' });
       break;
@@ -96,6 +101,8 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       if (!M.masked) add('manifest line', d.kind === 'manifest' ? raw : JSON.stringify(r, null, 1));
       else add('manifest line (arms masked until a valid unmask record)', JSON.stringify({ at: r?.at, kind: r?.kind, ...(r?.traj ? { room: M.name(r.traj) } : {}), ...(r?.turn != null ? { turn: r.turn } : {}), ...(r?.pick?.label ? { speaker: r.pick.label } : {}), ...(r?.phase ? { phase: r.phase } : {}) }, null, 1));
       if (d.kind === 'manifest') break;
+      // the room's message only once the operation is unmasked: before that, its records are path-only (they can be traced to the arm)
+      if (M.masked) { if (r?.outputRevision) out.push({ title: 'room message', path: path.join(allow.cfg.roomData, 'revisions', String(r.outputRevision).replace(/[^\w-]/g, '') + '.json'), allowed: false, note: 'masked until a valid unmask record (room records can be traced to the arm)' }); break; }
       if (r?.outputRevision && /^[\w-]+$/.test(r.outputRevision)) {
         const f = path.join(allow.cfg.roomData, 'revisions', r.outputRevision + '.json'), rd = allow.read(f);
         if (!rd.allowed) out.push({ title: 'room message', path: rd.path, allowed: false, note: 'off-allowlist: path only' });
