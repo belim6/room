@@ -12,9 +12,9 @@ export function parseManifest(file: string, sink: Sink, allow: Allowlist) {
   const op = opFolderOf(allow, file), phase = path.basename(file).replace(/^manifest-|\.jsonl$/g, '');
   const rel = op?.id.startsWith('work/') ? path.relative(path.dirname(allow.roots.work), path.dirname(file)) : path.relative(allow.cfg.coordination, path.dirname(file));
   const id = `driver:${rel}/${phase}`; sink.actor({ id, kind: 'driver', label: `driver ${rel} ${phase}`, parent: 'coordinator', parentInferred: true, source: file });
-  const me = sink.ref(id); let started = false, last = ''; const held: { ts: string; r: any }[] = [];
+  const me = sink.ref(id); let started = false, last = ''; let held: { ts: string; r: any }[] = [];
   // arm names in trajectory ids are masked unless the operation folder has a valid unmask record (rooms.ts)
-  const lines = readLines(file, sink), M = maskerFor(allow, op?.dir || path.dirname(file), op?.id || rel), T = (t: unknown) => M.name(String(t));
+  const lines: string[] = readLines(file, sink), M = maskerFor(allow, op?.dir || path.dirname(file), op?.id || rel), T = (t: unknown) => M.name(String(t));
   const push = (e: any, i: number, kind = 'manifest') => { stat.events++; sink.push({ actor: me, source: file, provenance: 'captured', tsSource: 'record', detailRef: { kind, file, lines: i >= 0 ? [i] : [] }, hints: [file], ...e }); };
   lines.forEach((l, i) => {
     if (!l.trim()) return; let r: any; try { r = JSON.parse(l); } catch { stat.unparsed++; return; }
@@ -41,6 +41,21 @@ export function parseManifest(file: string, sink: Sink, allow: Allowlist) {
     const seed = M.unmask.keySha256 || 'no-key', h = (t: string) => crypto.createHash('sha256').update(seed + '|' + t).digest('hex'), pairOf = (t: unknown) => { const p = String(t).split('·'); return p.length === 3 ? p[0] + '·' + p[2] : String(t); };
     const t0 = held.filter(x => x.r.kind === 'branch').map(x => x.ts).sort()[0], coarse = new Map<string, string>();
     for (const x of held.filter(x => x.r.kind === 'intent')) { const k = pairOf(x.r.traj) + '|' + x.r.turn; if (!coarse.has(k) || x.ts < coarse.get(k)!) coarse.set(k, x.ts); }
+    // live: a pair's members can straddle a poll tick. A pair-turn's events are emitted only together: once every member of
+    // the pair is present (members from phase-start, branch and turn records), or the pair is stopped, or after a bounded
+    // timeout (2 min of later manifest records, or 10 min of wall time). Full collect and live give the same events.
+    const members = new Map<string, Set<string>>(), stopped = new Set<string>(); let turnsSeen = false;
+    for (const l of lines) { let r: any; try { r = JSON.parse(l); } catch { continue; }
+      for (const t of [r?.traj, ...(Array.isArray(r?.trajectories) ? r.trajectories : [])]) if (typeof t === 'string') { const k = pairOf(t); (members.get(k) || members.set(k, new Set()).get(k)!).add(t); }
+      if (r?.kind === 'intent' || r?.kind === 'done') turnsSeen = true;
+      if (r?.kind === 'phase-end') { for (const k of Object.keys(r.stoppedPairs || {})) stopped.add(k); for (const f of r.qualifyingFailures || []) stopped.add(String(f?.pair || f?.traj || f)); } }
+    const groupKey = (x: { r: any }) => x.r.kind === 'branch' ? pairOf(x.r.traj) + '|branch' : pairOf(x.r.traj) + '|' + x.r.turn + '|' + x.r.kind;
+    const groups = new Map<string, { ts: string; r: any }[]>(); for (const x of held) (groups.get(groupKey(x)) || groups.set(groupKey(x), []).get(groupKey(x))!).push(x);
+    const ready = (g: { ts: string; r: any }[]) => { const pair = pairOf(g[0].r.traj), g0 = g.map(x => x.ts).sort()[0];
+      if (stopped.has(pair) || g.some(x => stopped.has(String(x.r.traj)))) return true;
+      if (Date.parse(last) - Date.parse(g0) > 120e3 || Date.now() - Date.parse(g0) > 600e3) return true;
+      return g[0].r.kind === 'branch' ? turnsSeen : new Set(g.map(x => x.r.traj)).size >= (members.get(pair)?.size || 1); };
+    held = [...groups.values()].filter(ready).flat();
     const timeOf = (x: { ts: string; r: any }) => x.r.kind === 'branch' ? t0 : x.r.kind === 'intent' ? coarse.get(pairOf(x.r.traj) + '|' + x.r.turn)! : x.ts;
     for (const x of held.sort((a, b) => timeOf(a).localeCompare(timeOf(b)) || h(String(a.r.traj)).localeCompare(h(String(b.r.traj))))) {
       const r = x.r, ts = timeOf(x);

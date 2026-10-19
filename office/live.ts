@@ -35,7 +35,7 @@ export class Live {
     const c = this.get().allow.roots, out = [...spoolFiles(c.spool), path.join(c.coordination, 'events.jsonl')];
     const scan = (d: string, depth: number) => { let ns: string[] = []; try { ns = fs.readdirSync(d); } catch { return; }
       for (const n of ns) { const p = path.join(d, n); if (/^manifest-.*\.jsonl$/.test(n)) out.push(p); else if (depth && /^[\w.-]+$/.test(n) && !n.includes('.')) { try { if (fs.lstatSync(p).isDirectory()) scan(p, depth - 1); } catch {} } } };
-    scan(c.coordination, 2); scan(c.work, 3);
+    scan(c.coordination, 6); scan(c.work, 6); // nested run folders too
     const top = this.cfg.room && path.join(this.cfg.room, 'events.jsonl'); if (top && fs.existsSync(top)) out.push(top);
     return out;
   }

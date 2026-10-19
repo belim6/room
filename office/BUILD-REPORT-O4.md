@@ -251,3 +251,28 @@ These supersede the sections above where they differ. Tests: `office/test/office
      - v0 comes first in some groups and not in others, so the order does not follow the arm.
 
 **Results:** `npm run test:office` passes 58 of 58, `npx tsc -p office` and `npx tsc --noEmit` are clean, and `npm run test:workbench` passes 150 of 150.
+
+## Review fixes, round 3 (critic NO-GO on the live-stream pair-order leak)
+**The leak.** In the live tier, a masked pair's two requests could straddle a poll tick, so v0's event went out alone one tick before v1's.
+
+**The fix** (`collect/manifests.ts`). While an operation is masked, every per-pair driver event (branch creation, request, completion) is held. A pair-turn's events are emitted only together, in the same coarse-time, seeded-order form as before, when one of these holds:
+- every member of the pair is present. Members come from the `phase-start` trajectories and the branch and turn records. Branch creation counts as complete once requests have started.
+- the pair is stopped (`phase-end` `stoppedPairs` or `qualifyingFailures`). Its events are then released, still coarsened.
+- a bounded timeout passes: 2 minutes of later manifest records, or 10 minutes of wall time.
+
+**Same result in live and replay.** The live tier re-parses the whole manifest on each change, so live and full collect apply the same rule and produce the same events.
+
+**Nested folders.** Live tracking of manifests now reaches nested run folders, up to 6 levels under `coordination/` and `work/`.
+
+**Test:** `live: a masked pair-turn never streams a lone member …`. It streams real SSE across simulated ticks:
+- v0's request, tick, v1's request, tick;
+- then a lone r02 request, tick, the stop record, tick.
+
+It checks that:
+- r01 t1 appears in exactly one message, with both members, one time, no line numbers, and in seeded order;
+- the stopped pair's lone request appears only in the same message as the stop;
+- the folded stream equals a full collect.
+
+I confirmed the test fails with the gating removed.
+
+**Results:** `npm run test:office` passes 59 of 59, `npx tsc -p office` and `npx tsc --noEmit` are clean, and `npm run test:workbench` passes 150 of 150.

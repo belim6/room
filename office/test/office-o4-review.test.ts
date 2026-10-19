@@ -180,3 +180,38 @@ test('blinding recheck: masked per-turn driver events (requests and completions)
     const all = JSON.stringify(evs) + await s.text('/api/rooms?op=2026-10-17/date'); assert.ok(!/·v[01]·/.test(all));
   } finally { await s.close(); }
 });
+
+test('live: a masked pair-turn never streams a lone member across a poll tick; held events come out together in seeded order (or coarsened once stopped)', async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'office-live-pair-'))); roots.push(root);
+  const coord = path.join(root, 'coordination'), dir = path.join(coord, '2026-10-17/date'), man = path.join(dir, 'manifest-compare.jsonl'), cfg: Config = { home: path.join(root, 'home'), room: root, coordination: coord,
+    promptKnowledge: path.join(root, 'pk'), roomData: path.join(root, 'rd'), claudeProject: path.join(root, 'proj'), spool: path.join(root, 'spool'), repos: [], work: path.join(root, 'work'), research: path.join(root, 'research'), extra: [] };
+  fs.mkdirSync(cfg.claudeProject, { recursive: true }); W(path.join(dir, 'restricted/key.json'), { 'T-1': { traj: 'compare·v0·r01' } });
+  const rec = (o: any) => fs.appendFileSync(man, JSON.stringify(o) + '\n');
+  rec({ at: '2026-10-17T20:02:00.000Z', kind: 'phase-start', phase: 'compare', trajectories: ['compare·v0·r01', 'compare·v1·r01', 'compare·v0·r02', 'compare·v1·r02'] });
+  const pairs = ['r01', 'r02'], now = Date.now(), at = (ms: number) => new Date(now - 60e3 + ms).toISOString();
+  for (const p of pairs) for (const a of ['v0', 'v1']) rec({ at: at(0), kind: 'branch', traj: `compare·${a}·${p}`, branch: id() });
+  const o = createOffice(cfg, {}), srv = o.app.listen(0, '127.0.0.1'); await new Promise(r => srv.once('listening', r));
+  const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, ctl = new AbortController(), res = await fetch(base + '/api/live', { signal: ctl.signal }), rd = res.body!.getReader(), dec = new TextDecoder(); let raw = '';
+  const pump = (async () => { try { for (;;) { const { done, value } = await rd.read(); if (done) break; raw += dec.decode(value); } } catch {} })();
+  const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+  try {
+    await wait(50);
+    // tick 1: only v0's request of r01 t1 (the driver's real order); tick 2: v1's; then r02's v0 only, until the pair is stopped
+    rec({ at: at(1000), kind: 'intent', traj: 'compare·v0·r01', turn: 1, pick: { label: 'Jake' } }); o.live.tick(); await wait(50);
+    rec({ at: at(1002), kind: 'intent', traj: 'compare·v1·r01', turn: 1, pick: { label: 'Megan' } }); o.live.tick(); await wait(50);
+    rec({ at: at(2000), kind: 'intent', traj: 'compare·v0·r02', turn: 1, pick: { label: 'Jake' } }); o.live.tick(); await wait(50);
+    rec({ at: at(3000), kind: 'phase-end', phase: 'compare', stoppedPairs: { 'compare·r02': 'quota' } }); o.live.tick(); await wait(80);
+  } finally { ctl.abort(); await pump; await new Promise(r => srv.close(r)); o.live.stop(); }
+  const msgs = raw.split('\n\n').filter(b => b.startsWith('event: events')).map(b => JSON.parse(b.split('\ndata: ')[1]));
+  const disp = msgs.map(m => m.upserts.filter((e: any) => e.verb === 'dispatch' && e.source === man));
+  assert.ok(!/·v[01]·/.test(raw), 'masked on the stream');
+  const r01 = disp.map(d => d.filter((e: any) => e.label.startsWith('compare·r01·'))).filter(d => d.length);
+  assert.equal(r01.length, 1, 'r01 t1 streamed in exactly one message'); assert.equal(r01[0].length, 2, 'never a lone member');
+  assert.equal(r01[0][0].ts, r01[0][1].ts); assert.ok(r01[0].every((e: any) => !e.detailRef.lines.length));
+  const key = sha(fs.readFileSync(path.join(dir, 'restricted/key.json'))), h = (t: string) => sha(key + '|' + t), M = maskerFor(new Allowlist(cfg), dir, '2026-10-17/date');
+  assert.deepEqual(r01[0].map((e: any) => e.label.split(' ').slice(0, 2).join(' ')), ['compare·v0·r01', 'compare·v1·r01'].sort((a, b) => h(a).localeCompare(h(b))).map(t => M.name(t)), 'seeded order');
+  const r02 = disp.findIndex(d => d.some((e: any) => e.label.startsWith('compare·r02·'))), stopAt = msgs.findIndex(m => m.upserts.some((e: any) => e.verb === 'block'));
+  assert.ok(r02 >= 0 && r02 === stopAt, 'the stopped pair\'s lone request is released only together with the stop');
+  // the full collect gives the same masked events as the stream folded
+  const all = collect(cfg).events.filter(e => e.verb === 'dispatch'); assert.deepEqual(all.map(e => e.label).sort(), disp.flat().map((e: any) => e.label).sort());
+});
