@@ -4,13 +4,14 @@ import { Sink, type OfficeEvent, type Verb } from './types';
 import { agentKind } from './claude';
 import { verdictOf, findingsOf } from './codex';
 import type { Allowlist } from './privacy';
+import { UUID, roleFromTitle, ensureRole, type Identity } from './roles';
 
 // The live spool (hooks-*.jsonl from the Claude Code hook, codex-*.jsonl from office-codex). Records were filtered and
 // redacted before they were written; Expand redacts again. Hook events are `captured`; file effects of shell commands are
 // `derived` from the command text, as in O1. Duplicates of transcript events (same tool_use id) are dropped: the
 // transcript copy wins and the hook copy only confirms it.
 // One spawn per actor, one end per actor, one event per (tool call, verb, file): whichever source reported it first wins.
-export const dedupeKey = (e: OfficeEvent) => e.verb === 'spawn' && e.target?.kind === 'actor' && !e.target.id.startsWith('tool:') ? `spawn|${e.target.id}` : e.verb === 'end' ? `end|${e.actor.id}`
+export const dedupeKey = (e: OfficeEvent) => e.verb === 'spawn' && e.target?.kind === 'actor' && !e.target.id.startsWith('tool:') ? `spawn|${e.target.id}` : e.verb === 'end' ? `end|${e.actor.id}${e.detailRef.kind === 'spool-codex' && e.detailRef.key ? '|' + e.detailRef.key : ''}`
   : e.detailRef.key ? `${e.detailRef.key}|${e.verb}|${e.target?.kind === 'file' ? e.target.path : ''}` : '';
 
 export function spoolFiles(dir: string) { return fs.existsSync(dir) ? fs.readdirSync(dir).filter(n => /^(hooks|codex)-\d{4}-\d\d-\d\d\.jsonl$/.test(n)).sort().map(n => path.join(dir, n)) : []; }
@@ -38,11 +39,12 @@ export function readSpoolTail(file: string, st?: SpoolState): SpoolState {
 }
 const newState = (): SpoolState => ({ ino: 0, offset: 0, lines: 0, recs: [], offs: [], unparsed: 0, dupes: 0, ids: new Set(), lastTs: '' });
 
-export function parseSpool(file: string, sink: Sink, allow: Allowlist, opts: { primarySession?: string; known?: Set<string> }) {
+export function parseSpool(file: string, sink: Sink, allow: Allowlist, opts: SpoolOpts) {
   const st = readSpoolTail(file); sink.lineIndex.set(file, st.offs); buildSpool(file, st, sink, allow, opts); return st;
 }
 // Events from a file's records (all of them: tool calls and runs pair up across appends).
-export function buildSpool(file: string, st: SpoolState, sink: Sink, allow: Allowlist, opts: { primarySession?: string; known?: Set<string> }) {
+export interface SpoolOpts { primarySession?: string; known?: Set<string>; ident?: Identity }
+export function buildSpool(file: string, st: SpoolState, sink: Sink, allow: Allowlist, opts: SpoolOpts) {
   const stat = { kind: path.basename(file).startsWith('hooks') ? 'spool-hooks' : 'spool-codex', path: file, records: st.recs.length, events: 0, unparsed: st.unparsed, note: '' as string | undefined };
   sink.sources.push(stat); let deduped = st.dupes;
   const recs = [...st.recs];
@@ -52,13 +54,15 @@ export function buildSpool(file: string, st: SpoolState, sink: Sink, allow: Allo
     if (k && (opts.known?.has(k) || seen.has(k))) { sink.events.pop(); deduped++; return null; }
     if (k) seen.add(k); stat.events++; return ev;
   };
-  const who = (r: any) => r.agent ? 'agent:' + r.agent : !r.session || r.session === opts.primarySession ? 'coordinator' : 'session:' + String(r.session).slice(0, 8);
+  // a hook record's session: its role at that moment (roles.ts), as for transcripts
+  const who = (r: any) => r.agent ? 'agent:' + r.agent : opts.ident && UUID.test(String(r.session || '')) ? opts.ident.actorAt(String(r.session).toLowerCase(), r.ts)
+    : !r.session || r.session === opts.primarySession ? 'coordinator' : 'session:' + String(r.session).slice(0, 8);
   if (stat.kind === 'spool-hooks') {
     const byTool = new Map<string, { pre?: { r: any; i: number }; post?: { r: any; i: number } }>();
     for (const x of recs) if (x.r.toolUseId) { const g = byTool.get(x.r.toolUseId) || {}; if (x.r.event === 'PreToolUse') g.pre ??= x; else if (x.r.event === 'PostToolUse') g.post ??= x; byTool.set(x.r.toolUseId, g); }
     for (const x of recs) {
       const r = x.r, me = who(r), base = { source: file, provenance: 'captured' as const, tsSource: 'record' as const };
-      if (me !== 'coordinator' && !sink.actors.has(me)) sink.actor({ id: me, kind: me.startsWith('agent:') ? agentKind(r.agentType || '') : 'coordinator', label: me.startsWith('agent:') ? (r.agentType || 'agent') + ' ' + r.agent.slice(0, 7) : 'session ' + me.slice(8) });
+      if (me.startsWith('agent:') && !sink.actors.has(me)) sink.actor({ id: me, kind: me.startsWith('agent:') ? agentKind(r.agentType || '') : 'coordinator', label: me.startsWith('agent:') ? (r.agentType || 'agent') + ' ' + r.agent.slice(0, 7) : 'session ' + me.slice(8) });
       if (r.toolUseId) {
         const g = byTool.get(r.toolUseId)!; if ((g.pre || g.post) !== x) continue; // one event set per tool call, at its first record
         const done = g.post?.r, lines = [g.pre?.i, g.post?.i].filter((n): n is number => n != null), d = { kind: 'spool-hook', file, lines, key: r.toolUseId };
@@ -69,7 +73,8 @@ export function buildSpool(file: string, st: SpoolState, sink: Sink, allow: Allo
         if (t === 'Read' || t === 'NotebookRead') ev('read', file_(r.target));
         else if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(t)) ev('write', file_(r.target));
         else if (t === 'Agent' || t === 'Task') { const a = done?.agentId; if (a) sink.actor({ id: 'agent:' + a, kind: agentKind(r.label), label: r.label || sink.actors.get('agent:' + a)?.label || 'agent ' + a.slice(0, 7), parent: me }); ev('spawn', { kind: 'actor', id: a ? 'agent:' + a : 'tool:' + r.toolUseId }, 'captured', r.label); }
-        else if (t === 'SendMessage') ev('message', { kind: 'actor', id: /^a[0-9a-f]{10,}$/.test(r.to || '') ? 'agent:' + r.to : 'name:' + (r.to || '?') });
+        else if (t === 'SendMessage') { const to = String(r.to || ''), sess = opts.ident?.sessionFor(to), role = roleFromTitle(to); // another session: by socket, title or role name
+          if (/^a[0-9a-f]{10,}$/.test(to)) ev('message', { kind: 'actor', id: 'agent:' + to }); else { const x = ev('message', { kind: 'actor', id: sess ? opts.ident!.actorAt(sess, r.ts) : role ? ensureRole(sink, role) : 'peer:unresolved' }, 'derived', 'peer'); if (x && !sess && !role) sink.actor({ id: 'peer:unresolved', kind: 'session', label: 'another session (not found)', unregistered: true }); } }
         else if (t === 'Bash') { for (const p of r.reads || []) ev('read', file_(p), 'derived'); for (const p of r.writes || []) ev('write', file_(p), 'derived'); if (!(r.reads || []).length && !(r.writes || []).length) ev('dispatch', { kind: 'command', id: r.toolUseId }, 'captured', r.label); }
         else if (t === 'Grep' || t === 'Glob') ev('read', file_(r.cwd || '/'), 'derived');
         else ev('dispatch', { kind: 'tool', id: t }, 'captured', t);
@@ -84,13 +89,20 @@ export function buildSpool(file: string, st: SpoolState, sink: Sink, allow: Allo
     const runs = new Map<string, { r: any; i: number }[]>();
     for (const x of recs) (runs.get(x.r.run) || runs.set(x.r.run, []).get(x.r.run)!).push(x);
     for (const [run, xs] of runs) {
-      const start = xs.find(x => x.r.kind === 'start')?.r || xs[0].r, end = xs.find(x => x.r.kind === 'end'), id = 'codexrun:' + run;
-      const role = String(start.role || ''), kind = role === 'critic' ? 'critic' : role === 'labeler' ? 'labeler' : role || 'reviewer';
-      sink.actor({ id, kind, label: start.label || `Codex ${role || 'run'} ${run.slice(0, 8)}`, parent: role === 'critic' ? 'critic' : 'coordinator', source: file, ...(start.operation ? { operation: String(start.operation) } : {}) });
-      const parent = role === 'critic' ? 'critic' : 'coordinator', op = start.operation ? { operation: String(start.operation), opInferred: false } : {};
+      const start = xs.find(x => x.r.kind === 'start')?.r || xs[0].r, end = xs.find(x => x.r.kind === 'end');
+      const role = String(start.role || ''), kind = role === 'critic' ? 'critic' : role === 'labeler' ? 'labeler' : role || 'reviewer', critic = role === 'critic';
+      // O4: the critic is one persistent node; each run is a request to it, its Codex session (thread) is listed on the node and a
+      // new thread is its successor. Who asked: the calling Claude session (CLAUDE_CODE_SESSION_ID, recorded by office-codex).
+      const thread = String(xs.find(x => x.r.thread)?.r.thread || (start.resume ? (start.args || []).find((a: string) => UUID.test(a)) : '') || '');
+      const caller = UUID.test(String(start.caller || '')) && opts.ident ? opts.ident.actorAt(String(start.caller).toLowerCase(), xs[0].r.ts) : undefined;
+      if (critic && thread && opts.ident) opts.ident.span('critic', thread, xs[0].r.ts, 'codex', 'codex');
+      const id = critic ? 'critic' : 'codexrun:' + run;
+      if (!critic) sink.actor({ id, kind, label: start.label || `Codex ${role || 'run'} ${run.slice(0, 8)}`, parent: 'coordinator', source: file, ...(start.operation ? { operation: String(start.operation) } : {}) });
+      const parent = critic ? caller || 'coordinator' : 'coordinator', op = start.operation ? { operation: String(start.operation), opInferred: false } : {};
       const prompt = xs.find(x => x.r.kind === 'prompt')?.r?.sections?.[0]?.text || '';
       const base = { source: file, provenance: 'captured' as const, tsSource: 'record' as const, ...op };
-      push({ ...base, ts: xs[0].r.ts, actor: sink.ref(parent), verb: 'spawn', target: { kind: 'actor', id }, detailRef: { kind: 'spool-codex', file, lines: xs.filter(x => x.r.kind === 'start' || x.r.kind === 'prompt').map(x => x.i), key: run }, label: start.label, hints: [start.cwd || '', prompt, ...(start.args || [])] });
+      push({ ...base, ts: xs[0].r.ts, actor: sink.ref(parent), verb: critic ? 'message' : 'spawn', target: { kind: 'actor', id }, detailRef: { kind: 'spool-codex', file, lines: xs.filter(x => x.r.kind === 'start' || x.r.kind === 'prompt').map(x => x.i), key: run },
+        label: critic ? 'packet' : start.label, ...(critic && !caller ? { provenance: 'inferred' as const } : {}), hints: [start.cwd || '', prompt, ...(start.args || [])] });
       let tokens = 0;
       for (const x of xs) {
         const r = x.r, it = r.item, d = { kind: 'spool-codex', file, lines: [x.i] };

@@ -53,15 +53,31 @@ export function armMasker(allow: Allowlist, opDir: string, opId: string, trajs: 
   return { masked: !u.valid, unmask: u, name: (t: string) => map.get(t) || (u.valid ? t : maskText(t)), maskText };
 }
 
+// The operation folder a path sits in: coordination/<day>/<sub> or (O4) work/<thing>. Unmask records and masking are per folder.
+export function opFolderOf(allow: Allowlist, p: string): { dir: string; id: string } | null {
+  const c = allow.canonical(p), isDir = (d: string) => { try { return fs.statSync(d).isDirectory(); } catch { return false; } };
+  const rc = path.relative(allow.roots.coordination, c).split(path.sep);
+  if (rc.length >= 2 && /^\d{4}-\d\d-\d\d$/.test(rc[0]) && rc[1] && isDir(path.join(allow.roots.coordination, rc[0], rc[1]))) return { dir: path.join(allow.roots.coordination, rc[0], rc[1]), id: `${rc[0]}/${rc[1]}` };
+  const rw = path.relative(allow.roots.work, c).split(path.sep);
+  if (rw[0] && rw[0] !== '..' && !path.isAbsolute(rw[0]) && isDir(path.join(allow.roots.work, rw[0]))) return { dir: path.join(allow.roots.work, rw[0]), id: 'work/' + rw[0] };
+  return null;
+}
+// Driver manifests of an operation folder: top level for coordination/<day>/<sub>, up to three levels down for work/<thing>.
+export function manifestsIn(opDir: string, opId: string) {
+  const out: string[] = [], walk = (d: string, depth: number) => { let ns: string[] = []; try { ns = fs.readdirSync(d).sort(); } catch { return; }
+    for (const n of ns) { const p = path.join(d, n); let st: fs.Stats; try { st = fs.lstatSync(p); } catch { continue; }
+      if (st.isFile() && /^manifest-[\w-]+\.jsonl$/.test(n)) out.push(p); else if (st.isDirectory() && depth > 0 && !n.startsWith('.') && n !== 'restricted') walk(p, depth - 1); } };
+  walk(opDir, opId.startsWith('work/') ? 3 : 0); return out;
+}
 // One masker per operation folder, over every trajectory in its manifests (so letters agree across the floor, Expand
 // and the fans); cached on the manifests' sizes and the restricted files' mtimes.
 const cache = new Map<string, { sig: string; m: ReturnType<typeof armMasker> }>();
 export function maskerFor(allow: Allowlist, opDir: string, opId: string) {
-  let names: string[] = []; try { names = fs.readdirSync(opDir).filter(n => /^manifest-[\w-]+\.jsonl$/.test(n)).sort(); } catch {}
+  const names = manifestsIn(opDir, opId);
   const st = (p: string) => { try { const s = fs.statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; } };
-  const sig = [...names.map(n => st(path.join(opDir, n))), st(path.join(opDir, 'restricted/unmask.json')), st(path.join(opDir, 'restricted/key.json'))].join('|') + '|' + opId;
+  const sig = [...names.map(n => n + ':' + st(n)), st(path.join(opDir, 'restricted/unmask.json')), st(path.join(opDir, 'restricted/key.json'))].join('|') + '|' + opId;
   const hit = cache.get(opDir); if (hit && hit.sig === sig) return hit.m;
-  const trajs: string[] = []; for (const n of names) for (const m of fs.readFileSync(path.join(opDir, n), 'utf8').matchAll(/"traj":"([^"]+)"/g)) trajs.push(m[1]);
+  const trajs: string[] = []; for (const n of names) for (const m of fs.readFileSync(n, 'utf8').matchAll(/"traj":"([^"]+)"/g)) trajs.push(m[1]);
   const m = armMasker(allow, opDir, opId, trajs); cache.set(opDir, { sig, m }); return m;
 }
 
@@ -73,6 +89,9 @@ export function maskAll(allow: Allowlist) {
   for (const d of days) { let subs: string[] = []; try { subs = fs.readdirSync(path.join(root, d)); } catch {}
     for (const s of subs) { const dir = path.join(root, d, s); try { if (!fs.statSync(dir).isDirectory() || !fs.readdirSync(dir).some(n => /^manifest-[\w-]+\.jsonl$/.test(n))) continue; } catch { continue; }
       const m = maskerFor(allow, dir, `${d}/${s}`); if (m.masked) ms.push(m); } }
+  let things: string[] = []; try { things = fs.readdirSync(allow.roots.work); } catch {}
+  for (const t of things) { const dir = path.join(allow.roots.work, t); try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
+    if (!manifestsIn(dir, 'work/' + t).length) continue; const m = maskerFor(allow, dir, 'work/' + t); if (m.masked) ms.push(m); }
   return (text: string) => { let t = text; for (const m of ms) t = m.maskText(t); return t; };
 }
 const maskDeepWith = (f: (s: string) => string) => { const go = (v: any, k = ''): any => typeof v === 'string' ? (k === 'path' || k === 'source' || k === 'file' ? v : f(v)) : Array.isArray(v) ? v.map(x => go(x, k)) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([kk, x]) => [kk, go(x, kk)])) : v; return go; };
@@ -80,10 +99,10 @@ export const maskDeep = (allow: Allowlist) => maskDeepWith(maskAll(allow));
 
 // Experiment fans: one lane per room of a driver run, matched pairs side by side, a tick per turn with the speaker's name.
 export function fans(allow: Allowlist, events: OfficeEvent[], opDir: string, opId: string) {
-  const files = fs.existsSync(opDir) ? fs.readdirSync(opDir).filter(n => /^manifest-[\w-]+\.jsonl$/.test(n)).sort() : [];
+  const files = manifestsIn(opDir, opId);
   const runs: any[] = [];
   for (const n of files) {
-    const file = path.join(opDir, n), lines = fs.readFileSync(file, 'utf8').split('\n'), recs = lines.map((l, i) => { try { return { r: JSON.parse(l), i }; } catch { return null; } }).filter(Boolean) as { r: any; i: number }[];
+    const file = n, lines = fs.readFileSync(file, 'utf8').split('\n'), recs = lines.map((l, i) => { try { return { r: JSON.parse(l), i }; } catch { return null; } }).filter(Boolean) as { r: any; i: number }[];
     const M = maskerFor(allow, opDir, opId);
     const evByLine = new Map(events.filter(e => e.detailRef.file === file && e.detailRef.kind === 'manifest-turn').map(e => [e.detailRef.lines[0], e.id]));
     const speaker = new Map<string, string>(), lanes = new Map<string, any>(), stops = new Set<string>();

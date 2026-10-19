@@ -5,8 +5,11 @@
 export const PERM = {
   deniz: [0.05, 0.50], coordinator: [0.27, 0.50], critic: [0.27, 0.13], server: [0.55, 0.88], providers: [0.05, 0.88], outside: [0.05, 0.13],
   repo: [0.20, 0.95], transcripts: [0.12, 0.70], archive: [0.88, 0.10], ledger: [0.88, 0.36], vault: [0.88, 0.62], rooms: [0.88, 0.88],
+  // O4: one node per role (its sessions in the Inspector), PSRI outside Room, and work/ (+ research/) as an artifact node
+  'role:partner': [0.15, 0.36], 'role:operator': [0.15, 0.62], 'role:secretary': [0.05, 0.30], 'role:prompter': [0.27, 0.31], 'role:experimenter': [0.27, 0.67],
+  'role:housekeeper': [0.30, 0.82], 'role:engineer': [0.38, 0.94], psri: [0.72, 0.95], work: [0.88, 0.23],
 };
-export const ARTIFACT = new Set(['archive', 'ledger', 'vault', 'rooms', 'repo', 'outside', 'transcripts']);
+export const ARTIFACT = new Set(['archive', 'ledger', 'vault', 'rooms', 'repo', 'outside', 'transcripts', 'work']);
 export const FAIL = new Set(['error', 'no-go', 'missing', 'gap', 'extraction-failed', 'extraction-failed-repaired', 'stopped', 'blocked', 'no-output']);
 export const isFailure = (e) => FAIL.has(e.outcome) || e.verb === 'error' || e.verb === 'deviation' || e.verb === 'block';
 
@@ -128,7 +131,12 @@ export function narrate(e, nameOf, opTitle = (x) => x) {
       return e.actor.kind === 'critic' && /go/.test(e.outcome || '') ? `The critic ${o}${e.operation ? ' on ' + opTitle(e.operation) : ''}${f}.` : `${who} ${o}${f}${tag}.`; }
     case 'read': return `${who} opened ${file || them || 'something'}${tag}.`;
     case 'write': return tgt?.kind === 'branch' ? `${who} created a room branch.` : `${who} wrote ${file || 'a file'}${tag}.`;
-    case 'message': return e.actor.id === 'deniz' ? `Deniz wrote to ${them || 'the coordinator'}.` : tgt?.id === 'deniz' ? `${who} wrote to Deniz.` : e.label?.startsWith('result') ? `${who} reported back to ${them}.` : `${who} sent ${them || 'someone'} a message${e.label && !/^(packet|review|result)$/.test(e.label) ? '' : e.label ? ' (' + e.label + ')' : ''}.`;
+    case 'message': if (e.label === 'peer') return `${who} asked ${them}${e.outcome === 'error' ? ' (not delivered)' : ''}${tag}.`;
+      if (e.label === 'peer-reply') return `${who} replied to ${them}${e.outcome === 'error' ? ' (not delivered)' : ''}${tag}.`;
+      if (e.label === 'commission') return `${who} commissioned research from PSRI: ${tgt?.title || 'a brief'}${tag}.`;
+      if (e.label === 'delivery') return `PSRI delivered research to ${them}: ${tgt?.title || 'a synthesis'}${tag}.`;
+      if (e.label === 'packet' && tgt?.id === 'critic') return `${who} asked the critic for a review${tag}.`;
+      return e.actor.id === 'deniz' ? `Deniz wrote to ${them || 'the coordinator'}.` : tgt?.id === 'deniz' ? `${who} wrote to Deniz.` : e.label?.startsWith('result') ? `${who} reported back to ${them}.` : `${who} sent ${them || 'someone'} a message${e.label && !/^(packet|review|result)$/.test(e.label) ? '' : e.label ? ' (' + e.label + ')' : ''}.`;
     case 'dispatch': return tgt?.id === 'providers' ? `${who} started a Codex run.` : tgt?.id === 'server' ? `${who} asked the stable server for ${e.label || 'a turn'}.` : `${who} ran ${e.label || 'a command'}${e.outcome === 'error' ? ' (it failed)' : ''}.`;
     case 'turn': return `The stable server produced ${e.label || 'a turn'}.`;
     case 'rule': return `${who}: ${e.label || 'check'}.`;
@@ -144,7 +152,7 @@ export function narrate(e, nameOf, opTitle = (x) => x) {
 // Edge labels: what an edge is, in a few plain words, from the same metadata as the narration (verb, target name, event
 // label, outcome). Deterministic; no content, no agent prose.
 const lastPart = (name = '') => name.split(' · ').pop();
-export function edgeSummary(e, nameOf = (x) => x) {
+export function edgeSummary(e, nameOf = (x) => x, opTitle = (x) => x) {
   const t = e.target, them = t?.kind === 'actor' ? nameOf(t.id) : '', file = t?.kind === 'file' ? fileWords(t.path, t.title).replace(/^the /, '') : '';
   const fail = e.outcome === 'error' ? ' (failed)' : '';
   switch (e.verb) {
@@ -154,7 +162,11 @@ export function edgeSummary(e, nameOf = (x) => x) {
     case 'end': { const f = e.findings ? ` (${e.findings} finding${e.findings === 1 ? '' : 's'})` : '';
       return e.outcome === 'no-go' ? `rules NO-GO${f}` : e.outcome === 'go' ? `rules GO${f}` : e.outcome === 'conditional-go' ? `rules conditional GO${f}` : e.outcome === 'verdict' ? 'returns its verdict'
         : /error|fail|no-output/.test(e.outcome || '') ? `ends: ${e.outcome}` : 'reports back'; }
-    case 'message': return e.label === 'packet' ? `sends a packet to ${lastPart(them) || 'review'}` : e.label === 'review' ? 'returns a review' : t?.id === 'deniz' ? 'writes to Deniz' : e.actor.id === 'deniz' ? 'writes to the coordinator' : e.label?.startsWith('result') ? 'reports back' : `messages ${lastPart(them) || 'an agent'}`;
+    case 'message': if (e.label === 'peer' || e.label === 'peer-reply') { const op = e.operation ? opTitle(e.operation) : '';
+        return `${e.label === 'peer' ? 'asks' : 'replies to'} ${lastPart(them) || 'a session'}${op ? ': ' + op : ''}${e.outcome === 'error' ? ' (not delivered)' : ''}`; }
+      if (e.label === 'commission') return `commissions research on ${t?.title || 'a brief'}`;
+      if (e.label === 'delivery') return `delivers research: ${t?.title || 'a synthesis'}`;
+      return e.label === 'packet' ? `sends a packet to ${lastPart(them) || 'review'}` : e.label === 'review' ? 'returns a review' : t?.id === 'deniz' ? 'writes to Deniz' : e.actor.id === 'deniz' ? 'writes to the coordinator' : e.label?.startsWith('result') ? 'reports back' : `messages ${lastPart(them) || 'an agent'}`;
     // e.label is only compared, never printed: labels can carry agent-written text
     case 'dispatch': return t?.id === 'server' ? (e.label && /\bt\d+\b/.test(e.label) ? 'dispatches a turn' : 'dispatches work') : t?.id === 'providers' ? 'starts a Codex run' : t?.kind === 'tool' && /^[\w.-]+$/.test(t.id) ? `runs ${t.id}${fail}` : t?.kind === 'workflow' ? 'runs a workflow' : `runs a command${fail}`;
     case 'turn': return 'produces a turn';
@@ -165,8 +177,8 @@ export function edgeSummary(e, nameOf = (x) => x) {
   }
 }
 // Bundled edges (same pair): the count, then the latest summary, with the distinct objects when they differ.
-export function bundleSummary(items, nameOf = (x) => x) {
-  const sums = items.map((e) => edgeSummary(e, nameOf)), latest = sums[sums.length - 1];
+export function bundleSummary(items, nameOf = (x) => x, opTitle = (x) => x) {
+  const sums = items.map((e) => edgeSummary(e, nameOf, opTitle)), latest = sums[sums.length - 1];
   if (items.length === 1) return latest;
   const verb = latest.split(' ')[0], same = sums.every((s) => s.split(' ')[0] === verb);
   if (same && (verb === 'reads' || verb === 'writes')) { const objs = [...new Set(sums.map((s) => s.slice(verb.length + 1)))]; return `${verb} ${items.length} file${items.length === 1 ? '' : 's'}: ${objs.join(', ')}`; }

@@ -5,7 +5,8 @@ const $ = (s) => document.querySelector(s);
 const h = (tag, attrs = {}, ...kids) => { const n = document.createElement(tag); for (const [k, v] of Object.entries(attrs || {})) if (v != null) k === 'on' ? Object.entries(v).forEach(([e, f]) => n.addEventListener(e, f)) : k === 'class' ? (n.className = v) : n.setAttribute(k, v);
   for (const c of kids.flat()) if (c != null && c !== false) n.append(c instanceof Node ? c : String(c)); return n; };
 const get = (u) => fetch(u).then((r) => (r.ok ? r.json() : r.json().then((j) => Promise.reject(Error(j.error || r.status)))));
-const KIND = { human: '#e6edf3', coordinator: '#58a6ff', critic: '#c297ff', labeler: '#3fd0c9', engineer: '#56d364', reviewer: '#f0883e', writer: '#d2a8ff', driver: '#8fb3d9', server: '#9aa7b4', provider: '#7d8590', artifact: '#59636e', unknown: '#7d8590' };
+const KIND = { human: '#e6edf3', coordinator: '#58a6ff', critic: '#c297ff', labeler: '#3fd0c9', engineer: '#56d364', reviewer: '#f0883e', writer: '#d2a8ff', driver: '#8fb3d9', server: '#9aa7b4', provider: '#7d8590', artifact: '#59636e', unknown: '#7d8590',
+  partner: '#ffa657', operator: '#79c0ff', housekeeper: '#a5d6a7', secretary: '#f2cc60', prompter: '#ff7b72', experimenter: '#7ee787', session: '#8b949e', external: '#e3b341' };
 const COL = { cap: '#7cc4ff', der: '#b39cff', inf: '#8b949e', ok: '#4fd18b', amber: '#f0b429', red: '#ff5c5c', dim: '#3a434d', fg: '#c9d1d9' };
 const fmtT = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + 'Z';
 const short = (p = '') => p.replace(/^.*\/coordination\//, '').replace(/^.*\/prompt-knowledge\//, 'pk/').replace(/^.*\/\.room-data\//, 'rd/').replace(/^\/Users\/[^/]+\//, '~/');
@@ -154,7 +155,7 @@ function draw(t) {
     ctx.globalAlpha = 1; for (const { ed } of items) { const [px, py] = qpt(a, c, b, ed.p); ctx.fillStyle = ed.fail ? COL.red : col; ctx.beginPath(); ctx.arc(px, py, ed.fail ? 3.5 : 2.6, 0, 7); ctx.fill(); }
     ctx.restore();
     // edge label: plain-words summary at the curve's midpoint (active edges only; the full text is in the tooltip)
-    const summary = bundleSummary(items.map((x) => x.e), nameOf), [lx, ly] = qpt(a, c, b, 0.5), hovered = S.hover?.sel?.id === lead.id;
+    const summary = bundleSummary(items.map((x) => x.e), nameOf, opTitleOf), [lx, ly] = qpt(a, c, b, 0.5), hovered = S.hover?.sel?.id === lead.id;
     ctx.font = '9px system-ui'; ctx.textAlign = 'center'; const label = hovered ? summary : fit(summary, 170), tw = ctx.measureText(label).width;
     ctx.globalAlpha = Math.max(0.55, alpha); ctx.fillStyle = '#0d1014cc'; ctx.fillRect(lx - tw / 2 - 2, ly - 9, tw + 4, 12); ctx.fillStyle = fail ? COL.red : '#c9d1d9'; ctx.fillText(label, lx, ly); ctx.globalAlpha = 1; ctx.textAlign = 'left';
     hits.push({ pts: [0, 0.2, 0.4, 0.6, 0.8, 1].map((k) => qpt(a, c, b, k)), tip: `${nameOf(lead.actor.id)}: ${summary}`, sel: { type: 'event', id: lead.id } });
@@ -181,7 +182,7 @@ function draw(t) {
     if (a.permanent) ctx.fillText(fit(nm, 150), x, y + r + 11);
     else { const parts = nm.split(' · '), l1 = parts.length > 2 ? parts[parts.length - 1] : nm, l2 = parts.length > 2 ? parts.slice(0, 2).join(' · ') : '';
       ctx.fillText(fit(l1, cell), x, y + r + 11); if (l2) { ctx.fillStyle = '#6b7682'; ctx.fillText(fit(l2, cell), x, y + r + 22); } }
-    if (!a.permanent && state !== 'ended') { ctx.fillStyle = state === 'active' ? col : '#6b7682'; ctx.font = '9px ui-monospace,Menlo,monospace'; ctx.fillText(state, x, y + r + 33); }
+    if (!a.permanent && state !== 'ended') { ctx.fillStyle = state === 'active' ? col : '#6b7682'; ctx.font = '9px ui-monospace,Menlo,monospace'; ctx.fillText(a.unregistered && state === 'unknown' ? 'unregistered' : state, x, y + r + (a.unregistered ? 22 : 33)); }
     ctx.restore();
     hits.push({ x, y, r: r + 4, tip: `${nm} · ${state}${s?.outcome ? ' · ' + s.outcome : ''}${a.permanent ? '' : ' · double-click to follow'}`, sel: { type: 'actor', id: a.id } }); }
   if (S.sel?.type === 'actor') { const p = S.L.pos.get(S.sel.id); if (p && shown(S.sel.id)) { const [x, y] = P(p); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.arc(x, y, 22, 0, 7); ctx.stroke(); ctx.setLineDash([]); } }
@@ -266,9 +267,15 @@ function actorCard(id) {
     kv([['kind', a.kind], ['label', a.label !== a.name ? a.label : ''], ['parent', a.parent ? nameOf(a.parent) + (a.parentInferred ? ' (inferred)' : '') : ''], ['operation', a.operation ? opTitleOf(a.operation) : ''],
     ['children', kids.length || ''], ['spawned', spawn ? `${spawn.ts} ${spawn.provenance}` : a.permanent ? 'permanent' : 'no spawn event (unknown)'], ['ended', end ? `${end.ts} (${end.tsSource})` : a.permanent ? '' : 'no end event'],
     ['events', Object.entries(verbs).map(([k, v]) => `${k} ${v}`).join(' · ')], ['provenance', Object.entries(prov).map(([k, v]) => `${k} ${v}`).join(' · ')], ['failures', fails || ''],
-    ['cost', cost ? Object.entries(cost).filter(([, v]) => v != null).map(([k, v]) => `${k} ${v}`).join(' · ') : '']]),
+    ['cost', cost ? Object.entries(cost).filter(([, v]) => v != null).map(([k, v]) => `${k} ${v}`).join(' · ') : ''],
+    ['registration', a.unregistered ? 'unregistered: run office/bin/register-session <role> in that session' : ''],
+    ['sessions', a.sessions?.length ? sessionsList(a.sessions) : '']]),
     (end || spawn) && !a.permanent ? expandBtn(() => get('/api/expand/event/' + (end || spawn).id).then((r) => r.sections), 'Expand: prompt, files read, output', () => get('/api/expand/event/' + (end || spawn).id + '/prose').then((r) => r.sections)) : '', evList(own));
 }
+// a role node's sessions in order; each later one is the previous one's successor (a rotation, fork or new session)
+const VIA = { registry: 'registered', title: 'by its Desktop title', primary: 'the pre-O4 coordinator', codex: 'Codex session', none: 'unregistered' };
+const sessionsList = (ss) => h('div', { class: 'sessions' }, ss.map((x, i) => h('div', {}, h('span', { class: 'mono' }, x.id.slice(0, 8)), ` ${x.from.slice(0, 16).replace('T', ' ')} → ${x.to.slice(0, 16).replace('T', ' ')} · ${VIA[x.via] || x.via}`,
+  i ? h('span', { class: 'note' }, ` · successor of ${ss[i - 1].id.slice(0, 8)}`) : '')));
 const evList = (evs) => h('details', { open: evs.length < 40 ? '' : null }, h('summary', {}, `${evs.length} events`), h('div', { class: 'rows' }, evs.slice(-400).map((e) => row(e, false, false))));
 // Expand (second click) shows checked content; agent prose stays a stub until "Show unverified agent text" (third click).
 function expandBtn(load, label = 'Expand', loadProse = null) {
@@ -302,10 +309,26 @@ function setFilter(ids, label) {
 const SVGNS = 'http://www.w3.org/2000/svg';
 const sv = (tag, attrs = {}, ...kids) => { const n = document.createElementNS(SVGNS, tag); for (const [k, v] of Object.entries(attrs)) if (v != null) k === 'on' ? Object.entries(v).forEach(([e, f]) => n.addEventListener(e, f)) : n.setAttribute(k, v); for (const c of kids.flat()) if (c != null) n.append(c instanceof Node ? c : document.createTextNode(String(c))); return n; };
 const chipOf = (o) => h('span', { class: 'chip ' + (o === 'no-go' ? 'nogo' : /go/.test(o) ? 'go' : 'other') }, o === 'no-go' ? 'NO-GO' : o === 'go' ? 'GO' : o);
+// O4: loops between roles (A → B → A, A → B → C → A), counted with the same direct/heuristic split as the steps
+function roleLoopsView(rl) {
+  const out = [h('h2', {}, `Role loops (${rl?.loops.length || 0})`), h('div', { class: 'sub' }, `${rl?.handoffs || 0} hand-offs between roles. A loop closes when the work comes back to the role that started it. Direct: every hand-off recorded explicitly (delivered message, logged hand-off); heuristic otherwise. Click a loop to filter the floor.`)];
+  for (const l of rl?.loops || []) {
+    const W = 118, H = 30, gap = 34, n = l.roles.length - 1, width = n * (W + gap) + 30, top = 34, svg = sv('svg', { width, height: top + H + 12, viewBox: `0 0 ${width} ${top + H + 12}` });
+    svg.append(sv('defs', {}, sv('marker', { id: 'rh', markerWidth: 8, markerHeight: 8, refX: 6, refY: 3, orient: 'auto' }, sv('path', { d: 'M0,0 L6,3 L0,6 Z', fill: '#f0b429' }))));
+    l.roles.slice(0, n).forEach((r, i) => { const x = 10 + i * (W + gap);
+      if (i) svg.append(sv('path', { class: 'wf-loop', d: `M${x - gap + 2} ${top + H / 2} L${x - 3} ${top + H / 2}`, 'marker-end': 'url(#rh)' }));
+      svg.append(sv('g', { class: 'wf-step done' + (l.direct ? '' : ' heur') }, sv('rect', { x, y: top, width: W, height: H, rx: 5 }), sv('text', { x: x + 8, y: top + 19 }, fitText(nameOf(r), 16)))); });
+    const x0 = 10 + W / 2, x1 = 10 + (n - 1) * (W + gap) + W / 2;
+    svg.append(sv('path', { class: 'wf-loop', d: n > 1 ? `M${x1} ${top} C ${x1} ${top - 26}, ${x0} ${top - 26}, ${x0} ${top}` : `M${x0 + 20} ${top} C ${x0 + 40} ${top - 26}, ${x0 - 40} ${top - 26}, ${x0 - 20} ${top}`, 'marker-end': 'url(#rh)' }),
+      sv('text', { x: 14, y: 12, class: 'wf-loop-label' }, `×${l.count}: ${l.direct} direct, ${l.heuristic} heuristic`));
+    out.push(h('div', { class: 'rows', on: { click: () => setFilter(l.events, l.title) } }, h('div', {}, l.title + ' → back')), svg);
+  }
+  return out;
+}
+const fitText = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 async function workflowView(box) {
-  if (S.op === '*') return box.replaceChildren(h('div', { class: 'sub' }, 'Pick an operation to see its workflow.'));
-  const { workflow: w } = await get('/api/workflow?op=' + encodeURIComponent(S.op));
-  if (!w) return box.replaceChildren(h('div', { class: 'sub' }, 'No workflow template applies to this operation.'));
+  const { workflow: w } = await get('/api/workflow?op=' + encodeURIComponent(S.op || '*'));
+  if (!w || !w.template) return box.replaceChildren(h('div', { class: 'sub' }, S.op === '*' ? 'All operations: role loops only. Pick an operation to see its workflow steps.' : 'No workflow template applies to this operation: role loops only.'), ...roleLoopsView(w?.roleLoops));
   const out = [h('h2', {}, `${w.template.title} — ${opTitleOf(S.op)}`), h('div', { class: 'sub' }, w.template.about || '', ' · outline = template, solid = run, dashed = heuristic match, solid border = direct match. Click a step to filter the floor.')];
   for (const r of w.rounds) {
     const W = 128, H = 38, gap = 16, steps = r.steps, width = steps.length * (W + gap) + 20, top = 46;
@@ -327,7 +350,8 @@ async function workflowView(box) {
   }
   out.push(h('h2', {}, `Unplanned (${w.unplanned.length})`), h('div', { class: 'sub' }, 'Events that fit no step, or more than one (never assigned arbitrarily).'),
     h('div', { class: 'rows' }, w.unplanned.map((u) => { const e = S.byId.get(u.id) || (S.base || []).find((x) => x.id === u.id);
-      return h('div', { on: { click: () => e && select({ type: 'event', id: u.id }) } }, h('span', { class: 't' }, u.ts.slice(0, 19).replace('T', ' '), ' '), e ? narrate(e, nameOf, opTitleOf) : u.id, h('span', { class: 'note' }, `  [${u.reason}${u.candidates ? ': ' + u.candidates.join(' | ') : ''}]`)); })));
+      return h('div', { on: { click: () => e && select({ type: 'event', id: u.id }) } }, h('span', { class: 't' }, u.ts.slice(0, 19).replace('T', ' '), ' '), e ? narrate(e, nameOf, opTitleOf) : u.id, h('span', { class: 'note' }, `  [${u.reason}${u.candidates ? ': ' + u.candidates.join(' | ') : ''}]`)); })),
+    ...roleLoopsView(w.roleLoops));
   box.replaceChildren(...out);
 }
 async function roomsView(box) {
@@ -343,9 +367,9 @@ async function roomsView(box) {
 }
 async function archiveView(box) {
   const search = h('input', { placeholder: 'search titles…', value: S.archiveQ || '' }), list = h('div', {});
-  const load = async () => { S.archiveQ = search.value; const { items, now } = await get(`/api/archive?op=${encodeURIComponent(S.op)}&q=${encodeURIComponent(search.value)}`), fresh = Date.parse(now) - 15 * 60e3;
+  const load = async () => { S.archiveQ = search.value; const { items, now, status } = await get(`/api/archive?op=${encodeURIComponent(S.op)}&q=${encodeURIComponent(search.value)}`), fresh = Date.parse(now) - 15 * 60e3;
     let op = null; const rows = [];
-    for (const a of items) { if (a.operation !== op) { op = a.operation; rows.push(h('div', { class: 'op' }, op ? opTitleOf(op) : 'no operation')); }
+    for (const a of items) { if (a.operation !== op) { op = a.operation; rows.push(h('div', { class: 'op' }, op ? opTitleOf(op) : 'no operation', status?.[op] ? h('div', { class: 'note status' }, 'Status: ' + status[op]) : '')); }
       rows.push(h('div', { class: 'row' + (Date.parse(a.mtime) > fresh || Date.parse(a.mtime) > S.loadedAt ? ' new' : ''), title: a.path },
         h('a', { on: { click: () => select({ type: 'file', id: a.path }) } }, a.title), h('span', { class: 'note' }, a.mtime.slice(0, 16).replace('T', ' ')),
         a.writer ? h('a', { on: { click: () => select({ type: 'event', id: a.writer.id }) } }, `written by ${a.writer.actor}`) : h('span', { class: 'note' }, 'writer not seen'),

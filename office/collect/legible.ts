@@ -10,11 +10,21 @@ const cap = (s: string) => s ? s[0].toUpperCase() + s.slice(1) : s;
 const phase = (p = '') => p === 'labeling' ? 'labeling' : p.startsWith('run-') ? `${p.slice(4) === 'compare' || p.slice(4) === 'comparison' ? 'comparison' : p.slice(4)} run` : p;
 export function opShort(id = '') {
   const [d, sub, ph] = id.split('/');
+  if ((d === 'work' || d === 'research') && sub) return sub.replace(/[-_]+/g, ' ');
   if (!/^\d{4}-\d\d-\d\d$/.test(d || '')) return id;
   return [sub, phase(ph)].filter(Boolean).join(' ') || 'coordination';
 }
+// work/<thing>: the README's first heading; its **Status** line is shown only in the archive (workStatus).
+const readme = (allow: Allowlist | undefined, root: string | undefined, thing: string) => allow && root && /^\w[\w.-]*$/.test(thing) ? allow.read(path.join(root, thing, 'README.md'), undefined, 8000).content || '' : '';
+export function workStatus(id: string, allow: Allowlist) {
+  const [d, thing] = id.split('/'); if (d !== 'work' || !thing) return undefined;
+  const m = readme(allow, allow.roots.work, thing).match(/^\*\*Status[^*]*\*\*:?\s*(.*)$/m); if (!m) return undefined;
+  const t = m[1].replace(/\*\*|`/g, '').trim(); return (t.length > 200 ? t.slice(0, 199) + '…' : t) || undefined;
+}
 export function opTitle(id: string, allow?: Allowlist) {
   const [d, sub, ph] = id.split('/');
+  if (d === 'work' && sub) return { title: readme(allow, allow?.roots.work, sub).match(/^#\s+(.+?)\s*#*\s*$/m)?.[1]?.slice(0, 80) || cap(sub.replace(/[-_]+/g, ' ')), packet: undefined as string | undefined };
+  if (d === 'research' && sub) return { title: 'Research · ' + sub.replace(/[-_]+/g, ' '), packet: undefined as string | undefined };
   if (!/^\d{4}-\d\d-\d\d$/.test(d || '')) return { title: id.replace(/[-_]/g, ' ').replace(/\bo(\d)\b/i, 'O$1').replace(/^./, c => c.toUpperCase()), packet: undefined as string | undefined };
   const when = `${Number(d.slice(8))} ${MON[Number(d.slice(5, 7)) - 1]}`;
   let packet: string | undefined;
@@ -29,7 +39,8 @@ export function opTitle(id: string, allow?: Allowlist) {
 const VERB = /^(label|review|build|write|draft|fix|run|check|verify|research|implement|investigate|inspect|summari[sz]e|audit)\s+/i;
 export function displayName(a: Actor, ev: OfficeEvent[]) {
   if (a.permanent) return a.label;
-  if (a.id.startsWith('session:')) return 'Claude session ' + a.id.slice(8);
+  if (a.id.startsWith('session:')) return `session ‹${a.id.slice(8)}› (unregistered)`;
+  if (a.id.startsWith('peer:')) return a.label;
   const fam = a.id.startsWith('agent:') ? 'Claude' : /^(codex|codexrun|critic):/.test(a.id) ? 'Codex' : a.id.startsWith('driver:') ? '' : a.id.startsWith('session:') ? 'Claude session' : '';
   const kind = a.kind === 'unknown' ? 'agent' : a.kind;
   let subject = a.label || '';

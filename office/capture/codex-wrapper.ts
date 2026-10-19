@@ -19,7 +19,7 @@ const tmp = oi < 0 && !oeq ? fs.mkdtempSync(path.join(os.tmpdir(), 'office-codex
 const outFile = oi >= 0 ? rest[oi + 1] : oeq ? oeq.split('=').slice(1).join('=') : path.join(tmp, 'last-message.txt');
 const where = codexCwd(rest, process.cwd()), cwd = where.cwd; // null: undetermined, every command output of this run is withheld
 const codexArgs = ['exec', ...(resume ? ['resume'] : []), '--json', ...(tmp ? ['-o', outFile] : []), ...rest];
-const run = crypto.randomUUID(), meta = { role: process.env.OFFICE_CODEX_ROLE || undefined, label: process.env.OFFICE_CODEX_LABEL || undefined, operation: process.env.OFFICE_OPERATION || undefined, cwd: cwd || undefined, ...(cwd ? {} : { cwdUnknown: where.reason }) };
+const run = crypto.randomUUID(), meta = { role: process.env.OFFICE_CODEX_ROLE || undefined, label: process.env.OFFICE_CODEX_LABEL || undefined, operation: process.env.OFFICE_OPERATION || undefined, caller: /^[0-9a-f-]{36}$/i.test(process.env.CLAUDE_CODE_SESSION_ID || '') ? process.env.CLAUDE_CODE_SESSION_ID : undefined, cwd: cwd || undefined, ...(cwd ? {} : { cwdUnknown: where.reason }) };
 let allow: Allowlist | null = null; try { allow = new Allowlist(cfg); } catch (e) { countError(dir, 'codex', e); }
 let seq = 0;
 const spool = (make: () => object | null) => { try { const r = allow && make(); if (r) append(dir, 'codex', [r]); } catch (e) { countError(dir, 'codex', e); } };

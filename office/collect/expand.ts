@@ -3,7 +3,9 @@ import path from 'node:path';
 import type { Collected } from './index';
 import type { OfficeEvent } from './types';
 import { codexSessions, execOf } from './codex';
-import { maskerFor } from './rooms';
+import { maskerFor, opFolderOf } from './rooms';
+// a driver file's masker: its operation folder (coordination/<day>/<sub> or work/<thing>); outside one, masked by default
+const maskerOf = (c: Collected, file: string) => { const op = opFolderOf(c.allow, file), dir = op?.dir || path.dirname(file); return maskerFor(c.allow, dir, op?.id || path.relative(c.allow.cfg.coordination, dir)); };
 import { clip, toolSections, commandSections, type Section } from './withhold';
 export type { Section };
 
@@ -43,6 +45,9 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       if ((name === 'Agent' || name === 'Task') && e.target?.id.startsWith('agent:')) out.push(...actorContext(c, e.target.id, false));
       break;
     }
+    // a message from another session as the receiver got it (the sender's transcript was not found)
+    case 'claude-peer-delivery': { const r = json(lineAt(c, d.file, d.lines[0])); add('message (as delivered)', String(r?.origin?.body ?? textOf(r?.message?.content))); break; }
+    case 'research': { const r = allow.read(d.file); r.allowed ? add(e.label === 'commission' ? 'commission' : 'research delivered', r.content, { path: r.path, allowed: true }) : out.push({ title: 'research file', path: r.path, allowed: false, note: 'off-allowlist: path only' }); break; }
     case 'claude-text': { const r = json(lineAt(c, d.file, d.lines[0])); add('text', textOf(r?.message?.content), { prose: true }); break; }
     case 'claude-user': { const r = json(lineAt(c, d.file, d.lines[0])); add('message', textOf(r?.message?.content)); break; }
     case 'claude-notification': { const r = json(lineAt(c, d.file, d.lines[0])); add('message', textOf(r?.message?.content), { prose: true }); break; } // carries the agent's result text
@@ -72,7 +77,7 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       const isProse = (r: any, x: Section) => !!x.prose || PROSE_ITEMS.test(r?.item?.type || '') || r?.type === 'error' || r?.type === 'turn.failed' || r?.kind === 'end'
         || r?.event === 'SubagentStop' || /^(final message|final output|launch result|reasoning|thinking)/.test(x.title);
       const resec = (x: Section, r?: any) => { const y = x.text != null ? { ...x, ...clip(String(x.text)) } : { ...x }; if (isProse(r, x)) y.prose = true; else delete y.prose; return y; };
-      if (d.kind === 'spool-codex' && d.key && (e.verb === 'spawn' || e.verb === 'end')) {
+      if (d.kind === 'spool-codex' && d.key && (e.verb === 'spawn' || e.verb === 'end' || (e.verb === 'message' && e.target?.id === 'critic'))) {
         const all = fileLines(c, d.file).map(json).filter((r: any) => r?.run === d.key).sort((a: any, b: any) => a.seq - b.seq);
         const st = all.find((r: any) => r.kind === 'start'); if (st) out.push({ title: 'run', ...clip(`role: ${st.role || '?'}  label: ${st.label || '?'}\ncwd: ${st.cwd}\nargs: ${(st.args || []).join(' ')}`) });
         for (const r of all) for (const x of (r.item?.sections || r.sections || []) as Section[]) out.push(resec({ ...x, title: r.kind === 'end' ? 'final message' : x.title }, r));
@@ -87,7 +92,7 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
     case 'handoff': { add('events.jsonl line', lineAt(c, d.file, d.lines[0])); const ref = d.extra?.ref as string | undefined; if (ref) { const r = allow.read(ref); r.allowed ? add('ref', r.content, { path: r.path, allowed: true, note: r.missing ? 'missing' : 'current file content' }) : out.push({ title: 'ref', path: r.path, allowed: false, note: 'off-allowlist: path only' }); } break; }
     case 'manifest': case 'manifest-turn': {
       // before a valid unmask record: only the turn's shape, with the trajectory masked (ids such as speakerId can tell arms apart)
-      const raw = lineAt(c, d.file, d.lines[0]), r = json(raw), dir = path.dirname(d.file), M = maskerFor(allow, dir, path.relative(allow.cfg.coordination, dir));
+      const raw = lineAt(c, d.file, d.lines[0]), r = json(raw), M = maskerOf(c, d.file);
       if (!M.masked) add('manifest line', d.kind === 'manifest' ? raw : JSON.stringify(r, null, 1));
       else add('manifest line (arms masked until a valid unmask record)', JSON.stringify({ at: r?.at, kind: r?.kind, ...(r?.traj ? { room: M.name(r.traj) } : {}), ...(r?.turn != null ? { turn: r.turn } : {}), ...(r?.pick?.label ? { speaker: r.pick.label } : {}), ...(r?.phase ? { phase: r.phase } : {}) }, null, 1));
       if (d.kind === 'manifest') break;
@@ -100,7 +105,7 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       }
       break;
     }
-    case 'driver-state': { const dir = path.dirname(d.file), M = maskerFor(allow, dir, path.relative(allow.cfg.coordination, dir));
+    case 'driver-state': { const M = maskerOf(c, d.file);
       if (M.masked) out.push({ title: 'driver-state.json', path: d.file, allowed: false, note: 'masked until a valid unmask record (it maps rooms to arms)' }); else add('driver-state.json', allow.read(d.file).content); break; }
     case 'missing-label': gate('the transcript that has no label', d.file, allow.read(d.file).content); break;
     case 'gap': { const of = c.byId.get(String(d.extra?.of)); out.push({ title: 'gap', note: `${e.label}. Neither side is presumed complete.` }); if (of) out.push(...expandEvent(c, of).sections.map(s => ({ ...s, title: 'unmatched: ' + s.title }))); break; }

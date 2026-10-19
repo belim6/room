@@ -4,6 +4,7 @@ import { Sink, type Verb } from './types';
 import { readLines } from './claude';
 import { verdictOf } from './codex';
 import type { Allowlist } from './privacy';
+import { isRole, ensureRole } from './roles';
 
 // coordination/events.jsonl: the coordinator's own handoff log {at,from,to,kind,ref,note,operation?}.
 export const HANDOFF_VERB: Record<string, Verb> = { packet: 'message', build: 'dispatch', dispatch: 'dispatch', review: 'message', result: 'message', blocked: 'block', block: 'block',
@@ -11,6 +12,8 @@ export const HANDOFF_VERB: Record<string, Verb> = { packet: 'message', build: 'd
 export const WHO: Record<string, string> = { claude: 'coordinator', coordinator: 'coordinator', deniz: 'deniz', critic: 'critic', stable: 'server', server: 'server' };
 export function who(sink: Sink, name: string) {
   const id = WHO[name]; if (id) return id;
+  if (isRole(name)) return ensureRole(sink, name); // O4: the role nodes (partner, operator, …); kinds and labels come from roles.ts
+  if (name === 'psri') return 'psri';
   const a = 'role:' + name; sink.actor({ id: a, kind: /review/.test(name) ? 'reviewer' : /engineer/.test(name) ? 'engineer' : /label/.test(name) ? 'labeler' : /writer/.test(name) ? 'writer' : 'unknown', label: name, parent: 'coordinator', parentInferred: true });
   return a;
 }

@@ -4,9 +4,9 @@ import { collect, type Collected } from './collect/index';
 import { config, redact, redactDeep, type Config } from './collect/privacy';
 import { expandEvent } from './collect/expand';
 import { hideProse, onlyProse } from './collect/withhold';
-import { matchWorkflow, stepNames } from './collect/workflow';
-import { fans, maskerFor, maskDeep } from './collect/rooms';
-import { fileTitle } from './collect/legible';
+import { matchWorkflow, stepNames, roleLoops } from './collect/workflow';
+import { fans, maskerFor, maskDeep, opFolderOf } from './collect/rooms';
+import { fileTitle, workStatus } from './collect/legible';
 import type { OfficeEvent } from './collect/types';
 import { Live, type LiveOpts } from './live';
 
@@ -42,13 +42,12 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   app.get('/api/expand/event/:id/prose', (req, res) => { const e = data.byId.get(req.params.id); if (!e) return res.status(404).json({ error: 'No such event' }); const x = expandEvent(data, e); send(res, { id: e.id, source: x.source, sections: onlyProse(x.sections) }); });
   app.get('/api/expand/file', (req, res) => { const p = String(req.query.path || ''); if (!p) return res.status(400).json({ error: 'path required' });
     // a driver's own records map rooms to arms: path only until the operation has a valid unmask record
-    const c = data.allow.canonical(p), rel = path.relative(data.allow.roots.coordination, c).split(path.sep);
-    if (rel.length === 3 && /^\d{4}-\d\d-\d\d$/.test(rel[0]) && /^(manifest-[\w-]+\.jsonl|driver-state\.json|checkpoints\.json)$/i.test(rel[2])) {
-      const dir = path.dirname(c); if (maskerFor(data.allow, dir, rel.slice(0, 2).join('/')).masked) return send(res, { path: c, allowed: false, note: 'masked until a valid unmask record (it maps rooms to arms)' }); }
+    const c = data.allow.canonical(p), op = opFolderOf(data.allow, c);
+    if (op && /^(manifest-[\w-]+\.jsonl|driver-state\.json|checkpoints\.json)$/i.test(path.basename(c)) && maskerFor(data.allow, op.dir, op.id).masked) return send(res, { path: c, allowed: false, note: 'masked until a valid unmask record (it maps rooms to arms)' });
     send(res, data.allow.read(p)); });
   // ---- O3: workflow graph, experiment fans, archive (metadata tier: ids, names, counts, outcomes; no content) ----------
-  const opDirOf = (op: string) => /^\d{4}-\d\d-\d\d\/[^/]+/.test(op) ? path.join(data.allow.roots.coordination, op.split('/').slice(0, 2).join('/')) : '';
-  app.get('/api/workflow', (req, res) => { const op = String(req.query.op || ''); const w = op && op !== '*' ? matchWorkflow(data, op) : null; send(res, { workflow: w, stepNames: stepNames() }); });
+  const opDirOf = (op: string) => /^\d{4}-\d\d-\d\d\/\w[\w.-]*(\/|$)/.test(op) ? path.join(data.allow.roots.coordination, op.split('/').slice(0, 2).join('/')) : /^work\/\w[\w.-]*(\/|$)/.test(op) ? path.join(data.allow.roots.work, op.split('/')[1]) : '';
+  app.get('/api/workflow', (req, res) => { const op = String(req.query.op || ''); const w = !op ? null : op === '*' ? { op, template: null, rounds: [], unplanned: [], roleLoops: roleLoops(data, '*') } : matchWorkflow(data, op); send(res, { workflow: w, stepNames: stepNames() }); });
   app.get('/api/rooms', (req, res) => { const op = String(req.query.op || ''), dir = opDirOf(op); send(res, { op, runs: dir ? fans(data.allow, data.events, dir, op.split('/').slice(0, 2).join('/')) : [] }); });
   app.get('/api/archive', (req, res) => {
     const op = String(req.query.op || ''), q = String(req.query.q || '').toLowerCase(), titles = new Map<string, string>(), by = new Map<string, OfficeEvent[]>();
@@ -58,7 +57,9 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
       const evs = by.get(a.path) || [], w = evs.find(e => e.verb === 'write'), readers = evs.filter(e => e.verb === 'read' && e !== w);
       return { path: a.path, title: fileTitle(a.path, data.allow, titles), group: a.group, mtime: a.mtime, operation: a.operation, size: a.size, writer: w ? ref(w) : null, readers: readers.slice(-20).map(ref), readerCount: readers.length };
     }).filter(a => !q || a.title.toLowerCase().includes(q)).sort((a, b) => (a.operation || '').localeCompare(b.operation || '') || a.mtime.localeCompare(b.mtime));
-    send(res, { op, items: items.slice(0, 3000), now: new Date().toISOString() });
+    // work/<thing>: the README's **Status** line, shown with the operation in the archive
+    const status = Object.fromEntries([...new Set(items.map(a => a.operation).filter((o): o is string => !!o && /^work\/[^/]+$/.test(o)))].map(o => [o, workStatus(o, data.allow)]).filter(([, v]) => v));
+    send(res, { op, items: items.slice(0, 3000), now: new Date().toISOString(), status });
   });
   app.get('/api/recollect', (_req, res) => { live.full(); send(res, { collectedAt: data.collectedAt, events: data.events.length }); });
   // Server-sent events: upserts/removals as the live tier merges them. Same metadata tier and redaction as /api/events.

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Registers this Claude session's role with the Office (roles/sessions.json). Usage: register-session <role> [--note "…"]
+here="$(cd "$(dirname "$0")" && pwd)"
+exec node --no-warnings "$here/../capture/register-session.ts" "$@"

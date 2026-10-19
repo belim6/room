@@ -3,16 +3,17 @@ import path from 'node:path';
 import { Sink } from './types';
 import { readLines } from './claude';
 import type { Allowlist } from './privacy';
-import { maskerFor } from './rooms';
+import { maskerFor, opFolderOf } from './rooms';
 
 // Driver manifests (**/manifest-<phase>.jsonl) and driver-state.json: intents, turns, stops, sweeps.
 export function parseManifest(file: string, sink: Sink, allow: Allowlist) {
   const stat = { kind: 'driver-manifest', path: file, records: 0, events: 0, unparsed: 0 }; sink.sources.push(stat);
-  const rel = path.relative(allow.cfg.coordination, path.dirname(file)), phase = path.basename(file).replace(/^manifest-|\.jsonl$/g, '');
+  const op = opFolderOf(allow, file), phase = path.basename(file).replace(/^manifest-|\.jsonl$/g, '');
+  const rel = op?.id.startsWith('work/') ? path.relative(path.dirname(allow.roots.work), path.dirname(file)) : path.relative(allow.cfg.coordination, path.dirname(file));
   const id = `driver:${rel}/${phase}`; sink.actor({ id, kind: 'driver', label: `driver ${rel} ${phase}`, parent: 'coordinator', parentInferred: true, source: file });
   const me = sink.ref(id); let started = false, last = '';
   // arm names in trajectory ids are masked unless the operation folder has a valid unmask record (rooms.ts)
-  const lines = readLines(file, sink), M = maskerFor(allow, path.dirname(file), rel), T = (t: unknown) => M.name(String(t));
+  const lines = readLines(file, sink), M = maskerFor(allow, op?.dir || path.dirname(file), op?.id || rel), T = (t: unknown) => M.name(String(t));
   const push = (e: any, i: number, kind = 'manifest') => { stat.events++; sink.push({ actor: me, source: file, provenance: 'captured', tsSource: 'record', detailRef: { kind, file, lines: [i] }, hints: [file], ...e }); };
   lines.forEach((l, i) => {
     if (!l.trim()) return; let r: any; try { r = JSON.parse(l); } catch { stat.unparsed++; return; }
@@ -38,7 +39,7 @@ export function parseDriverState(file: string, sink: Sink, allow: Allowlist) {
   const stat = { kind: 'driver-state', path: file, records: 1, events: 0, unparsed: 0 }; sink.sources.push(stat);
   let s: any; try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { stat.unparsed = 1; return; }
   if (s.stopped) {
-    const rel = path.relative(allow.cfg.coordination, path.dirname(file)), at = Number.isFinite(Date.parse(s.stopped.at)) ? s.stopped.at : undefined, ts = new Date(at || fs.statSync(file).mtime).toISOString();
+    const rel = opFolderOf(allow, file)?.id || path.relative(allow.cfg.coordination, path.dirname(file)), at = Number.isFinite(Date.parse(s.stopped.at)) ? s.stopped.at : undefined, ts = new Date(at || fs.statSync(file).mtime).toISOString();
     sink.push({ ts, actor: sink.ref('coordinator'), verb: 'block', target: { kind: 'actor', id: 'server' }, detailRef: { kind: 'driver-state', file, lines: [] }, source: file, provenance: at ? 'captured' : 'inferred',
       tsSource: at ? 'record' : 'mtime', label: `driver stopped (${rel})`, outcome: 'stopped', hints: [file] }); stat.events++;
   }

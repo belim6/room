@@ -40,7 +40,7 @@ export function scopeEvents(c: Collected, opId: string): OfficeEvent[] {
 interface Rec { id: string; ts: string; match: 'direct' | 'heuristic'; outcome?: string; evidence?: string }
 interface Round { n: number; pos: number; plan?: string; matches: Map<string, Rec[]> }
 export function matchWorkflow(c: Collected, opId: string, tpls = loadTemplates()) {
-  const tpl = templateFor(opId, tpls); if (!tpl) return null;
+  const tpl = templateFor(opId, tpls); if (!tpl) return { op: opId, template: null, rounds: [], unplanned: [], roleLoops: roleLoops(c, opId) };
   const idx = new Map(tpl.steps.map((s, i) => [s.id, i]));
   // {phase}: the sub-operation's suffix (…/labeling-compare → compare; …/labeling → any)
   const phaseRe = (opId.split('/').pop()!.match(/^(?:labeling|run)-([\w]+)$/) || [])[1] || '[^/]*', fileRe = (f: string) => new RegExp(f.replace(/\{phase\}/g, phaseRe), 'i');
@@ -109,7 +109,36 @@ export function matchWorkflow(c: Collected, opId: string, tpls = loadTemplates()
       loops: tpl.loops.map(l => { const m = l.count.flatMap(s => r.matches.get(s) || []).sort((a, b) => a.ts.localeCompare(b.ts));
         return { id: l.id, title: l.title, count: m.length, direct: m.filter(x => x.match === 'direct').length, heuristic: m.filter(x => x.match === 'heuristic').length, verdicts: m.map(x => x.outcome || '?') }; }),
     })),
-    unplanned,
+    unplanned, roleLoops: roleLoops(c, opId),
   };
+}
+
+// ---- O4: role-to-role loops -------------------------------------------------------------------------------------------------
+// Hand-offs between role nodes (session messages, events.jsonl hand-offs, requests to the critic and its rulings, research
+// commissions and deliveries). A loop closes when the work comes back to the role that started a chain: A → B → A, or
+// A → B → C → A (e.g. prompter → PSRI → prompter, partner → critic → partner). Same matching rule as the steps: an edge is
+// direct when it is recorded explicitly (an events.jsonl hand-off, or a send whose delivery was found by msg_id), heuristic
+// otherwise (resolved by name, socket or time); a loop is direct only if every edge is. Chains are at most four roles long.
+const ROLEISH = /^(coordinator|critic|psri|deniz|role:[a-z]+|session:[0-9a-f]+)$/;
+export function roleHandoffs(c: Collected, opId: string) {
+  const inOp = (o?: string) => opId === '*' || (!!o && (o === opId || o.startsWith(opId + '/')));
+  return c.events.filter(e => inOp(e.operation) && e.target?.kind === 'actor' && ROLEISH.test(e.actor.id) && ROLEISH.test(e.target.id) && e.actor.id !== e.target.id
+    && !(e.actor.id === 'deniz' || e.target.id === 'deniz') && (e.verb === 'message' || e.verb === 'dispatch' || (e.verb === 'end' && e.actor.id === 'critic')))
+    .sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq)
+    .map(e => ({ id: e.id, ts: e.ts, from: e.actor.id, to: e.target!.id, answer: e.verb === 'end' || /^(peer-reply|delivery|review|result)$/.test(e.label || ''), match: (e.detailRef.kind === 'handoff' || (e.provenance === 'captured' && (e.outcome === 'delivered' || e.verb === 'end' || e.label === 'packet'))) ? 'direct' as const : 'heuristic' as const }));
+}
+export function roleLoops(c: Collected, opId: string) {
+  const hs = roleHandoffs(c, opId), open: { path: string[]; edges: typeof hs }[] = [], loops = new Map<string, { roles: string[]; count: number; direct: number; heuristic: number; events: string[]; last: string }>();
+  for (const h of hs) {
+    const ch = [...open].reverse().find(x => x.path[x.path.length - 1] === h.from);
+    if (ch && ch.path[0] === h.to) {
+      open.splice(open.indexOf(ch), 1); const edges = [...ch.edges, h], key = [...ch.path, h.to].join('>'), direct = edges.every(x => x.match === 'direct');
+      const l = loops.get(key) || loops.set(key, { roles: [...ch.path, h.to], count: 0, direct: 0, heuristic: 0, events: [], last: '' }).get(key)!;
+      l.count++; direct ? l.direct++ : l.heuristic++; l.events.push(...edges.map(x => x.id)); l.last = h.ts; continue;
+    }
+    if (ch && !ch.path.includes(h.to) && ch.path.length < 4) { ch.path.push(h.to); ch.edges.push(h); } else if (!h.answer) open.push({ path: [h.from, h.to], edges: [h] }); // a ruling, reply or delivery never starts a chain
+  }
+  const name = (id: string) => c.actors.get(id)?.label || id;
+  return { handoffs: hs.length, loops: [...loops.values()].sort((a, b) => b.count - a.count || a.last.localeCompare(b.last)).map(l => ({ ...l, title: l.roles.map(name).join(' → ') })) };
 }
 export const stepNames = (tpls = loadTemplates()) => Object.fromEntries(tpls.map(t => [t.id, t.steps.map(s => s.id)]));

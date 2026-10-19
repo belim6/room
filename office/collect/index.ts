@@ -8,12 +8,13 @@ import { parseEvents } from './events';
 import { parseManifest, parseDriverState } from './manifests';
 import { parseSpool, spoolFiles, dedupeKey } from './spool';
 import { opTitle, displayName, fileTitle } from './legible';
+import { Identity, readRegistry, roleFromTitle, ensureRole, sessionActorId, UUID } from './roles';
 
 export interface Coverage { captured: number; derived: number; inferred: number; gaps: number; events: number }
 export interface Operation { id: string; label: string; title: string; packet?: string; inferred: boolean; start: string; end: string; coverage: Coverage; actors: number;
   workflow: { template: { source: 'template'; steps: string[] }; run: { source: 'events'; steps: { step: string; first: string; count: number }[] } } }
 export interface Collected { cfg: Config; allow: Allowlist; events: OfficeEvent[]; byId: Map<string, OfficeEvent>; actors: Map<string, Actor>; operations: Operation[];
-  artifacts: Artifact[]; sources: Sink['sources']; lineIndex: Map<string, number[]>; collectedAt: string; primarySession?: string }
+  artifacts: Artifact[]; sources: Sink['sources']; lineIndex: Map<string, number[]>; collectedAt: string; primarySession?: string; ident: Identity }
 
 const walk = (root: string, pick: (p: string) => boolean, out: string[] = []) => {
   if (!fs.existsSync(root)) return out;
@@ -25,30 +26,101 @@ export const TEMPLATE = ['plan', 'critic', 'dispatch', 'label', 'lock', 'unmask'
 
 export function collect(cfg: Config = config()): Collected {
   const sink = new Sink(), allow = new Allowlist(cfg);
-  // 1-3. Claude transcripts: sessions (the primary one is the coordinator), then their sub-agents.
+  // 0. Who is who: the role registry (roles/sessions.json, written only by office/bin/register-session).
+  const reg = readRegistry(cfg.sessions);
+  if (cfg.sessions) sink.sources.push({ kind: 'role-registry', path: cfg.sessions, records: reg.entries.length, events: 0, unparsed: reg.skipped, ...(reg.error ? { note: reg.error } : {}) });
+  // 1-3. Claude transcripts: sessions in the order they began (a fork's copied history then counts once, in its parent), then
+  // their sub-agents. Each record's actor is its session's role at that moment (roles.ts); the pre-O4 primary is the coordinator.
   const sessions = fs.existsSync(cfg.claudeProject) ? fs.readdirSync(cfg.claudeProject).filter(n => n.endsWith('.jsonl')).sort() : [];
   const primary = cfg.coordinatorSession ? cfg.coordinatorSession.replace(/\.jsonl$/, '') + '.jsonl'
     : sessions.map(n => ({ n, s: fs.statSync(path.join(cfg.claudeProject, n)).size })).sort((a, b) => b.s - a.s)[0]?.n;
-  for (const n of sessions) {
-    const id = n === primary ? 'coordinator' : 'session:' + n.slice(0, 8);
-    if (id !== 'coordinator') sink.actor({ id, kind: 'coordinator', label: 'session ' + n.slice(0, 8), source: path.join(cfg.claudeProject, n) });
-    parseClaude({ file: path.join(cfg.claudeProject, n), actorId: id, session: true, primary: n === primary }, sink, allow);
+  const primarySession = primary?.replace(/\.jsonl$/, ''), ident = new Identity(reg.entries, primarySession);
+  const began = new Map(sessions.map(n => [n, firstTs(path.join(cfg.claudeProject, n))]));
+  for (const n of [...sessions].sort((a, b) => began.get(a)!.localeCompare(began.get(b)!) || a.localeCompare(b))) {
+    const sid = n.replace(/\.jsonl$/, '');
+    parseClaude({ file: path.join(cfg.claudeProject, n), actorId: n === primary ? 'coordinator' : sessionActorId(sid), session: true, primary: n === primary, ...(UUID.test(sid) ? { sessionId: sid, ident } : {}) }, sink, allow);
   }
-  for (const n of sessions) parseSubagents(path.join(cfg.claudeProject, n.replace(/\.jsonl$/, ''), 'subagents'), sink, allow);
-  // 4. Handoff log. 5. Codex logs (derived). 6. Driver manifests.
-  parseEvents(path.join(cfg.coordination, 'events.jsonl'), sink, allow);
-  const coordFiles = walk(cfg.coordination, () => true);
-  for (const f of coordFiles.filter(f => /\/labels\/codex\/[^/]+\.log$/.test(f))) parseCodexLog(f, 'labeler', sink, allow);
-  for (const f of coordFiles.filter(f => /\/critic\/[^/]+\.log$/.test(f))) parseCodexLog(f, 'critic', sink, allow);
-  for (const f of coordFiles.filter(f => /\/manifest-[^/]+\.jsonl$/.test(f))) parseManifest(f, sink, allow);
-  for (const f of coordFiles.filter(f => /\/driver-state\.json$/.test(f))) parseDriverState(f, sink, allow);
-  missingLabels(cfg, sink, coordFiles);
+  for (const n of sessions) { const sid = n.replace(/\.jsonl$/, ''); parseSubagents(path.join(cfg.claudeProject, sid, 'subagents'), sink, allow, UUID.test(sid) ? (ts: string) => ident.actorAt(sid, ts) : undefined); }
+  // 4. Handoff log. 5. Codex logs (derived). 6. Driver manifests. coordination/ (or archive/coordination/), work/, and the
+  // top-level homes the reorganisation moves things to (critic/, events.jsonl, briefing/).
+  const coordFiles = walk(cfg.coordination, () => true), workFiles = walk(allow.roots.work, () => true), researchFiles = walk(allow.roots.research, () => true);
+  const extraFiles = (cfg.extra || []).flatMap(d => walk(d, () => true));
+  for (const f of [path.join(cfg.coordination, 'events.jsonl'), ...(cfg.room ? [path.join(cfg.room, 'events.jsonl')] : [])].filter((f, i) => i === 0 || fs.existsSync(f))) parseEvents(f, sink, allow);
+  const driverFiles = [...coordFiles, ...workFiles];
+  for (const f of driverFiles.filter(f => /\/labels\/codex\/[^/]+\.log$/.test(f))) parseCodexLog(f, 'labeler', sink, allow);
+  for (const f of [...coordFiles, ...extraFiles].filter(f => /\/critic\/[^/]+\.log$/.test(f))) parseCodexLog(f, 'critic', sink, allow);
+  for (const f of driverFiles.filter(f => /\/manifest-[^/]+\.jsonl$/.test(f))) parseManifest(f, sink, allow);
+  for (const f of driverFiles.filter(f => /\/driver-state\.json$/.test(f))) parseDriverState(f, sink, allow);
+  missingLabels(cfg, sink, driverFiles);
   // 7. Live spool (hooks + office-codex): transcript copies of the same tool call win.
-  const primarySession = primary?.replace(/\.jsonl$/, ''), known = new Set(sink.events.map(dedupeKey).filter(Boolean));
-  for (const f of spoolFiles(allow.roots.spool)) parseSpool(f, sink, allow, { primarySession, known });
+  const known = new Set(sink.events.map(dedupeKey).filter(Boolean));
+  for (const f of spoolFiles(allow.roots.spool)) parseSpool(f, sink, allow, { primarySession, known, ident });
+  // 8. Between sessions: messages (send ↔ delivery by msg_id) and the research hand-offs to and from PSRI.
+  linkPeers(sink, ident); linkCriticCallers(sink);
+  researchEvents(sink, allow, researchFiles);
+  ident.apply(sink);
   const { events, ops } = finalize(sink, cfg, allow, true);
-  const artifacts: Artifact[] = [...coordFiles, ...walk(cfg.promptKnowledge, () => true)].map(p => { const st = fs.statSync(p); return { path: p, group: allow.group(p), size: st.size, mtime: st.mtime.toISOString(), operation: ops.of(p) }; });
-  return { cfg, allow, events, byId: new Map(events.map(e => [e.id, e])), actors: sink.actors, operations: operations(events, sink.actors, allow), artifacts, sources: sink.sources, lineIndex: sink.lineIndex, collectedAt: new Date().toISOString(), primarySession };
+  const artifacts: Artifact[] = [...coordFiles, ...walk(cfg.promptKnowledge, () => true), ...workFiles, ...researchFiles, ...extraFiles].map(p => { const st = fs.statSync(p); return { path: p, group: allow.group(p), size: st.size, mtime: st.mtime.toISOString(), operation: ops.of(p) }; });
+  return { cfg, allow, events, byId: new Map(events.map(e => [e.id, e])), actors: sink.actors, operations: operations(events, sink.actors, allow), artifacts, sources: sink.sources, lineIndex: sink.lineIndex, collectedAt: new Date().toISOString(), primarySession, ident };
+}
+const firstTs = (f: string) => { try { const fd = fs.openSync(f, 'r'), b = Buffer.alloc(65536), n = fs.readSync(fd, b, 0, b.length, 0); fs.closeSync(fd); return (b.toString('utf8', 0, n).match(/"timestamp":\s*"([^"]+)"/) || [])[1] || '9999'; } catch { return '9999'; } };
+
+// Messages between Claude sessions. A send (SendMessage to a name or a session socket) and its delivery (a peer-origin record
+// in the receiver's transcript) share a msg_id: linked, the edge is captured on both ends. A send with no delivery found is
+// resolved by the recipient's name (a role, or a Desktop title one session carried) or socket (learned from linked pairs or
+// the registry): derived. A delivery with no send found (the sender's transcript lives elsewhere) becomes the event: derived.
+export function linkPeers(sink: Sink, ident: Identity) {
+  const byMsg = new Map(sink.peerDeliveries.filter(d => d.msgId).map(d => [d.msgId, d])), used = new Set<object>();
+  for (const s of sink.peerSends) { const d = byMsg.get(String(s.detailRef.extra?.msgId || '')), sess = s.detailRef.extra?.session as string | undefined; if (d && sess && d.from) ident.socket(d.from, sess, d.ts); }
+  const resolve = (to: string, ts: string) => { const sess = ident.sessionFor(to); if (sess) return ident.actorAt(sess, ts); const r = roleFromTitle(to); return r ? ensureRole(sink, r) : undefined; };
+  const unresolved = () => { sink.actor({ id: 'peer:unresolved', kind: 'session', label: 'another session (not found)', unregistered: true }); return 'peer:unresolved'; };
+  for (const s of sink.peerSends) {
+    const ex = s.detailRef.extra || {}, d = byMsg.get(String(ex.msgId || ''));
+    if (d) { used.add(d); s.target = { kind: 'actor', id: d.receiver }; if (!s.outcome || s.outcome === 'ok') s.outcome = 'delivered'; s.detailRef.extra = { ...ex, delivery: { file: d.file, line: d.line } }; continue; }
+    const t = resolve(String(ex.to || ''), s.ts); s.target = { kind: 'actor', id: t || unresolved() }; s.provenance = 'derived'; s.derived = true;
+  }
+  for (const d of sink.peerDeliveries) {
+    if (used.has(d)) continue;
+    const from = (d.from && resolve(d.from, d.ts)) || resolve(d.name, d.ts) || unresolved();
+    const e = sink.push({ ts: d.ts, actor: sink.ref(from), verb: 'message', target: { kind: 'actor', id: d.receiver }, detailRef: { kind: 'claude-peer-delivery', file: d.file, lines: [d.line] }, source: d.file,
+      provenance: 'derived', tsSource: 'record', label: 'peer', outcome: 'delivered', hints: d.body ? [d.body] : [] });
+    sink.peerSends.push(e);
+  }
+  // a message back to a session that wrote to this one in the last 24 h is a reply
+  const all = sink.peerSends.filter(e => e.target?.id && !e.target.id.startsWith('peer:')).sort((a, b) => a.ts.localeCompare(b.ts));
+  all.forEach((e, i) => { if (all.slice(0, i).some(p => p.actor.id === e.target!.id && p.target!.id === e.actor.id && Date.parse(e.ts) - Date.parse(p.ts) < 864e5)) e.label = 'peer-reply'; });
+}
+
+// Critic runs spooled before office-codex recorded its caller: the caller is the session whose Bash call launched it (a command
+// naming office-codex, ask-critic or `codex exec`, at most 3 minutes before the run started). Derived; else it stays inferred.
+export function linkCriticCallers(sink: Sink) {
+  const launches = sink.events.filter(e => /^(coordinator|role:[a-z]+|session:[0-9a-f]+)$/.test(e.actor.id) && (e.verb === 'dispatch' || e.verb === 'read' || e.verb === 'write') && (e.hints || []).some(h => /office-codex|ask-critic|\bcodex\s+exec\b/.test(h)));
+  for (const m of sink.events.filter(e => e.detailRef.kind === 'spool-codex' && e.verb === 'message' && e.target?.id === 'critic' && e.provenance === 'inferred')) {
+    const t = Date.parse(m.ts), l = launches.filter(e => Date.parse(e.ts) <= t + 5e3 && t - Date.parse(e.ts) <= 180e3).sort((a, b) => b.ts.localeCompare(a.ts))[0]; if (!l) continue;
+    m.actor = l.actor; m.provenance = 'derived'; m.derived = true;
+    for (const e of sink.events) if (e.detailRef.kind === 'spool-codex' && e.detailRef.key === m.detailRef.key && e.verb === 'end' && e.actor.id === 'critic') e.target = { kind: 'actor', id: l.actor.id };
+  }
+}
+
+// research/ (A5): PSRI commissions and syntheses copied into the repo. PSRI's own work (~/Desktop/PSRI) is off the allowlist,
+// so only the hand-offs show: a session writing a commission or brief into research/<topic>/ messages PSRI; a synthesis
+// appearing in that folder is PSRI delivering back to whoever commissioned it (matched by folder).
+const COMMISSION = /(commission|brief|request|question)/i, SYNTHESIS = /(synthesis|report|findings|answer|result)/i;
+export function researchEvents(sink: Sink, allow: Allowlist, files: string[]) {
+  const root = allow.roots.research, topic = (p: string) => { const r = path.relative(root, p).split(path.sep); return r.length >= 2 && r[0] !== '..' ? r[0] : ''; };
+  const titles = new Map<string, string>(), by = new Map<string, OfficeEvent[]>();
+  const writes = sink.events.filter(e => e.verb === 'write' && e.target?.path && topic(e.target.path) && COMMISSION.test(path.basename(e.target.path))).sort((a, b) => a.ts.localeCompare(b.ts));
+  for (const w of writes) {
+    if ((by.get(topic(w.target!.path!)) || []).some(x => x.actor.id === w.actor.id && x.target?.path === w.target!.path)) continue; // one hand-off per file per writer
+    const e = sink.push({ ts: w.ts, actor: w.actor, verb: 'message', target: { kind: 'actor', id: 'psri', path: w.target!.path, title: fileTitle(w.target!.path!, allow, titles) }, detailRef: { kind: 'research', file: w.target!.path!, lines: [], extra: { of: w.id } },
+      source: w.source, provenance: w.provenance === 'captured' ? 'derived' : 'inferred', tsSource: w.tsSource, label: 'commission', hints: [w.target!.path!] });
+    (by.get(topic(w.target!.path!)) || by.set(topic(w.target!.path!), []).get(topic(w.target!.path!))!).push(e);
+  }
+  for (const f of files.filter(f => topic(f) && SYNTHESIS.test(path.basename(f)) && !COMMISSION.test(path.basename(f)))) {
+    const ts = fs.statSync(f).mtime.toISOString(), cs = by.get(topic(f)) || [], c = [...cs].reverse().find(x => x.ts <= ts) || cs[0];
+    sink.push({ ts, actor: sink.ref('psri'), verb: c ? 'message' : 'write', target: c ? { kind: 'actor', id: c.actor.id, path: f, title: fileTitle(f, allow, titles) } : { kind: 'file', id: f, path: f },
+      detailRef: { kind: 'research', file: f, lines: [] }, source: f, provenance: 'inferred', tsSource: 'mtime', label: 'delivery', hints: [f] });
+  }
 }
 
 // Shared tail of a full collect and of a live increment: actor refs, operations, (cross-check), order, groups, names.
@@ -86,6 +158,8 @@ function missingLabels(cfg: Config, sink: Sink, files: string[]) {
 export function inferOperations(cfg: Config, sink: Sink, allow: Allowlist) {
   const coord = allow.roots.coordination, subs = new Map<string, string[]>();
   if (fs.existsSync(coord)) for (const d of fs.readdirSync(coord).filter(n => /^20\d\d-\d\d-\d\d$/.test(n))) subs.set(d, fs.readdirSync(path.join(coord, d)).filter(n => fs.lstatSync(path.join(coord, d, n)).isDirectory()));
+  const dirs = (root: string) => { try { return new Set(fs.readdirSync(root).filter(n => /^\w[\w.-]*$/.test(n) && fs.lstatSync(path.join(root, n)).isDirectory())); } catch { return new Set<string>(); } };
+  const things = dirs(allow.roots.work), topics = dirs(allow.roots.research);
   const norm = (s: string) => s.split(coord + '/').join('coordination/').split(cfg.coordination + '/').join('coordination/').replace(/~\/dev\/room\/coordination\//g, 'coordination/');
   // a day-level packet belongs to a sub-operation its file name names, or else its first heading names ("# Date room, step 0")
   const headings = new Map<string, string>();
@@ -101,6 +175,9 @@ export function inferOperations(cfg: Config, sink: Sink, allow: Allowlist) {
         out.push(`${date}/${seg}${r}`);
       } else { const sub = pickSub(date, seg); out.push(sub ? `${date}/${sub}` : date); }
     }
+    // O4: work/<thing>/ and research/<topic>/ folders are operations of their own
+    for (const m of s.matchAll(/(?:^|[^\w.-])work\/(\w[\w.-]*)/g)) if (things.has(m[1])) out.push('work/' + m[1]);
+    for (const m of s.matchAll(/(?:^|[^\w.-])research\/(\w[\w.-]*)\//g)) if (topics.has(m[1])) out.push('research/' + m[1]);
     for (const m of s.matchAll(/critic\/critic-(20\d\d-\d\d-\d\d)-([\w-]+)/g)) { const sub = pickSub(m[1], m[2]); out.push(sub ? `${m[1]}/${sub}` : m[1]); }
     // cd'd into an operation folder, then relative label paths
     if (out.length && /(^|[\s;'"])(labels|blind)\/|codexlabel/.test(s)) { const base = out.find(o => o.split('/').length === 2); if (base) out.push(base + '/labeling'); }
@@ -121,14 +198,17 @@ export function inferOperations(cfg: Config, sink: Sink, allow: Allowlist) {
   for (const [e, o] of evOps) if (o && !sink.actors.get(e.actor.id)?.permanent && !e.actor.id.startsWith('session:')) (byActor.get(e.actor.id) || byActor.set(e.actor.id, []).get(e.actor.id)!).push(o);
   for (const [id, os] of byActor) { const a = sink.actors.get(id); if (a) a.operation = deepest(os); }
   for (const [id, op] of pinned) { const a = sink.actors.get(id); if (a) a.operation = op; }
-  let prev: OfficeEvent | undefined;
+  // a session's event with no path of its own rides on that session's previous operation for 2 minutes (Deniz's prompt: the
+  // session he wrote to). Per session node, so two sessions working side by side don't lend each other operations.
+  const prev = new Map<string, OfficeEvent>(), lane = (e: OfficeEvent) => e.actor.id === 'deniz' ? (e.target?.id || 'deniz') : e.actor.id;
+  const sessionLike = (id: string) => id === 'coordinator' || id === 'deniz' || id.startsWith('role:') || id.startsWith('session:');
   for (const e of sink.events.slice().sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq)) {
-    if (e.operation) { prev = e; continue; }
-    const own = sink.actors.get(e.actor.id), tgt = e.target?.kind === 'actor' ? sink.actors.get(e.target.id) : undefined;
+    if (e.operation) { if (sessionLike(e.actor.id)) prev.set(lane(e), e); continue; }
+    const own = sink.actors.get(e.actor.id), tgt = e.target?.kind === 'actor' ? sink.actors.get(e.target.id) : undefined, p = prev.get(lane(e));
     const op = (!own?.permanent && own?.operation) || (e.verb === 'spawn' && tgt?.operation) || evOps.get(e)
-      || (e.actor.id === 'coordinator' || e.actor.id === 'deniz' ? (prev && prev.operation && Date.parse(e.ts) - Date.parse(prev.ts) < 120e3 ? prev.operation : undefined) : undefined);
+      || (sessionLike(e.actor.id) ? (p && p.operation && Date.parse(e.ts) - Date.parse(p.ts) < 120e3 ? p.operation : undefined) : undefined);
     if (op) { e.operation = op; e.opInferred = true; }
-    if (e.actor.id === 'coordinator' || e.actor.id === 'deniz') prev = e;
+    if (sessionLike(e.actor.id)) prev.set(lane(e), e);
   }
   return { of: (p: string) => deepest(opsIn(p)) };
 }

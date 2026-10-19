@@ -42,7 +42,7 @@ test('workflow: the date v1 cycle (two rounds, critic loops ×2 and ×3, lock fr
   const arts = [{ path: `${C}/68-boring-baseline-plan.md`, operation: '2026-10-17/date', mtime: '2026-10-17T17:00:00Z' }, { path: `${C}/71-date-v1-proposal.md`, operation: '2026-10-17/date', mtime: '2026-10-17T20:06:00Z' },
     { path: `${D}/labels-lock-baseline.json`, operation: '2026-10-17/date', mtime: '2026-10-17T17:43:23Z' }, { path: `${D}/labels-lock-compare.json`, operation: '2026-10-17/date', mtime: '2026-10-18T19:12:25Z' }];
   const w = matchWorkflow(fake(ev, arts), '2026-10-17/date')!;
-  assert.equal(w.template.id, 'experiment-cycle'); assert.equal(w.rounds.length, 2);
+  assert.equal(w.template!.id, 'experiment-cycle'); assert.equal(w.rounds.length, 2);
   const st = (r: number, id: string) => w.rounds[r].steps.find((s: any) => s.id === id)!;
   assert.deepEqual(w.rounds.map((r: any) => r.loops[0].verdicts), [['no-go', 'go'], ['no-go', 'no-go', 'go']]);
   assert.deepEqual(w.rounds.map((r: any) => r.loops[0].count), [2, 3]);

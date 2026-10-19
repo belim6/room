@@ -6,6 +6,7 @@ import { parseEvents } from './collect/events';
 import { parseManifest } from './collect/manifests';
 import { readSpoolTail, buildSpool, spoolFiles, dedupeKey, type SpoolState } from './collect/spool';
 import type { Config } from './collect/privacy';
+import { UUID } from './collect/roles';
 
 // Live tier. Every second: re-parse the append-only small sources that changed (spool, events.jsonl, driver manifests)
 // and merge the new or changed events by id. Transcripts are the fallback and cross-check: when they change, a full
@@ -34,7 +35,8 @@ export class Live {
     const c = this.get().allow.roots, out = [...spoolFiles(c.spool), path.join(c.coordination, 'events.jsonl')];
     const scan = (d: string, depth: number) => { let ns: string[] = []; try { ns = fs.readdirSync(d); } catch { return; }
       for (const n of ns) { const p = path.join(d, n); if (/^manifest-.*\.jsonl$/.test(n)) out.push(p); else if (depth && /^[\w.-]+$/.test(n) && !n.includes('.')) { try { if (fs.lstatSync(p).isDirectory()) scan(p, depth - 1); } catch {} } } };
-    scan(c.coordination, 2);
+    scan(c.coordination, 2); scan(c.work, 3);
+    const top = this.cfg.room && path.join(this.cfg.room, 'events.jsonl'); if (top && fs.existsSync(top)) out.push(top);
     return out;
   }
   // Session transcripts and every sub-agent transcript (subagents/**/agent-*.jsonl): sizes and mtimes. Any change, including
@@ -66,11 +68,12 @@ export class Live {
     for (const [k, a] of data.actors) sink.actors.set(k, { ...a });
     const known = new Set(data.events.filter(e => !fileSet.has(e.source)).map(dedupeKey).filter(Boolean));
     for (const f of files) {
-      if (allow.isSpool(f)) { const st = readSpoolTail(f, this.spool.get(f)); this.spool.set(f, st); sink.lineIndex.set(f, st.offs); buildSpool(f, st, sink, allow, { primarySession: data.primarySession, known }); }
+      if (allow.isSpool(f)) { const st = readSpoolTail(f, this.spool.get(f)); this.spool.set(f, st); sink.lineIndex.set(f, st.offs); buildSpool(f, st, sink, allow, { primarySession: data.primarySession, known, ident: data.ident }); }
       else if (path.basename(f) === 'events.jsonl') parseEvents(f, sink, allow);
       else parseManifest(f, sink, allow);
     }
     for (const [f, offs] of sink.lineIndex) data.lineIndex.set(f, offs);
+    data.ident.apply(sink);
     const { events } = finalize(sink, this.cfg, allow, false), fresh = new Set(events.map(e => e.id));
     // a re-parsed file replaces its own earlier events: one that is gone (e.g. a spawn whose target was not yet known) is removed
     const removes = data.events.filter(e => fileSet.has(e.source) && !fresh.has(e.id)).map(e => e.id);
@@ -86,11 +89,13 @@ export class Live {
   }
   // Room's ID-only live notices (optional; off unless OFFICE_ROOM_FEED is set). A turn notice becomes a server `turn`.
   notice(n: { kind?: string; id?: string; branch?: string; at?: string }) {
-    if (n.kind !== 'turns' || !n.id || !/^[\w-]{1,128}$/.test(n.id)) return;
-    const data = this.get(), op = data.events.find(e => e.verb === 'write' && e.target?.kind === 'branch' && e.target.id === n.branch)?.operation;
+    // Codex privacy P1 (O3 release): only Room's own record ids (UUIDs) pass; any other field of the notice is ignored, so a
+    // notice cannot carry turn text or a trajectory id into the metadata tier. The label is fixed.
+    if (n.kind !== 'turns' || !UUID.test(String(n.id || ''))) return;
+    const data = this.get(), op = UUID.test(String(n.branch || '')) ? data.events.find(e => e.verb === 'write' && e.target?.kind === 'branch' && e.target.id === n.branch)?.operation : undefined;
     const sink = new Sink(); for (const [k, a] of data.actors) sink.actors.set(k, { ...a });
-    sink.push({ ts: new Date(n.at && Number.isFinite(Date.parse(n.at)) ? n.at : Date.now()).toISOString(), actor: sink.ref('server'), verb: 'turn', target: { kind: 'turn', id: n.id, group: 'rooms' },
-      ...(op ? { operation: op, opInferred: true } : {}), detailRef: { kind: 'room-notice', file: 'room-feed', lines: [], key: n.id }, source: 'room-feed', provenance: 'captured', tsSource: 'record', label: 'turn (live)' });
+    sink.push({ ts: new Date(typeof n.at === 'string' && Number.isFinite(Date.parse(n.at)) ? n.at : Date.now()).toISOString(), actor: sink.ref('server'), verb: 'turn', target: { kind: 'turn', id: String(n.id).toLowerCase(), group: 'rooms' },
+      ...(op ? { operation: op, opInferred: true } : {}), detailRef: { kind: 'room-notice', file: 'room-feed', lines: [], key: String(n.id).toLowerCase() }, source: 'room-feed', provenance: 'captured', tsSource: 'record', label: 'turn (live)' });
     this.merge(sink.events, [], sink.actors);
   }
   merge(incoming: OfficeEvent[], removes: string[], actors: Map<string, Actor>) {
