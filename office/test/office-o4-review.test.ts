@@ -73,8 +73,8 @@ test('blinding 1+2: a masked operation\'s room records (turns, attempts, outcome
   assert.ok(!/·v[01]·/.test(all), 'no ·vN· token anywhere'); assert.ok(!/date·v[01]\b/.test(all), 'arm tokens from key.json masked by pattern');
   assert.ok(all.includes('date·arm-masked·checkpoint'), 'the packet\'s checkpoint name is masked, not dropped');
   // the turn's Expand: shape only, the room message path-only
-  const c = collect(cfg), turnEv = c.events.find(e => e.detailRef.kind === 'manifest-turn')!, s = await serve(cfg);
-  try { const x = await s.json('/api/expand/event/' + turnEv.id); assert.ok(x.sections.some((y: any) => y.title === 'room message' && y.allowed === false)); assert.ok(!JSON.stringify(x).includes('TURN-TEXT')); } finally { await s.close(); }
+  const c = collect(cfg), turnEv = c.events.find(e => e.detailRef.kind === 'manifest-turn-masked')!, s = await serve(cfg);
+  try { const x = await s.json('/api/expand/event/' + turnEv.id); assert.ok(x.sections.some((y: any) => y.title === 'driver record' && y.allowed === false)); assert.ok(!JSON.stringify(x).includes('TURN-TEXT')); } finally { await s.close(); }
   // a record created later that names a masked room is masked by content
   const late = id(); W(path.join(rd, 'attempts', late + '.json'), { id: late, branch: rooms[0].room, body: MARK.sys0 }); assert.equal(c.allow.read(path.join(rd, 'attempts', late + '.json')).allowed, false);
   // unmasked: the records become readable
@@ -125,4 +125,58 @@ test('allowsDir 9: work/ and research/ apply the same excluded segments as the r
   for (const r of [cfg.work!, cfg.research!]) { fs.mkdirSync(path.join(r, 't/node_modules/x'), { recursive: true }); fs.mkdirSync(path.join(r, 't/.git'), { recursive: true }); fs.mkdirSync(path.join(r, 't/saves'), { recursive: true }); fs.mkdirSync(path.join(r, 't/ok'), { recursive: true });
     assert.equal(a.allowsDir(path.join(r, 't/ok')), true);
     for (const bad of ['t/node_modules/x', 't/.git', 't/saves', 't/.env.d']) assert.equal(a.allowsDir(path.join(r, bad)), false, bad); }
+});
+
+test('no cache window: a masked folder created between two requests is indexed before the second answer, which reveals nothing', async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'office-window-'))); roots.push(root);
+  const rd = path.join(root, 'rd'), coord = path.join(root, 'coordination'), cfg: Config = { home: path.join(root, 'home'), room: root, coordination: coord, promptKnowledge: path.join(root, 'pk'), roomData: rd,
+    claudeProject: path.join(root, 'proj'), spool: path.join(root, 'spool'), repos: [], work: path.join(root, 'work'), research: path.join(root, 'research'), extra: [] };
+  fs.mkdirSync(path.join(coord, '2026-10-19'), { recursive: true }); fs.mkdirSync(cfg.claudeProject, { recursive: true });
+  const room = id(), rec = path.join(rd, 'branches', room + '.json'); W(rec, { id: room, name: 'late·v1·r01', state: { system: MARK.sys1 } });
+  const s = await serve(cfg);
+  try {
+    assert.equal((await s.json(file(rec))).allowed, true, 'no masked operation yet: readable');
+    // within any cache window: a new operation folder with restricted/ and a manifest naming that room
+    const dir = path.join(coord, '2026-10-19/late'); W(path.join(dir, 'restricted/key.json'), { 'T-9': { traj: 'late·v1·r01', branch: room } });
+    W(path.join(dir, 'manifest-late.jsonl'), JSON.stringify({ at: '2026-10-19T12:00:00Z', kind: 'branch', traj: 'late·v1·r01', branch: room }) + '\n');
+    W(path.join(dir, '01-late-notes.md'), '# notes\nroom late·v1·r01\n');
+    const r2 = await s.json(file(rec)), notes = await s.text(file(path.join(dir, '01-late-notes.md'))), man = await s.json(file(path.join(dir, 'manifest-late.jsonl')));
+    assert.equal(r2.allowed, false, 'the room record is path-only on the very next request'); assert.ok(!JSON.stringify(r2).includes(MARK.sys1));
+    assert.equal(man.allowed, false); assert.ok(!/·v1·/.test(notes), 'arm masked in text on the next request');
+    // a room record written after the index was built is masked until the index has classified it
+    const fresh = id(); W(path.join(rd, 'turns', fresh + '.json'), { id: fresh, text: MARK.turn }); assert.equal((await s.json(file(path.join(rd, 'turns', fresh + '.json')))).allowed, false);
+  } finally { await s.close(); }
+});
+
+test('blinding recheck: masked per-turn driver events (requests and completions) never order a pair by arm', async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'office-order-'))); roots.push(root);
+  const coord = path.join(root, 'coordination'), dir = path.join(coord, '2026-10-17/date'), cfg: Config = { home: path.join(root, 'home'), room: root, coordination: coord, promptKnowledge: path.join(root, 'pk'),
+    roomData: path.join(root, 'rd'), claudeProject: path.join(root, 'proj'), spool: path.join(root, 'spool'), repos: [], work: path.join(root, 'work'), research: path.join(root, 'research'), extra: [] };
+  fs.mkdirSync(cfg.claudeProject, { recursive: true }); W(path.join(dir, 'restricted/key.json'), { 'T-1': { traj: 'compare·v0·r01' } });
+  // the real driver's order: within every pair and turn, v0's request goes out first (2 ms earlier, lower line); completions vary
+  const lines: any[] = [], pairs = ['r01', 'r02', 'r03', 'r04', 'r05', 'r06'];
+  for (const p of pairs) for (const arm of ['v0', 'v1']) lines.push({ at: '2026-10-17T20:02:58.000Z', kind: 'branch', traj: `compare·${arm}·${p}`, branch: id() });
+  pairs.forEach((p, i) => [1, 2].forEach(t => { const base = Date.parse('2026-10-17T20:03:00Z') + i * 10e3 + t * 60e3;
+    for (const [k, arm] of ['v0', 'v1'].entries()) lines.push({ at: new Date(base + k * 2).toISOString(), kind: 'intent', traj: `compare·${arm}·${p}`, turn: t, pick: { label: 'Jake' } });
+    for (const [k, arm] of ['v1', 'v0'].entries()) lines.push({ at: new Date(base + 3000 + k * 500 + (i % 2) * 2000 * (k ? -1 : 1)).toISOString(), kind: 'done', traj: `compare·${arm}·${p}`, turn: t, turnId: id() }); }));
+  W(path.join(dir, 'manifest-compare.jsonl'), lines.map(x => JSON.stringify(x)).join('\n') + '\n');
+  const s = await serve(cfg);
+  try {
+    const evs = (await s.json('/api/events?op=*')).events.filter((e: any) => e.source.endsWith('manifest-compare.jsonl'));
+    const driven = evs.filter((e: any) => ['dispatch', 'write', 'turn'].includes(e.verb) && e.target?.id !== 'coordinator');
+    assert.ok(driven.length === 12 + 24 + 24 && driven.every((e: any) => e.detailRef.lines.length === 0), 'no manifest line numbers on masked per-room events');
+    // requests: one time per pair and turn, so the response order is the only order left; it must not follow the arm
+    const key = sha(fs.readFileSync(path.join(dir, 'restricted/key.json'))), h = (t: string) => sha(key + '|' + t);
+    const M = maskerFor(new Allowlist(cfg), dir, '2026-10-17/date'), armOf = new Map(['v0', 'v1'].flatMap(a => pairs.map(p => [M.name(`compare·${a}·${p}`), a] as const)));
+    let v0First = 0, groups = 0;
+    for (const p of pairs) for (const t of [1, 2]) {
+      const g = driven.filter((e: any) => e.verb === 'dispatch' && e.label.startsWith(`compare·${p}·`) && e.label.includes(` t${t} `));
+      assert.equal(g.length, 2); assert.equal(g[0].ts, g[1].ts, 'one coarse time per pair and turn'); groups++;
+      const room = (e: any) => e.label.split(' ')[0] + ' ' + e.label.split(' ')[1];
+      if (armOf.get(room(g[0])) === 'v0') v0First++;
+      assert.deepEqual(g.map(room), ['v0', 'v1'].map(a => `compare·${a}·${p}`).sort((x, y) => h(x).localeCompare(h(y))).map(t => M.name(t)), 'seeded order');
+    }
+    assert.ok(v0First > 0 && v0First < groups, `pair order does not follow the arm (v0 first in ${v0First}/${groups})`);
+    const all = JSON.stringify(evs) + await s.text('/api/rooms?op=2026-10-17/date'); assert.ok(!/·v[01]·/.test(all));
+  } finally { await s.close(); }
 });

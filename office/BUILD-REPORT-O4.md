@@ -224,3 +224,30 @@ These supersede the sections above where they differ. Tests: `office/test/office
 - Records that name a known masked id are always checked on read.
 
 **Results:** `npm run test:office` passes 56 of 56 (5 new tests). `npx tsc -p office` and `npx tsc --noEmit` are clean, and `npm run test:workbench` passes 150 of 150.
+
+## Review fixes, round 2 (after the recheck of 599f02b)
+1. **No cache window** (Codex High).
+   - The 2 s folder list and the 1 s blind index are gone.
+   - Before every `/api/*` response, and before every SSE push, the server runs `refreshBlind`. This is a synchronous layout check over:
+     - the mtimes of every directory under `coordination/` and `work/`, which change when a folder, a `restricted/` dir or a file appears;
+     - the size and mtime of every manifest, driver, template and `restricted/` file of the known operation folders.
+   - If anything is new or changed, the folder list and the index are rebuilt before the answer. The folder list now lives in that state, so `opFolders` and `maskAll` use it too.
+   - **Room records not yet classified:** a `.room-data` record newer than the index is path-only while any operation is masked. When only record directories have changed (no new folders or files), the index is rebuilt at most every 30 s, and those records stay masked until then.
+   - **Cost on real data:** the check takes about 6 ms per request, and a full rebuild about 1.6 s.
+   - **Test:** `no cache window: …`. A masked folder is created between two requests on the same server. On the second request:
+     - the room record is path-only;
+     - the manifest is path-only;
+     - the arm is masked in text;
+     - a record written after the index was built is masked.
+2. **Masked per-turn driver events** (reviewer recheck: in the real compare run, v0's request goes out 1–5 ms earlier and on a lower line in all 180 pair-turns).
+   - While masked, `intent` (dispatch) and `done` events are held back, like the creation events. Requests get one coarse time per pair and turn: the earliest request in that pair-turn.
+   - All per-room driver events lose their line numbers, and members of a pair are emitted in an order seeded by the key's hash. Completion times are kept, since they don't follow the arm.
+   - Masked driver events expand to "driver record: masked until a valid unmask record". Fans link ticks to masked turn events by turn id.
+   - Real data: all 360 compare requests share their pair's time and have no lines.
+   - **Test:** `blinding recheck: …`. The fixture uses the real driver order (v0 first, 2 ms earlier, lower line). It checks that:
+     - no masked per-room event carries a line number;
+     - both requests of every pair-turn share one time;
+     - the response order equals the seeded order;
+     - v0 comes first in some groups and not in others, so the order does not follow the arm.
+
+**Results:** `npm run test:office` passes 58 of 58, `npx tsc -p office` and `npx tsc --noEmit` are clean, and `npm run test:workbench` passes 150 of 150.

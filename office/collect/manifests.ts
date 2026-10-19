@@ -26,8 +26,10 @@ export function parseManifest(file: string, sink: Sink, allow: Allowlist) {
       case 'branch': if (M.masked) { held.push({ ts, r }); return; } return push({ ts, verb: 'write', target: { kind: 'branch', id: String(r.branch) }, label: T(r.traj) }, i);
       case 'phase-start': return push({ ts, verb: 'rule', target: { kind: 'actor', id: 'server' }, label: `phase ${r.phase} start (${(r.trajectories || []).length} rooms)` }, i);
       case 'sweep': return push({ ts, verb: 'rule', target: { kind: 'actor', id: 'server' }, label: `sweep ${r.when}`, outcome: r.ok === false ? 'error' : 'ok' }, i);
-      case 'intent': return push({ ts, verb: 'dispatch', target: { kind: 'actor', id: 'server' }, label: `${T(r.traj)} t${r.turn} → ${r.pick?.label || '?'}` }, i);
-      case 'done': return push({ ts, verb: 'turn', actor: sink.ref('server'), target: { kind: 'turn', id: String(r.turnId) }, label: `${T(r.traj)} t${r.turn}`, outcome: r.error ? 'error' : 'ok' }, i, 'manifest-turn');
+      // masked: the driver sends each pair's requests in arm order (v0 first, lower line): held, then emitted with one coarse
+      // time per pair and turn, no line numbers, in a seeded order (review recheck). Completion times don't follow the arm: kept.
+      case 'intent': if (M.masked) { held.push({ ts, r }); return; } return push({ ts, verb: 'dispatch', target: { kind: 'actor', id: 'server' }, label: `${T(r.traj)} t${r.turn} → ${r.pick?.label || '?'}` }, i);
+      case 'done': if (M.masked) { held.push({ ts, r }); return; } return push({ ts, verb: 'turn', actor: sink.ref('server'), target: { kind: 'turn', id: String(r.turnId) }, label: `${T(r.traj)} t${r.turn}`, outcome: r.error ? 'error' : 'ok' }, i, 'manifest-turn');
       case 'phase-end': { const bad = Object.keys(r.stoppedPairs || {}).length + (r.qualifyingFailures || []).length;
         return push({ ts, verb: bad ? 'block' : 'rule', target: { kind: 'actor', id: 'coordinator' }, label: `phase ${r.phase} end${bad ? ` (${bad} stops/failures)` : ''}`, outcome: bad ? 'stopped' : 'ok' }, i); }
       default:
@@ -35,8 +37,18 @@ export function parseManifest(file: string, sink: Sink, allow: Allowlist) {
         stat.unparsed++;
     }
   });
-  if (held.length) { const t0 = held.map(h => h.ts).sort()[0], seed = M.unmask.keySha256 || 'no-key', h = (t: string) => crypto.createHash('sha256').update(seed + '|' + t).digest('hex');
-    for (const { r } of held.sort((a, b) => h(String(a.r.traj)).localeCompare(h(String(b.r.traj))))) push({ ts: t0, verb: 'write', target: { kind: 'branch', id: String(r.branch) }, label: T(r.traj), tsSource: 'interpolated' }, -1, 'manifest-masked'); }
+  if (held.length) {
+    const seed = M.unmask.keySha256 || 'no-key', h = (t: string) => crypto.createHash('sha256').update(seed + '|' + t).digest('hex'), pairOf = (t: unknown) => { const p = String(t).split('·'); return p.length === 3 ? p[0] + '·' + p[2] : String(t); };
+    const t0 = held.filter(x => x.r.kind === 'branch').map(x => x.ts).sort()[0], coarse = new Map<string, string>();
+    for (const x of held.filter(x => x.r.kind === 'intent')) { const k = pairOf(x.r.traj) + '|' + x.r.turn; if (!coarse.has(k) || x.ts < coarse.get(k)!) coarse.set(k, x.ts); }
+    const timeOf = (x: { ts: string; r: any }) => x.r.kind === 'branch' ? t0 : x.r.kind === 'intent' ? coarse.get(pairOf(x.r.traj) + '|' + x.r.turn)! : x.ts;
+    for (const x of held.sort((a, b) => timeOf(a).localeCompare(timeOf(b)) || h(String(a.r.traj)).localeCompare(h(String(b.r.traj))))) {
+      const r = x.r, ts = timeOf(x);
+      if (r.kind === 'branch') push({ ts, verb: 'write', target: { kind: 'branch', id: String(r.branch) }, label: T(r.traj), tsSource: 'interpolated' }, -1, 'manifest-masked');
+      else if (r.kind === 'intent') push({ ts, verb: 'dispatch', target: { kind: 'actor', id: 'server' }, label: `${T(r.traj)} t${r.turn} → ${r.pick?.label || '?'}`, tsSource: 'interpolated' }, -1, 'manifest-masked');
+      else push({ ts, verb: 'turn', actor: sink.ref('server'), target: { kind: 'turn', id: String(r.turnId) }, label: `${T(r.traj)} t${r.turn}`, outcome: r.error ? 'error' : 'ok' }, -1, 'manifest-turn-masked');
+    }
+  }
   if (started) push({ ts: last, verb: 'end', target: { kind: 'actor', id: 'coordinator' }, label: phase, provenance: 'inferred' }, -1);
 }
 // driver-state.json: only explicit stops become events (the per-turn record duplicates the manifest).

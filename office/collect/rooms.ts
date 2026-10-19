@@ -80,11 +80,8 @@ export const isManifest = (p: string) => /\/manifest-[^/]+\.jsonl$/.test(p);
 export function manifestsIn(opDir: string, _opId?: string) { return walkFiles(opDir, isManifest); }
 // Every operation folder that needs a masker: any folder holding a manifest the collector parses (at any depth), and any
 // coordination/<day>/<sub> or work/<thing> with a restricted/ directory.
-let foldersMemo: { key: string; at: number; v: { dir: string; id: string }[] } | null = null;
-export function opFolders(allow: Allowlist) {
-  const key = allow.roots.coordination + '|' + allow.roots.work; if (foldersMemo && foldersMemo.key === key && Date.now() - foldersMemo.at < 2000) return foldersMemo.v;
-  const v = opFoldersNow(allow); foldersMemo = { key, at: Date.now(), v }; return v;
-}
+// The folder list belongs to the blind state (below): it is rebuilt whenever the cheap layout check sees anything new.
+export function opFolders(allow: Allowlist) { return refreshBlind(allow).folders; }
 function opFoldersNow(allow: Allowlist) {
   const out = new Map<string, { dir: string; id: string }>(), coord = allow.roots.coordination;
   for (const f of [...walkFiles(coord, isManifest), ...walkFiles(allow.roots.work, isManifest)]) {
@@ -130,40 +127,56 @@ export const maskDeep = (allow: Allowlist) => maskDeepWith(maskAll(allow));
 // closed over the branch, revision and turn records those ids reach. A record that names any id in the set is masked too.
 const ROOM_RECORD = /^(turns|attempts|outcomes|revisions|branches)$/i, UUIDS = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 export const isDriverFile = (p: string) => /^(manifest-.+\.jsonl|driver-state\.json|checkpoints?\.json)$|template|checkpoint/i.test(path.basename(p)) && !/\/restricted\//i.test(p);
-let blindCache: { at: number; sig: string; root: string; files: Set<string>; ids: Set<string> } | null = null;
-export function blindIndex(allow: Allowlist, now = Date.now()) {
-  if (blindCache && now - blindCache.at < 1000 && blindCache.root === allow.roots.roomData + allow.roots.coordination) return blindCache; // checked at most once a second
-  // recomputed when the masked set, a masked folder's driver files, or a room-record directory changes (new records)
-  const mt = (p: string) => { try { const x = fs.statSync(p); return `${x.size}:${x.mtimeMs}`; } catch { return '-'; } };
-  const masked = opFolders(allow).filter(o => maskerFor(allow, o.dir, o.id).masked);
-  const sig = [...masked.map(o => o.dir + ':' + walkFiles(o.dir, isDriverFile).map(mt).join(',') + mt(path.join(o.dir, 'restricted/key.json'))).sort(), ...['branches', 'revisions', 'turns', 'attempts'].map(k => mt(path.join(allow.roots.roomData, k)))].join('|');
-  if (blindCache && blindCache.sig === sig) { blindCache.at = now; return blindCache; }
+// No time window (Codex High): every API response first runs refreshBlind, a cheap synchronous layout check (the mtimes of
+// every directory under coordination/ and work/, which change when a folder, restricted/ dir or file appears, plus the
+// size/mtime of every manifest, driver/template file and restricted file of the known folders). If anything is new or
+// changed, the index is rebuilt before answering. A room record newer than the index (not yet classified) is masked while
+// any operation is masked; new room records alone trigger a rebuild at most every 30 s, and stay masked until then.
+interface BlindState { key: string; layout: string; rooms: string; builtAt: number; folders: { dir: string; id: string }[]; masked: number; files: Set<string>; ids: Set<string> }
+let blind: BlindState | null = null;
+const mtOf = (p: string) => { try { const x = fs.statSync(p); return `${x.size}:${x.mtimeMs}`; } catch { return '-'; } };
+const dirsUnder = (root: string, out: string[] = []) => { out.push(root + ':' + mtOf(root)); let ns: string[] = []; try { ns = fs.readdirSync(root).sort(); } catch { return out; }
+  for (const n of ns) { if (n.startsWith('.') || n === 'node_modules') continue; const p = path.join(root, n); try { if (fs.lstatSync(p).isDirectory()) dirsUnder(p, out); } catch {} } return out; };
+function layoutOf(allow: Allowlist, folders: { dir: string }[]) {
+  const watched = folders.flatMap(o => [...walkFiles(o.dir, p => isManifest(p) || isDriverFile(p)), path.join(o.dir, 'restricted/key.json'), path.join(o.dir, 'restricted/unmask.json')]);
+  return [...dirsUnder(allow.roots.coordination), ...dirsUnder(allow.roots.work), ...watched.map(f => f + ':' + mtOf(f))].join('|');
+}
+const roomsOf = (allow: Allowlist) => ['branches', 'revisions', 'turns', 'attempts', 'outcomes'].map(k => mtOf(path.join(allow.roots.roomData, k))).join('|');
+export function refreshBlind(allow: Allowlist, now = Date.now()): BlindState {
+  const key = [allow.roots.coordination, allow.roots.work, allow.roots.roomData].join('|');
+  if (blind && blind.key === key) {
+    if (layoutOf(allow, blind.folders) === blind.layout && (roomsOf(allow) === blind.rooms || now - blind.builtAt < 30e3)) return blind;
+  }
+  const folders = opFoldersNow(allow), masked = folders.filter(o => maskerFor(allow, o.dir, o.id).masked), builtAt = Date.now();
   const files = new Set<string>(), ids = new Set<string>(), read = (p: string) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
   const addIds = (text: string) => { const got: string[] = []; for (const m of text.matchAll(UUIDS)) { const x = m[0].toLowerCase(); if (!ids.has(x)) { ids.add(x); got.push(x); } } return got; };
-  const queue: string[] = [];
+  const queue: string[] = [], rooms = roomsOf(allow);
   for (const o of masked) {
     for (const f of walkFiles(o.dir, isDriverFile)) { files.add(f); queue.push(...addIds(read(f))); }
     queue.push(...addIds(read(path.join(o.dir, 'restricted/key.json'))));
   }
   for (let n = 0; n < queue.length && n < 200_000; n++) { const id = queue[n]; for (const k of ['branches', 'revisions', 'turns', 'attempts']) { const t = read(path.join(allow.roots.roomData, k, id + '.json')); if (t) queue.push(...addIds(t)); } }
-  blindCache = { at: now, sig, root: allow.roots.roomData + allow.roots.coordination, files, ids }; return blindCache;
+  blind = { key, layout: layoutOf(allow, folders), rooms, builtAt, folders, masked: masked.length, files, ids }; return blind;
 }
-// The Allowlist hook (set by collect): true = path-only because it would reveal a masked operation's arms.
+export const blindIndex = (allow: Allowlist) => refreshBlind(allow);
+// The Allowlist hook (set by collect): true = path-only because it would reveal a masked operation's arms. It uses the state
+// the last refresh built (the server refreshes before every response) and never a time-windowed copy.
 export function blindChecker(allow: Allowlist) {
-  const seen = new Map<string, { m: number; b: boolean }>(), rd = () => allow.roots.roomData.toLowerCase() + path.sep;
+  const seen = new Map<string, { m: number; at: number; b: boolean }>(), rd = () => allow.roots.roomData.toLowerCase() + path.sep;
   return (c: string) => {
-    const ix = blindIndex(allow); if (!ix.files.size && !ix.ids.size) return false;
+    const ix = blind && blind.key === [allow.roots.coordination, allow.roots.work, allow.roots.roomData].join('|') ? blind : refreshBlind(allow);
+    if (!ix.masked) return false;
     if (ix.files.has(c)) return true;
     if (!c.toLowerCase().startsWith(rd())) return false;
     const rel = c.slice(rd().length).split(path.sep); if (rel.length !== 2 || !ROOM_RECORD.test(rel[0])) return false;
     if (ix.ids.has(rel[1].replace(/\.json$/i, '').toLowerCase())) return true;
     let m = 0; try { m = fs.statSync(c).mtimeMs; } catch { return false; }
-    const hit = seen.get(c); if (hit && hit.m === m) return hit.b;
+    if (m >= ix.builtAt - 1) return true; // not yet classified: masked until the index has seen it
+    const hit = seen.get(c); if (hit && hit.m === m && hit.at === ix.builtAt) return hit.b;
     let b = false; try { for (const x of fs.readFileSync(c, 'utf8').matchAll(UUIDS)) if (ix.ids.has(x[0].toLowerCase())) { b = true; break; } } catch {}
-    seen.set(c, { m, b }); return b;
+    seen.set(c, { m, at: ix.builtAt, b }); return b;
   };
 }
-
 
 // Experiment fans: one lane per room of a driver run, matched pairs side by side, a tick per turn with the speaker's name.
 export function fans(allow: Allowlist, events: OfficeEvent[], opDir: string, opId: string) {
@@ -173,12 +186,13 @@ export function fans(allow: Allowlist, events: OfficeEvent[], opDir: string, opI
     const file = n, lines = fs.readFileSync(file, 'utf8').split('\n'), recs = lines.map((l, i) => { try { return { r: JSON.parse(l), i }; } catch { return null; } }).filter(Boolean) as { r: any; i: number }[];
     const M = maskerFor(allow, opDir, opId);
     const evByLine = new Map(events.filter(e => e.detailRef.file === file && e.detailRef.kind === 'manifest-turn').map(e => [e.detailRef.lines[0], e.id]));
+    const evByTurn = new Map(events.filter(e => e.detailRef.file === file && e.detailRef.kind === 'manifest-turn-masked').map(e => [e.target?.id, e.id])); // masked: no line numbers
     const speaker = new Map<string, string>(), lanes = new Map<string, any>(), stops = new Set<string>();
     for (const { r, i } of recs) {
       if (r.kind === 'intent') speaker.set(`${r.traj}|${r.turn}`, String(r.pick?.label || '?'));
       if (r.kind === 'done' && typeof r.traj === 'string') {
         const L = lanes.get(r.traj) || lanes.set(r.traj, { traj: r.traj, name: M.name(r.traj), ticks: [] }).get(r.traj);
-        L.ticks.push({ turn: r.turn, ts: r.at, speaker: speaker.get(`${r.traj}|${r.turn}`) || '?', eventId: evByLine.get(i), fail: !!r.error });
+        L.ticks.push({ turn: r.turn, ts: r.at, speaker: speaker.get(`${r.traj}|${r.turn}`) || '?', eventId: evByLine.get(i) ?? evByTurn.get(String(r.turnId)), fail: !!r.error });
       }
       if (r.kind === 'phase-end') { for (const k of Object.keys(r.stoppedPairs || {})) stops.add(k); for (const f of r.qualifyingFailures || []) stops.add(String(f?.pair || f?.traj || f)); }
     }

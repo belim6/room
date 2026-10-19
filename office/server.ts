@@ -5,7 +5,7 @@ import { config, redact, redactDeep, type Config } from './collect/privacy';
 import { expandEvent } from './collect/expand';
 import { hideProse, onlyProse } from './collect/withhold';
 import { matchWorkflow, stepNames, roleLoops } from './collect/workflow';
-import { fans, maskerFor, maskDeep, opFolderOf } from './collect/rooms';
+import { fans, maskerFor, maskDeep, opFolderOf, refreshBlind } from './collect/rooms';
 import { fileTitle, workStatus } from './collect/legible';
 import type { OfficeEvent } from './collect/types';
 import { Live, type LiveOpts } from './live';
@@ -25,7 +25,7 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(405).set('Allow', 'GET, HEAD').json({ error: 'The Office is read-only.' });
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
-    if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
+    if (req.path.startsWith('/api/')) { res.setHeader('Cache-Control', 'no-store'); refreshBlind(data.allow); } // fail closed: index any new masked folder before answering
     next();
   });
   // last line of defence: every API string passes redaction, and trajectory ids of masked operations are masked
@@ -65,7 +65,7 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   // Server-sent events: upserts/removals as the live tier merges them. Same metadata tier and redaction as /api/events.
   app.get('/api/live', (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    const push = (type: string, v: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(redactDeep(maskDeep(data.allow)(v)))}\n\n`);
+    const push = (type: string, v: unknown) => (refreshBlind(data.allow), res.write(`event: ${type}\ndata: ${JSON.stringify(redactDeep(maskDeep(data.allow)(v)))}\n\n`));
     push('hello', { version: live.version, collectedAt: data.collectedAt });
     live.clients.add(push);
     const beat = setInterval(() => res.write(': beat\n\n'), 15000); beat.unref();

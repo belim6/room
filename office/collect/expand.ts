@@ -95,6 +95,8 @@ export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source:
       break;
     }
     case 'handoff': { add('events.jsonl line', lineAt(c, d.file, d.lines[0])); const ref = d.extra?.ref as string | undefined; if (ref) { const r = allow.read(ref); r.allowed ? add('ref', r.content, { path: r.path, allowed: true, note: r.missing ? 'missing' : 'current file content' }) : out.push({ title: 'ref', path: r.path, allowed: false, note: 'off-allowlist: path only' }); } break; }
+    // masked driver events carry no line: their shape is in the event itself, and the room's records stay path-only
+    case 'manifest-masked': case 'manifest-turn-masked': out.push({ title: 'driver record', allowed: false, note: 'masked until a valid unmask record (driver order and room records can be traced to the arm)' }); break;
     case 'manifest': case 'manifest-turn': {
       // before a valid unmask record: only the turn's shape, with the trajectory masked (ids such as speakerId can tell arms apart)
       const raw = lineAt(c, d.file, d.lines[0]), r = json(raw), M = maskerOf(c, d.file);

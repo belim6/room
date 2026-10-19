@@ -8,7 +8,7 @@ import { parseEvents } from './events';
 import { parseManifest, parseDriverState } from './manifests';
 import { parseSpool, spoolFiles, dedupeKey } from './spool';
 import { opTitle, displayName, fileTitle } from './legible';
-import { blindChecker } from './rooms';
+import { blindChecker, refreshBlind } from './rooms';
 import { Identity, readRegistry, roleFromTitle, ensureRole, sessionActorId, UUID } from './roles';
 
 export interface Coverage { captured: number; derived: number; inferred: number; gaps: number; events: number }
@@ -26,7 +26,7 @@ const walk = (root: string, pick: (p: string) => boolean, out: string[] = []) =>
 export const TEMPLATE = ['plan', 'critic', 'dispatch', 'label', 'lock', 'unmask', 'critic', 'deniz'];
 
 export function collect(cfg: Config = config()): Collected {
-  const sink = new Sink(), allow = new Allowlist(cfg); allow.blind = blindChecker(allow);
+  const sink = new Sink(), allow = new Allowlist(cfg); allow.blind = blindChecker(allow); refreshBlind(allow);
   // 0. Who is who: the role registry (roles/sessions.json, written only by office/bin/register-session).
   const reg = readRegistry(cfg.sessions);
   if (cfg.sessions) sink.sources.push({ kind: 'role-registry', path: cfg.sessions, records: reg.entries.length, events: 0, unparsed: reg.skipped, ...(reg.error ? { note: reg.error } : {}) });
