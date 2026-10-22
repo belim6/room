@@ -248,7 +248,7 @@ const STEP = (e: OfficeEvent, actors: Map<string, Actor>): string | undefined =>
 };
 export function operations(events: OfficeEvent[], actors: Map<string, Actor>, allow?: Allowlist): Operation[] {
   const ids = new Set<string>(); for (const e of events) if (e.operation) { const parts = e.operation.split('/'); for (let i = 1; i <= parts.length; i++) ids.add(parts.slice(0, i).join('/')); }
-  return [...ids].sort().map(id => {
+  return byActivity([...ids].sort().map(id => {
     const evs = events.filter(e => e.operation === id || e.operation?.startsWith(id + '/'));
     const cov: Coverage = { captured: 0, derived: 0, inferred: 0, gaps: 0, events: evs.length };
     for (const e of evs) if (e.gap) cov.gaps++; else cov[e.provenance as Provenance]++;
@@ -257,6 +257,13 @@ export function operations(events: OfficeEvent[], actors: Map<string, Actor>, al
     const t = opTitle(id, allow);
     return { id, label: id.replace(/\//g, ' · '), title: t.title, ...(t.packet ? { packet: t.packet } : {}), inferred: evs.every(e => e.opInferred !== false), start: evs[0]?.ts || '', end: evs[evs.length - 1]?.ts || '', coverage: cov,
       actors: new Set(evs.map(e => e.actor.id)).size, workflow: { template: { source: 'template' as const, steps: TEMPLATE }, run: { source: 'events' as const, steps: run } } };
-  }).filter(o => o.coverage.events);
+  }).filter(o => o.coverage.events));
+}
+// Tree order, newest first: siblings by latest activity (a parent's covers its children), each followed by its own subtree.
+function byActivity<T extends { id: string; end: string }>(ops: T[]): T[] {
+  const parent = (id: string) => id.split('/').slice(0, -1).join('/'), kids = new Map<string, T[]>();
+  for (const o of ops) { const p = ops.some(x => x.id === parent(o.id)) ? parent(o.id) : ''; kids.set(p, [...(kids.get(p) || []), o]); }
+  const walk = (p: string): T[] => (kids.get(p) || []).sort((a, b) => b.end.localeCompare(a.end) || a.id.localeCompare(b.id)).flatMap(o => [o, ...walk(o.id)]);
+  return walk('');
 }
 export { hid };
