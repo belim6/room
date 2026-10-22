@@ -45,7 +45,7 @@ const lastDay = (ts) => new Date(ts).toLocaleDateString('en-CA');
 function fillOps() {
   const sel = $('#op'), cur = sel.value, ops = S.summary.operations; S.opTitle = new Map(ops.map((o) => [o.id, o.title || o.label]));
   sel.replaceChildren(h('option', { value: '*' }, `All operations (${S.summary.counts?.events ?? ''} events)`),
-    ...ops.map((o) => h('option', { value: o.id, title: o.packet || '' }, `${'  '.repeat(o.id.split('/').length - 1)}${o.title || o.label}${o.packet && o.id.split('/').length === 2 ? ' — ' + o.packet : ''}  ·  ${o.coverage.events} ev${o.coverage.gaps ? ` · ${o.coverage.gaps} gaps` : ''}${o.end ? `  ·  last ${lastDay(o.end)}` : ''}`)));
+    ...ops.map((o) => h('option', { value: o.id, title: o.packet || '' }, `${'  '.repeat(o.id.split('/').length - 1)}${o.title || o.label}${o.packet && o.id.split('/').length === 2 ? ' — ' + o.packet : ''}  ·  ${o.coverage.events} ev${o.coverage.gaps ? ` · ${o.coverage.gaps} gaps` : ''}${Number.isFinite(Date.parse(o.end)) ? `  ·  last ${lastDay(o.end)}` : ''}`)));
   if (cur) sel.value = cur;
 }
 async function loadOp(op) {

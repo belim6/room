@@ -261,8 +261,8 @@ export function operations(events: OfficeEvent[], actors: Map<string, Actor>, al
 }
 // Tree order, newest first: siblings by latest activity (a parent's covers its children), each followed by its own subtree.
 function byActivity<T extends { id: string; end: string }>(ops: T[]): T[] {
-  const parent = (id: string) => id.split('/').slice(0, -1).join('/'), kids = new Map<string, T[]>();
-  for (const o of ops) { const p = ops.some(x => x.id === parent(o.id)) ? parent(o.id) : ''; kids.set(p, [...(kids.get(p) || []), o]); }
+  const parent = (id: string) => id.split('/').slice(0, -1).join('/'), kids = new Map<string, T[]>(), known = new Set(ops.map(o => o.id));
+  for (const o of ops) { const p = known.has(parent(o.id)) ? parent(o.id) : ''; kids.set(p, [...(kids.get(p) || []), o]); }
   const walk = (p: string): T[] => (kids.get(p) || []).sort((a, b) => b.end.localeCompare(a.end) || a.id.localeCompare(b.id)).flatMap(o => [o, ...walk(o.id)]);
   return walk('');
 }
