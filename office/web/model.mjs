@@ -8,6 +8,8 @@ export const PERM = {
   // O4: one node per role (its sessions in the Inspector), PSRI outside Room, and work/ (+ research/) as an artifact node
   'role:partner': [0.15, 0.36], 'role:operator': [0.15, 0.62], 'role:secretary': [0.05, 0.30], 'role:prompter': [0.27, 0.31], 'role:experimenter': [0.27, 0.67],
   'role:housekeeper': [0.30, 0.82], 'role:engineer': [0.38, 0.94], psri: [0.72, 0.95], work: [0.88, 0.23],
+  // 2026-10-26 roles, at the free spots farthest from existing nodes
+  'role:jev-correspondent': [0.18, 0.21], 'role:brainstormer': [0.16, 0.06], 'role:intern': [0.20, 0.79],
 };
 export const ARTIFACT = new Set(['archive', 'ledger', 'vault', 'rooms', 'repo', 'outside', 'transcripts', 'work']);
 export const FAIL = new Set(['error', 'no-go', 'missing', 'gap', 'extraction-failed', 'extraction-failed-repaired', 'stopped', 'blocked', 'no-output']);

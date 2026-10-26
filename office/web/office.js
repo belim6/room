@@ -6,7 +6,7 @@ const h = (tag, attrs = {}, ...kids) => { const n = document.createElement(tag);
   for (const c of kids.flat()) if (c != null && c !== false) n.append(c instanceof Node ? c : String(c)); return n; };
 const get = (u) => fetch(u).then((r) => (r.ok ? r.json() : r.json().then((j) => Promise.reject(Error(j.error || r.status)))));
 const KIND = { human: '#e6edf3', coordinator: '#58a6ff', critic: '#c297ff', labeler: '#3fd0c9', engineer: '#56d364', reviewer: '#f0883e', writer: '#d2a8ff', driver: '#8fb3d9', server: '#9aa7b4', provider: '#7d8590', artifact: '#59636e', unknown: '#7d8590',
-  partner: '#ffa657', operator: '#79c0ff', housekeeper: '#a5d6a7', secretary: '#f2cc60', prompter: '#ff7b72', experimenter: '#7ee787', session: '#8b949e', external: '#e3b341' };
+  partner: '#ffa657', operator: '#79c0ff', housekeeper: '#a5d6a7', secretary: '#f2cc60', prompter: '#ff7b72', experimenter: '#7ee787', 'jev-correspondent': '#db61a2', brainstormer: '#ffb3d1', intern: '#b1bac4', session: '#8b949e', external: '#e3b341' };
 const COL = { cap: '#7cc4ff', der: '#b39cff', inf: '#8b949e', ok: '#4fd18b', amber: '#f0b429', red: '#ff5c5c', dim: '#3a434d', fg: '#c9d1d9' };
 const fmtT = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + 'Z';
 const short = (p = '') => p.replace(/^.*\/coordination\//, '').replace(/^.*\/prompt-knowledge\//, 'pk/').replace(/^.*\/\.room-data\//, 'rd/').replace(/^\/Users\/[^/]+\//, '~/');

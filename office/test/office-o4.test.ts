@@ -86,7 +86,7 @@ test('registry parsing and role resolution: registry > Desktop title > pre-O4 pr
   assert.deepEqual(id.roleAt(D, '2026-10-19T13:00:00Z', 'brainstorm'), { role: 'coordinator', via: 'primary' });
   assert.deepEqual(id.roleAt(C, '2026-10-19T13:00:00Z', 'Coordination folder overview'), { via: 'none' });
   assert.equal(id.sessionFor('uds:/tmp/cc-socks/1.sock'), A, 'registered socket');
-  for (const [t, want] of [['partner', 'partner'], ['Operator', 'operator'], ['experimenter2', 'experimenter'], ['critic 2', 'critic'], ['experiment2', undefined], ['brainstorm', undefined], ['Room experiments', undefined]] as const) assert.equal(roleFromTitle(t), want, t);
+  for (const [t, want] of [['partner', 'partner'], ['Operator', 'operator'], ['experimenter2', 'experimenter'], ['critic 2', 'critic'], ['Jev correspondent', 'jev-correspondent'], ['jev-correspondent', 'jev-correspondent'], ['intern 3', 'intern'], ['Brainstormer', 'brainstormer'], ['experiment2', undefined], ['brainstorm', undefined], ['Room experiments', undefined]] as const) assert.equal(roleFromTitle(t), want, t);
 });
 
 test('register-session: the only writer; appends, is idempotent, and refuses rather than guesses', () => {
@@ -106,6 +106,15 @@ test('register-session: the only writer; appends, is idempotent, and refuses rat
   const { execFileSync } = require('node:child_process'); fs.rmSync(f);
   const out = execFileSync(path.join(OFFICE, 'bin/register-session'), ['housekeeper'], { env: { ...process.env, ...env, CLAUDE_CODE_SESSION_ID: B } }).toString();
   assert.match(out, /session bbbbbbbb is the housekeeper/); assert.equal(readRegistry(f).entries[0].session, B);
+});
+test('register-session accepts the roles added on 2026-10-26, and they become labelled role nodes', () => {
+  const { root } = makeRoot(), f = path.join(root, 'roles/sessions.json'), base = { OFFICE_ROOM: root, OFFICE_HOME: path.join(root, 'home') };
+  const S = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444'];
+  ['jev-correspondent', 'brainstormer', 'intern', 'intern'].forEach((r, i) => assert.match(register([r], { ...base, CLAUDE_CODE_SESSION_ID: S[i] }, `2026-10-26T1${i}:00:00.000Z`).out, new RegExp(`is the ${r}`)));
+  assert.deepEqual(readRegistry(f).entries.map(e => e.role), ['jev-correspondent', 'brainstormer', 'intern', 'intern']);
+  const id = new Identity(readRegistry(f).entries), sink: any = { actors: new Map(), actor(a: any) { this.actors.set(a.id, a); } };
+  for (const s of S) id.actorAt(s, '2026-10-26T15:00:00.000Z'); id.apply(sink);
+  assert.deepEqual([...sink.actors.values()].map((a: any) => [a.id, a.label, a.sessions.length]).sort(), [['role:brainstormer', 'Brainstormer', 1], ['role:intern', 'Intern', 2], ['role:jev-correspondent', 'Jev correspondent', 1]]);
 });
 
 // ---- sessions as role nodes, messages between them -------------------------------------------------------------------------

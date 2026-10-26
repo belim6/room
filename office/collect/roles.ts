@@ -7,17 +7,17 @@ import type { Sink, Actor } from './types.ts';
 //   title    : its Claude Desktop title (custom-title records) when that title is a role name (derived)
 //   primary  : the pre-O4 coordinator session (largest transcript), before any of the above applies (inferred)
 // Anything else stays "session ‹id›", unregistered. One node per role: forks and rotations are sessions of that node.
-export const ROLES = ['partner', 'coordinator', 'prompter', 'experimenter', 'engineer', 'operator', 'housekeeper', 'secretary', 'critic'] as const;
+export const ROLES = ['partner', 'coordinator', 'prompter', 'experimenter', 'engineer', 'operator', 'housekeeper', 'secretary', 'critic', 'jev-correspondent', 'brainstormer', 'intern'] as const;
 export type Role = typeof ROLES[number];
 export const isRole = (r: unknown): r is Role => typeof r === 'string' && (ROLES as readonly string[]).includes(r);
 export const roleActorId = (r: Role) => r === 'coordinator' || r === 'critic' ? r : 'role:' + r;
-export const roleLabel = (r: Role) => r === 'coordinator' ? 'Coordinator (Claude)' : r === 'critic' ? 'Critic (Codex)' : r[0].toUpperCase() + r.slice(1);
+export const roleLabel = (r: Role) => r === 'coordinator' ? 'Coordinator (Claude)' : r === 'critic' ? 'Critic (Codex)' : r[0].toUpperCase() + r.slice(1).replace(/-/g, ' ');
 // a role node named without any session of its own (a message to "housekeeper" from a session not on file)
 export const ensureRole = (sink: Sink, r: Role) => { const id = roleActorId(r); if (!sink.actors.get(id)?.permanent) sink.actor({ id, kind: r, label: roleLabel(r), permanent: true }); return id; };
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const sessionActorId = (s: string) => 'session:' + s.slice(0, 8);
-// "experimenter1", "Operator", "critic 2" name a role; "experiment2", "brainstorm" or an auto title do not.
-export const roleFromTitle = (t?: string): Role | undefined => { const s = String(t || '').trim().toLowerCase().replace(/[\s_-]*\d+$/, ''); return isRole(s) ? s : undefined; };
+// "experimenter1", "Operator", "critic 2", "Jev correspondent", "intern 3" name a role; "experiment2", "brainstorm" or an auto title do not.
+export const roleFromTitle = (t?: string): Role | undefined => { const s = String(t || '').trim().toLowerCase().replace(/[\s_-]*\d+$/, '').replace(/[\s_]+/g, '-'); return isRole(s) ? s : undefined; };
 
 export interface RegEntry { session: string; role: Role; since: string; socket?: string }
 // Accepts the command's own format {version, entries:[{session, role, since, …}]}, plus a hand-kept map {sessions:{id:{role,since}}}
