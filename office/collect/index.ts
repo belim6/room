@@ -95,7 +95,7 @@ export function linkPeers(sink: Sink, ident: Identity) {
 // Critic runs spooled before office-codex recorded its caller: the caller is the session whose Bash call launched it (a command
 // naming office-codex, ask-critic or `codex exec`, at most 3 minutes before the run started). Derived; else it stays inferred.
 export function linkCriticCallers(sink: Sink) {
-  const launches = sink.events.filter(e => /^(coordinator|role:[a-z]+|session:[0-9a-f]+)$/.test(e.actor.id) && (e.verb === 'dispatch' || e.verb === 'read' || e.verb === 'write') && (e.hints || []).some(h => /office-codex|ask-critic|\bcodex\s+exec\b/.test(h)));
+  const launches = sink.events.filter(e => /^(coordinator|role:[a-z][a-z-]*|session:[0-9a-f]+)$/.test(e.actor.id) && (e.verb === 'dispatch' || e.verb === 'read' || e.verb === 'write') && (e.hints || []).some(h => /office-codex|ask-critic|\bcodex\s+exec\b/.test(h)));
   for (const m of sink.events.filter(e => e.detailRef.kind === 'spool-codex' && e.verb === 'message' && e.target?.id === 'critic' && e.provenance === 'inferred')) {
     const t = Date.parse(m.ts), l = launches.filter(e => Date.parse(e.ts) <= t + 5e3 && t - Date.parse(e.ts) <= 180e3).sort((a, b) => b.ts.localeCompare(a.ts))[0]; if (!l) continue;
     m.actor = l.actor; m.provenance = 'derived'; m.derived = true; m.detailRef.extra = { ...m.detailRef.extra, callerLinked: true };

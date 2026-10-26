@@ -119,7 +119,7 @@ export function matchWorkflow(c: Collected, opId: string, tpls = loadTemplates()
 // A → B → C → A (e.g. prompter → PSRI → prompter, partner → critic → partner). Same matching rule as the steps: an edge is
 // direct when it is recorded explicitly (an events.jsonl hand-off, or a send whose delivery was found by msg_id), heuristic
 // otherwise (resolved by name, socket or time); a loop is direct only if every edge is. Chains are at most four roles long.
-const ROLEISH = /^(coordinator|critic|psri|deniz|role:[a-z]+|session:[0-9a-f]+)$/;
+const ROLEISH = /^(coordinator|critic|psri|deniz|role:[a-z][a-z-]*|session:[0-9a-f]+)$/;
 export function roleHandoffs(c: Collected, opId: string) {
   const inOp = (o?: string) => opId === '*' || (!!o && (o === opId || o.startsWith(opId + '/')));
   return c.events.filter(e => inOp(e.operation) && e.target?.kind === 'actor' && ROLEISH.test(e.actor.id) && ROLEISH.test(e.target.id) && e.actor.id !== e.target.id

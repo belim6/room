@@ -115,6 +115,10 @@ test('register-session accepts the roles added on 2026-10-26, and they become la
   const id = new Identity(readRegistry(f).entries), sink: any = { actors: new Map(), actor(a: any) { this.actors.set(a.id, a); } };
   for (const s of S) id.actorAt(s, '2026-10-26T15:00:00.000Z'); id.apply(sink);
   assert.deepEqual([...sink.actors.values()].map((a: any) => [a.id, a.label, a.sessions.length]).sort(), [['role:brainstormer', 'Brainstormer', 1], ['role:intern', 'Intern', 2], ['role:jev-correspondent', 'Jev correspondent', 1]]);
+  // hyphenated role ids count as role nodes for hand-offs and loops (review, 2026-10-26)
+  const ev = (n: number, from: string, to: string) => ({ id: 'h' + n, seq: n, ts: `2026-10-26T1${n}:00:00.000Z`, actor: { id: from }, verb: 'message', target: { kind: 'actor', id: to }, operation: 'work/jev', detailRef: { kind: 'handoff' }, provenance: 'captured', source: 't', derived: false });
+  const W = require('../collect/workflow'), c: any = { events: [ev(1, 'role:jev-correspondent', 'critic'), ev(2, 'critic', 'role:jev-correspondent')] };
+  assert.deepEqual(W.roleHandoffs(c, 'work/jev').map((h: any) => [h.from, h.to]), [['role:jev-correspondent', 'critic'], ['critic', 'role:jev-correspondent']]);
 });
 
 // ---- sessions as role nodes, messages between them -------------------------------------------------------------------------
