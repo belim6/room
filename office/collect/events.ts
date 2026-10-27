@@ -24,7 +24,14 @@ export function parseEvents(file: string, sink: Sink, allow: Allowlist) {
   readLines(file, sink).forEach((l, i) => {
     if (!l.trim()) return; let r: any; try { r = JSON.parse(l); } catch { stat.unparsed++; return; }
     if (!r.at || !r.from || !r.kind || !Number.isFinite(Date.parse(r.at))) { stat.unparsed++; return; } stat.records++;
-    const verb = HANDOFF_VERB[r.kind] || 'message', ref = r.ref ? path.resolve(allow.cfg.coordination, String(r.ref)) : undefined;
+    const verb = HANDOFF_VERB[r.kind] || 'message';
+    let ref: string | undefined;
+    if (r.ref) {
+      const at = Date.parse(r.at), raw = String(r.ref);
+      const roots = at >= Date.parse('2026-10-19T00:00:00Z') ? [allow.cfg.room || allow.cfg.coordination] : [allow.cfg.coordination, allow.cfg.room || allow.cfg.coordination];
+      const candidates = roots.map(root => path.resolve(root, raw));
+      ref = candidates.find(candidate => fs.existsSync(candidate)) || candidates[0];
+    }
     const outcome = r.kind === 'review' || r.kind === 'result' ? verdictOf(String(r.note || '')) : r.kind === 'blocked' ? 'blocked' : undefined;
     sink.push({ ts: new Date(r.at).toISOString(), actor: sink.ref(who(sink, String(r.from))), verb, target: r.to ? { kind: 'actor', id: who(sink, String(r.to)), ...(ref ? { path: allow.canonical(ref) } : {}) } : undefined,
       ...(r.operation ? { operation: String(r.operation), opInferred: false } : {}), ...(typeof r.step === 'string' && /^[a-z][a-z0-9-]{0,40}$/.test(r.step) ? { step: r.step } : {}), detailRef: { kind: 'handoff', file, lines: [i], ...(ref ? { extra: { ref: allow.canonical(ref) } } : {}) },
