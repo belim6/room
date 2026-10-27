@@ -41,6 +41,7 @@ export const PERMANENT: Actor[] = [
 export class Sink {
   events: OfficeEvent[] = []; actors = new Map<string, Actor>(); sources: SourceStat[] = [];
   lineIndex = new Map<string, number[]>();
+  holdUntil = new Map<string, number>(); // manifest -> wall time its earliest still-held masked group is released (live re-reads it then)
   toolOwner = new Map<string, OfficeEvent>(); // tool_use id -> event (spawn/dispatch) for linking
   agentSpawn = new Map<string, OfficeEvent>(); // sub-agent id -> spawn event
   seenRecords = new Set<string>(); // transcript record uuids: a forked session repeats its parent's history, which is counted once

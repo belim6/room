@@ -215,3 +215,51 @@ test('live: a masked pair-turn never streams a lone member across a poll tick; h
   // the full collect gives the same masked events as the stream folded
   const all = collect(cfg).events.filter(e => e.verb === 'dispatch'); assert.deepEqual(all.map(e => e.label).sort(), disp.flat().map((e: any) => e.label).sort());
 });
+
+test('live: a held request whose driver died is released at the wall-time limit, with no further write to the manifest', async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'office-live-dead-'))); roots.push(root);
+  const coord = path.join(root, 'coordination'), dir = path.join(coord, '2026-10-17/date'), man = path.join(dir, 'manifest-compare.jsonl'), cfg: Config = { home: path.join(root, 'home'), room: root, coordination: coord,
+    promptKnowledge: path.join(root, 'pk'), roomData: path.join(root, 'rd'), claudeProject: path.join(root, 'proj'), spool: path.join(root, 'spool'), repos: [], work: path.join(root, 'work'), research: path.join(root, 'research'), extra: [] };
+  fs.mkdirSync(cfg.claudeProject, { recursive: true }); W(path.join(dir, 'restricted/key.json'), { 'T-1': { traj: 'compare·v0·r01' } });
+  const rec = (o: any) => fs.appendFileSync(man, JSON.stringify(o) + '\n'), now = Date.now(), at = (ms: number) => new Date(now + ms).toISOString();
+  rec({ at: at(-700e3), kind: 'phase-start', phase: 'compare', trajectories: ['compare·v0·r01', 'compare·v1·r01'] });
+  for (const a of ['v0', 'v1']) rec({ at: at(-700e3), kind: 'branch', traj: `compare·${a}·r01`, branch: id() });
+  const o = createOffice(cfg, {}), lone = () => o.live['get']().events.filter((e: any) => e.verb === 'dispatch' && e.source === man);
+  try {
+    // the driver sends v0's request, then dies: 9 min 59.7 s ago, so the 10-minute limit falls 0.3 s from now
+    rec({ at: at(-600e3 + 300), kind: 'intent', traj: 'compare·v0·r01', turn: 1, pick: { label: 'Jake' } }); o.live.tick();
+    assert.equal(lone().length, 0, 'held while the pair may still complete'); const due = o.live['get']().holdUntil.get(man); assert.ok(due && due > Date.now());
+    const size = fs.statSync(man).size; await new Promise(r => setTimeout(r, 450)); o.live.tick();
+    assert.equal(fs.statSync(man).size, size, 'nothing was written'); assert.equal(lone().length, 1, 'released at the limit');
+    assert.ok(!/·v[01]·/.test(JSON.stringify(lone()))); assert.equal(o.live['get']().holdUntil.has(man), false);
+  } finally { o.live.stop(); }
+});
+
+test('masking is scoped: an unmasked operation sharing trajectory ids with a masked one shows its own rooms; free text stays masked; any JSON formatting is learned', async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'office-spill-'))); roots.push(root);
+  const coord = path.join(root, 'coordination'), date = path.join(coord, '2026-10-17/date'), dinner = path.join(root, 'work/dinner'), cfg: Config = { home: path.join(root, 'home'), room: root, coordination: coord,
+    promptKnowledge: path.join(root, 'pk'), roomData: path.join(root, 'rd'), claudeProject: path.join(root, 'proj'), spool: path.join(root, 'spool'), repos: [], work: path.join(root, 'work'), research: path.join(root, 'research'), extra: [] };
+  fs.mkdirSync(cfg.claudeProject, { recursive: true });
+  const lines = (r: string, fmt = (o: any) => JSON.stringify(o)) => ['v0', 'v1'].flatMap((a, i) => [{ at: `2026-10-1${r === 'r02' ? 9 : 7}T20:0${i}:00.000Z`, kind: 'done', traj: `compare·${a}·${r}`, turn: 1, turnId: id() }]).map(fmt).join('\n') + '\n';
+  // date: unmasked (valid record); dinner: masked, same ids, and one pair written with spaces and an escaped "·"
+  W(path.join(date, 'restricted/key.json'), { 'T-1': { traj: 'compare·v0·r01' } }); W(path.join(date, 'manifest-compare.jsonl'), lines('r01'));
+  const lock = JSON.stringify({ at: '2026-10-18T19:00:00Z' }); W(path.join(date, 'labels-lock.json'), lock);
+  W(path.join(date, 'restricted/unmask.json'), { operation: '2026-10-17/date', at: '2026-10-18T20:00:00Z', by: 'deniz', labelsLock: { file: 'labels-lock.json', sha256: sha(lock) }, keySha256: sha(fs.readFileSync(path.join(date, 'restricted/key.json'))) });
+  W(path.join(dinner, 'restricted/key.json'), { 'T-1': { traj: 'compare·v1·r01' } });
+  fs.writeFileSync(path.join(dinner, 'manifest-compare.jsonl'), lines('r01') + lines('r02', o => JSON.stringify(o, null, 0).replace(/":/g, '": ').replace(/·/g, '\\u00b7')));
+  W(path.join(coord, '2026-10-17/notes.md'), '# notes\nthe rooms were compare·v0·r01 and compare·v1·r01\n');
+  const A = new Allowlist(cfg), Md = maskerFor(A, dinner, 'work/dinner');
+  assert.deepEqual(Md.trajs.sort(), ['compare·v0·r01', 'compare·v0·r02', 'compare·v1·r01', 'compare·v1·r02'], 'spaced and escaped records are learned');
+  assert.ok(!Md.name('compare·v0·r02').endsWith('room ?'), 'a learned pair gets real room letters');
+  const s = await serve(cfg);
+  try {
+    const ev = async (op: string) => (await s.json('/api/events?op=' + encodeURIComponent(op))).events.filter((e: any) => e.verb === 'turn').map((e: any) => e.label).sort();
+    assert.deepEqual(await ev('2026-10-17/date'), ['compare·v0·r01 t1', 'compare·v1·r01 t1'], 'the unmasked operation keeps its own ids');
+    const dl = await ev('work/dinner'); assert.equal(dl.length, 4); assert.ok(dl.every((l: string) => /room [AB]/.test(l)), 'the masked one shows room letters: ' + dl);
+    const dr = JSON.stringify(await s.json('/api/rooms?op=work/dinner')), da = JSON.stringify(await s.json('/api/rooms?op=2026-10-17/date'));
+    assert.ok(!/·v[01]·/.test(dr)); assert.ok(da.includes('compare·v0·r01') && !da.includes('room A'), 'the unmasked fans keep their ids');
+    const notes = JSON.stringify(await s.json('/api/expand/file?path=' + encodeURIComponent(path.join(coord, '2026-10-17/notes.md'))));
+    assert.ok(!/·v[01]·/.test(notes), 'free text naming a shared id stays masked');
+    const all = JSON.stringify(await s.json('/api/events?op=*')); assert.ok(!/compare·v[01]·r02/.test(all), 'dinner-only ids never shown');
+  } finally { await s.close(); }
+});

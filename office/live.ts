@@ -57,6 +57,8 @@ export class Live {
     try {
       const changed: string[] = [];
       for (const f of this.tracked()) { const s = this.size(f); if (s !== this.sizes.get(f)) { this.sizes.set(f, s); if (s >= 0) changed.push(f); } }
+      // a driver that died mid-pair writes nothing more: re-read its manifest when the held group's wall-time limit passes
+      for (const [f, t] of this.get().holdUntil) if (t <= Date.now() && !changed.includes(f)) changed.push(f);
       if (changed.length) this.incremental(changed);
       const sig = this.sig();
       const every = this.hooksActive(now) ? (this.opts.fullMsWithHooks ?? 120000) : (this.opts.fullMs ?? 15000);
@@ -73,6 +75,7 @@ export class Live {
       else parseManifest(f, sink, allow);
     }
     for (const [f, offs] of sink.lineIndex) data.lineIndex.set(f, offs);
+    for (const f of files) { data.holdUntil.delete(f); const t = sink.holdUntil.get(f); if (t !== undefined) data.holdUntil.set(f, t); }
     data.ident.apply(sink);
     const { events } = finalize(sink, this.cfg, allow, false), fresh = new Set(events.map(e => e.id));
     // a re-parsed file replaces its own earlier events: one that is gone (e.g. a spawn whose target was not yet known) is removed

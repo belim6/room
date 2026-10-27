@@ -55,6 +55,8 @@ export function parseManifest(file: string, sink: Sink, allow: Allowlist) {
       if (stopped.has(pair) || g.some(x => stopped.has(String(x.r.traj)))) return true;
       if (Date.parse(last) - Date.parse(g0) > 120e3 || Date.now() - Date.parse(g0) > 600e3) return true;
       return g[0].r.kind === 'branch' ? turnsSeen : new Set(g.map(x => x.r.traj)).size >= (members.get(pair)?.size || 1); };
+    const waiting = [...groups.values()].filter(g => !ready(g)).map(g => Date.parse(g.map(x => x.ts).sort()[0]) + 600e3 + 1);
+    if (waiting.length) sink.holdUntil.set(file, Math.min(...waiting));
     held = [...groups.values()].filter(ready).flat();
     const timeOf = (x: { ts: string; r: any }) => x.r.kind === 'branch' ? t0 : x.r.kind === 'intent' ? coarse.get(pairOf(x.r.traj) + '|' + x.r.turn)! : x.ts;
     for (const x of held.sort((a, b) => timeOf(a).localeCompare(timeOf(b)) || h(String(a.r.traj)).localeCompare(h(String(b.r.traj))))) {

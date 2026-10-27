@@ -101,7 +101,10 @@ export function maskerFor(allow: Allowlist, opDir: string, opId: string) {
     locks = [u?.labelsLock?.file, u?.responseLock?.file].map(f => { try { return typeof f === 'string' ? sha(fs.readFileSync(path.join(opDir, f))) : '-'; } catch { return '-'; } }).join(','); } catch {}
   const sig = [...names.map(n => n + ':' + st(n)), st(path.join(opDir, 'restricted/unmask.json')), st(path.join(opDir, 'restricted/key.json')), locks].join('|') + '|' + opId;
   const hit = cache.get(opDir); if (hit && hit.sig === sig) return hit.m;
-  const trajs: string[] = []; for (const n of names) for (const m of fs.readFileSync(n, 'utf8').matchAll(/"traj":"([^"]+)"/g)) trajs.push(m[1]);
+  // parsed, not pattern-matched: spacing, escaped "·" or key order can't hide a trajectory from the masker
+  const trajs: string[] = [];
+  for (const n of names) for (const l of fs.readFileSync(n, 'utf8').split('\n')) { let r: any; try { r = JSON.parse(l); } catch { continue; }
+    for (const t of [r?.traj, ...(Array.isArray(r?.trajectories) ? r.trajectories : [])]) if (typeof t === 'string') trajs.push(t); }
   const m = armMasker(allow, opDir, opId, trajs); cache.set(opDir, { sig, m }); return m;
 }
 
@@ -109,15 +112,32 @@ export function maskerFor(allow: Allowlist, opDir: string, opId: string) {
 // trajectory) passes through all of them before it leaves the server. Defence in depth (review P1-a): while any operation is
 // masked, any `x·vN·y` token, or one carrying an arm named in a masked folder's restricted/key.json, is masked by pattern,
 // unless it is a trajectory id of an operation that has a valid unmask record.
-export function maskAll(allow: Allowlist) {
-  const all = opFolders(allow).map(o => maskerFor(allow, o.dir, o.id)), ms = all.filter(m => m.masked);
-  if (!ms.length) return (text: string) => text;
-  const keep = new Set(all.filter(m => !m.masked).flatMap(m => m.trajs)), arms = [...new Set(ms.flatMap(m => m.arms))].filter(a => a.length >= 2 && !/^v\d+$/.test(a)).map(a => a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+// Spill-over (O3/O4 review minor 2): two operations can share trajectory ids (date and dinner both run compare·v0·r01).
+// Free text can't say whose id it is, so it gets every masked operation's relabelling (fail closed). Only an object read
+// from an unmasked operation's own manifest (its `source`, `detailRef.file` or `path`) names that operation's rooms alone: it
+// skips the masked operations' relabelling and keeps the pattern mask, which leaves the unmasked operation's ids as they are.
+export function masking(allow: Allowlist) {
+  const all = opFolders(allow).map(o => ({ o, m: maskerFor(allow, o.dir, o.id) })), ms = all.filter(x => x.m.masked).map(x => x.m);
+  if (!ms.length) return { full: (text: string) => text, own: (text: string) => text, isOwn: (_p: unknown) => false };
+  const keep = new Set(all.filter(x => !x.m.masked).flatMap(x => x.m.trajs)), arms = [...new Set(ms.flatMap(m => m.arms))].filter(a => a.length >= 2 && !/^v\d+$/.test(a)).map(a => a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const re = new RegExp(`([\\w-]*)·(v\\d+${arms.length ? '|' + arms.join('|') : ''})(?![\\w-])((?:·[\\w-]*)?)`, 'g');
-  return (text: string) => { let t = text; for (const m of ms) t = m.maskText(t); return t.replace(re, (full, a, _arm, c) => keep.has(full) ? full : `${a}·arm-masked${c}`); };
+  const own = (text: string) => text.replace(re, (full, a, _arm, c) => keep.has(full) ? full : `${a}·arm-masked${c}`);
+  const open = all.filter(x => !x.m.masked).map(x => allow.canonical(x.o.dir) + path.sep);
+  const isOwn = (p: unknown) => typeof p === 'string' && isManifest(p) && open.some(d => allow.canonical(p).startsWith(d));
+  return { full: (text: string) => { let t = text; for (const m of ms) t = m.maskText(t); return own(t); }, own, isOwn };
 }
-const maskDeepWith = (f: (s: string) => string) => { const go = (v: any, k = ''): any => typeof v === 'string' ? (k === 'path' || k === 'source' || k === 'file' ? v : f(v)) : Array.isArray(v) ? v.map(x => go(x, k)) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([kk, x]) => [kk, go(x, kk)])) : v; return go; };
-export const maskDeep = (allow: Allowlist) => maskDeepWith(maskAll(allow));
+export const maskAll = (allow: Allowlist) => masking(allow).full;
+const maskDeepWith = (f: ReturnType<typeof masking>) => {
+  const go = (v: any, k = '', mine = false): any => {
+    if (typeof v === 'string') return k === 'path' || k === 'source' || k === 'file' ? v : mine ? f.own(v) : f.full(v);
+    if (Array.isArray(v)) return v.map(x => go(x, k, mine));
+    if (!v || typeof v !== 'object') return v;
+    const m = mine || f.isOwn(v.source) || f.isOwn(v.detailRef?.file) || f.isOwn(v.path);
+    return Object.fromEntries(Object.entries(v).map(([kk, x]) => [kk, go(x, kk, m)]));
+  };
+  return go;
+};
+export const maskDeep = (allow: Allowlist) => maskDeepWith(masking(allow));
 
 // ---- Blinding of room records (review High + P1-a) -------------------------------------------------------------------------
 // While an operation is masked, nothing may let a room be traced to its arm: its .room-data records (turns, attempts, outcomes,
@@ -198,7 +218,7 @@ export function fans(allow: Allowlist, events: OfficeEvent[], opDir: string, opI
     }
     const pairs = new Map<string, any[]>();
     for (const L of lanes.values()) { const p = parseTraj(L.traj), k = p ? `${p.phase}·${p.pair}` : L.traj; L.stopped = stops.has(k) || stops.has(L.traj); (pairs.get(k) || pairs.set(k, []).get(k)!).push(L); }
-    runs.push({ manifest: path.basename(file), masked: M.masked, unmask: { valid: M.unmask.valid, reason: M.unmask.reason },
+    runs.push({ manifest: path.basename(file), ...(M.masked ? {} : { source: file }), masked: M.masked, unmask: { valid: M.unmask.valid, reason: M.unmask.reason },
       pairs: [...pairs].sort((a, b) => a[0].localeCompare(b[0])).map(([pair, ls]) => ({ pair, lanes: ls.sort((a: any, b: any) => a.name.localeCompare(b.name)).map(({ traj, ...rest }: any) => (M.masked ? rest : { traj, ...rest })) })) });
   }
   return runs;
