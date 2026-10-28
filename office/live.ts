@@ -7,6 +7,8 @@ import { parseManifest } from './collect/manifests';
 import { readSpoolTail, buildSpool, spoolFiles, dedupeKey, type SpoolState } from './collect/spool';
 import type { Config } from './collect/privacy';
 import { UUID } from './collect/roles';
+import { operationTree } from './collect/operations';
+import { attachTokenUsage } from './collect/token-usage';
 
 // Live tier. Every second: re-parse the append-only small sources that changed (spool, events.jsonl, driver manifests)
 // and merge the new or changed events by id. Transcripts are the fallback and cross-check: when they change, a full
@@ -109,12 +111,15 @@ export class Live {
     if (!up.length && !removes.length && !newActors.length) return;
     data.events.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
     data.operations = operations(data.events, data.actors, data.allow);
+    const tokens = attachTokenUsage(data.events, data.allow);
+    if(tokens.available){data.tokenUnattributed=tokens.unattributed;data.tokenRecords={total:tokens.records,attributed:tokens.attributedRecords,unattributed:tokens.unattributedRecords};}
+    data.operationTree = operationTree(this.cfg.operations, data.allow, data.events, tokens.available ? tokens.unattributed : undefined);
     this.broadcast(up, removes, newActors);
   }
   broadcast(up: OfficeEvent[], removes: string[], actors: Actor[]) {
     if (!up.length && !removes.length && !actors.length) return;
     this.version++;
-    const msg = { version: this.version, upserts: up.map(meta), removes, actors, operations: this.get().operations };
+    const msg = { version: this.version, upserts: up.map(meta), removes, actors, operations: this.get().operations, ...(this.get().operationTree ? { operationTree: this.get().operationTree } : {}) };
     for (const c of this.clients) try { c('events', msg); } catch {}
   }
 }

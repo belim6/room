@@ -1,4 +1,4 @@
-import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory } from './model.mjs';
+import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeRows, operationTreeDisplay, operationTreeNodeEvents } from './model.mjs';
 import { liveClient } from './liveclient.mjs';
 
 const $ = (s) => document.querySelector(s);
@@ -14,12 +14,23 @@ const base = (p = '') => p.split('/').pop();
 const inOp = (e, op) => !op || op === '*' || e.operation === op || (e.operation || '').startsWith(op + '/');
 
 const S = { summary: null, op: '', events: [], actors: [], A: new Map(), L: null, tl: null, c: 0, playing: false, speed: 10, compress: true, sel: null, hover: null, lastLog: '',
-  byId: new Map(), live: false, es: null, focus: true, follow: null, raw: false, cam: { x: 0, y: 0, s: 1 }, opTitle: new Map(), changed: 0 };
+  byId: new Map(), live: false, es: null, focus: true, follow: null, raw: false, cam: { x: 0, y: 0, s: 1 }, opTitle: new Map(), changed: 0, treeNode: '', collapsed: new Set() };
 globalThis.officeState = S; // for inspection from the console
 const nameOf = (id) => { const a = S.A.get(id); return a?.name || a?.label || id; };
 const opTitleOf = (id) => S.opTitle.get(id) || id;
 
 async function init() {
+  let treeCollapsed = false;
+  try { treeCollapsed = localStorage.getItem('office-operation-tree-collapsed') === 'true'; } catch {}
+  $('#workspace').classList.toggle('tree-collapsed', treeCollapsed);
+  $('#tree-collapse').setAttribute('aria-expanded', String(!treeCollapsed));
+  $('#tree-collapse').onclick = () => {
+    const collapsed = !$('#workspace').classList.contains('tree-collapsed');
+    $('#workspace').classList.toggle('tree-collapsed', collapsed);
+    $('#tree-collapse').setAttribute('aria-expanded', String(!collapsed));
+    $('#tree-collapse').title = collapsed ? 'Expand operation tree' : 'Collapse operation tree';
+    try { localStorage.setItem('office-operation-tree-collapsed', String(collapsed)); } catch {}
+  };
   S.loadedAt = Date.now();
   S.summary = await get('/api/summary'); fillOps();
   const sel = $('#op'), ops = S.summary.operations;
@@ -44,14 +55,32 @@ async function init() {
 const lastDay = (ts) => new Date(ts).toLocaleDateString('en-CA');
 function fillOps() {
   const sel = $('#op'), cur = sel.value, ops = S.summary.operations; S.opTitle = new Map(ops.map((o) => [o.id, o.title || o.label]));
+  const tree = S.summary.operationTree, treeMode = !!tree && !tree.error;
+  $('#op').hidden = treeMode; $('#tree-panel').hidden = !treeMode; $('#workspace').classList.toggle('tree-hidden', !treeMode); $('#operation-error').hidden = !tree?.error; $('#operation-error').textContent = tree?.error || '';
+  if (treeMode) { renderOperationTree(); return; }
   sel.replaceChildren(h('option', { value: '*' }, `All operations (${S.summary.counts?.events ?? ''} events)`),
     ...ops.map((o) => h('option', { value: o.id, title: o.packet || '' }, `${'  '.repeat(o.id.split('/').length - 1)}${o.title || o.label}${o.packet && o.id.split('/').length === 2 ? ' — ' + o.packet : ''}  ·  ${o.coverage.events} ev${o.coverage.gaps ? ` · ${o.coverage.gaps} gaps` : ''}${Number.isFinite(Date.parse(o.end)) ? `  ·  last ${lastDay(o.end)}` : ''}`)));
   if (cur) sel.value = cur;
 }
+function renderOperationTree() {
+  const tree = S.summary.operationTree, box = $('#operation-tree'), rows = operationTreeRows(tree), children = new Set(rows.filter(n => n.parent).map(n => n.parent));
+  const unattributed = tree?.unattributed, unattributedSum = unattributed ? ['input','output','cacheRead','cacheWrite'].reduce((sum,k)=>sum+(unattributed[k]||0),0) : null;
+  $('#tree-unattributed').textContent = unattributedSum == null ? '' : `Unattributed ${compactTokens(unattributedSum)} tokens`;
+  $('#tree-unattributed').title = unattributedSum == null ? '' : `Unattributed ${unattributedSum} tokens`;
+  box.replaceChildren(...rows.filter(n => { let p=n.parent; while(p) { if(S.collapsed.has(p)) return false; p=rows.find(x=>x.id===p)?.parent; } return true; }).map(n => {
+    const d=operationTreeDisplay(n), twist=children.has(n.id) ? h('button',{class:'tree-toggle',title:'Collapse/expand',on:{click:(e)=>{e.stopPropagation();S.collapsed.has(n.id)?S.collapsed.delete(n.id):S.collapsed.add(n.id);renderOperationTree();}}},S.collapsed.has(n.id)?'▸':'▾') : h('span',{class:'tree-toggle'},'·');
+    const meta = `${d.events} events · ${d.gaps} event gaps · tokens ${d.tokens} known, ${d.known} events have a number · ${d.tokenGaps} token gaps · burn ${d.burn}${d.budget?` · ${d.budget}`:''}`;
+    const closeBits = n.close ? [h('span',{class:'tree-chip closed-chip'},'closed'), ...(n.close.summary ? [h('a',{class:'close-summary',href:`/api/expand/file?path=${encodeURIComponent(n.close.summary)}`,target:'_blank',rel:'noopener',on:{click:e=>e.stopPropagation()}},'summary')] : []), h('span',{class:'close-evidence'},`${n.close.evidence?.length||0} evidence`)] : [];
+    const row=h('div',{class:'tree-node'+(S.treeNode===n.id?' selected':'')+(n.id==='unfiled'?' unfiled':'')},twist,h('span',{class:'tree-title',title:`${d.tokenHint}${d.budget?` · ${d.budget}`:''} · burn ${d.burn}`,on:{click:()=>loadTreeNode(n.id)}},h('b',{},n.title),h('span',{class:'tree-chip'},n.status||'—'),...closeBits),h('span',{class:'tree-meta',title:`${d.tokensFull} tokens${d.budget?` · ${d.budget}`:''}`},meta),...(n.closeProblems||[]).map(problem=>h('span',{class:'close-problem'},problem)));
+    row.style.setProperty('--depth',String(n.depth)); return row;
+  }));
+}
+function compactTokens(value) { const abs=Math.abs(value); for (const [limit,unit] of [[1e12,'T'],[1e9,'B'],[1e6,'M'],[1e3,'K']]) if(abs>=limit)return `${Number((value/limit).toFixed(3))}${unit}`; return String(value); }
+async function loadTreeNode(id) { S.treeNode=id; S.op=id; location.hash='op='+encodeURIComponent(id); const {events}=await get('/api/events/node?id='+encodeURIComponent(id)); S.filter=null; $('#filterbar').replaceChildren(); setEvents(events,true); renderOperationTree(); if(S.view&&S.view!=='floor')showView(S.view); S.playing=false; $('#play').textContent='▶'; follow(null); select(null); }
 async function loadOp(op) {
   if (S.live) { live.stop(); live.start(); } // re-subscribe so the catch-up targets the new operation
   S.op = op; location.hash = 'op=' + encodeURIComponent(op);
-  const { events } = await get('/api/events?op=' + encodeURIComponent(op));
+  S.treeNode=''; const { events } = await get('/api/events?op=' + encodeURIComponent(op));
   S.filter = null; $('#filterbar').replaceChildren(); setEvents(events, true); if (S.view && S.view !== 'floor') showView(S.view);
   S.playing = false; $('#play').textContent = '▶'; follow(null); select(null);
 }
@@ -74,7 +103,7 @@ function togglePlay() { if (S.live) toggleLive(); if (!S.playing && S.c >= S.tl.
 
 // ---- live (SSE) ----------------------------------------------------------------------------------------------------
 const live = liveClient({
-  refetch: async () => ({ summary: await get('/api/summary'), events: (await get('/api/events?op=' + encodeURIComponent(S.op))).events }),
+  refetch: async () => { const summary=await get('/api/summary'); return { summary, events:(await get(S.treeNode?'/api/events/node?id='+encodeURIComponent(S.treeNode):'/api/events?op='+encodeURIComponent(S.op))).events }; },
   onReset: ({ summary, events }) => { S.summary = summary; fillOps(); setEvents(events, false); },
   onDelta: (d) => applyLive(d),
 });
@@ -87,9 +116,11 @@ function toggleLive() {
 // The same fold as replay: live upserts land in the same event list the replay renderer reads.
 export function applyLive(msg) {
   for (const a of msg.actors || []) { const i = S.summary.actors.findIndex((x) => x.id === a.id); if (i >= 0) S.summary.actors[i] = a; else S.summary.actors.push(a); }
-  if (msg.operations) { S.summary.operations = msg.operations; fillOps(); }
+  if (msg.operations) S.summary.operations = msg.operations;
+  if (msg.operationTree) S.summary.operationTree = msg.operationTree;
+  if (msg.operations || msg.operationTree) fillOps();
   const rm = new Set(msg.removes || []), byId = new Map((S.base || S.events).filter((e) => !rm.has(e.id)).map((e) => [e.id, e]));
-  for (const e of msg.upserts || []) if (inOp(e, S.op)) byId.set(e.id, e); else byId.delete(e.id);
+  for (const e of msg.upserts || []) if (S.treeNode ? operationTreeNodeEvents([e],S.summary.operationTree,S.treeNode).length : inOp(e, S.op)) byId.set(e.id, e); else byId.delete(e.id);
   setEvents([...byId.values()].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.seq - b.seq)), false);
 }
 

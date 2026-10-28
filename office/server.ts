@@ -9,6 +9,7 @@ import { fans, maskerFor, maskDeep, opFolderOf, refreshBlind } from './collect/r
 import { fileTitle, workStatus } from './collect/legible';
 import type { OfficeEvent } from './collect/types';
 import { Live, type LiveOpts } from './live';
+import { operationPlacement } from './web/operation-placement.mjs';
 
 // The Office: read-only, loopback-only view over saved records. GET routes only; nothing here writes to any source.
 const meta = (e: OfficeEvent) => { const { hints, ...m } = e; return m; }; // hints carry command/prompt text: never in the summary tier
@@ -31,10 +32,17 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   // last line of defence: every API string passes redaction, and trajectory ids of masked operations are masked
   const send = (res: any, v: unknown) => res.json(redactDeep(maskDeep(data.allow)(v)));
   app.get('/api/summary', (_req, res) => send(res, {
-    collectedAt: data.collectedAt, operations: data.operations, actors: [...data.actors.values()],
+    collectedAt: data.collectedAt, operations: data.operations, ...(data.operationTree ? { operationTree: data.operationTree } : {}), ...(data.tokenRecords ? { tokenRecords: data.tokenRecords } : {}), actors: [...data.actors.values()],
     sources: data.sources.map(s => ({ ...s })), counts: { events: data.events.length, artifacts: data.artifacts.length },
   }));
   app.get('/api/events', (req, res) => { const op = String(req.query.op || ''); send(res, { op, events: data.events.filter(e => inOp(e, op)).map(meta) }); });
+  app.get('/api/events/node', (req, res) => { const id = String(req.query.id || ''), tree = data.operationTree;
+    if (!tree || tree.error || !tree.nodes.some(n => n.id === id)) return res.status(404).json({ error: 'No such operation tree node' });
+    const nodes = new Map(tree.nodes.map(n => [n.id, n])), ids = new Set([id]); let changed = true;
+    while (changed) { changed = false; for (const n of tree.nodes) if (n.parent && ids.has(n.parent) && !ids.has(n.id)) { ids.add(n.id); changed = true; } }
+    if (id === 'unfiled') return send(res, { id, events: data.events.filter(e => !operationPlacement(e.operation, tree.nodes)).map(meta) });
+    send(res, { id, events: data.events.filter(e => { const placed = operationPlacement(e.operation, tree.nodes); return !!placed && ids.has(placed); }).map(meta) });
+  });
   app.get('/api/artifacts', (req, res) => { const op = String(req.query.op || ''), g = String(req.query.group || '');
     send(res, data.artifacts.filter(a => (!op || op === '*' || a.operation === op || a.operation?.startsWith(op + '/')) && (!g || a.group === g)).slice(0, 2000)); });
   // Default Expand: agent prose is replaced by a stub. It is served only by the explicit third-click route below.

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export interface Config { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; coordinatorSession?: string; home: string; spool?: string; repos?: string[];
+export interface Config { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; coordinatorSession?: string; home: string; spool?: string; repos?: string[]; operations?: string;
   room?: string; work?: string; research?: string; sessions?: string; extra?: string[] }
 export function config(env: NodeJS.ProcessEnv = process.env): Config {
   const home = env.OFFICE_HOME || os.homedir(), room = env.OFFICE_ROOM || path.join(home, 'dev/room');
@@ -12,6 +12,7 @@ export function config(env: NodeJS.ProcessEnv = process.env): Config {
     home, coordination, room,
     work: env.OFFICE_WORK || path.join(room, 'work'), research: env.OFFICE_RESEARCH || path.join(room, 'research'),
     sessions: env.OFFICE_SESSIONS || path.join(room, 'roles/sessions.json'),
+    operations: env.OFFICE_OPERATIONS || path.join(room, 'work/office/operations.json'),
     // top-level homes of what used to live in coordination/ (A2-A4): critic logs, the handoff log, briefings
     extra: env.OFFICE_EXTRA != null ? env.OFFICE_EXTRA.split(':').filter(Boolean) : ['critic', 'briefing'].map(n => path.join(room, n)),
     promptKnowledge: env.OFFICE_PROMPT_KNOWLEDGE || path.join(room, 'prompt-knowledge'),
@@ -64,6 +65,12 @@ export class Allowlist {
     const c = this.canonical(p, cwd), r = this.roots; if (!under(c, r.claudeProject)) return false;
     const rel = relSegs(r.claudeProject, c), last = rel[rel.length - 1];
     return (rel.length === 1 && /^[0-9a-f-]{36}\.jsonl$/i.test(last)) || (rel.length >= 3 && rel[1] === 'subagents' && /^agent-[A-Za-z0-9_-]+\.jsonl$/i.test(last));
+  }
+  // Token accounting may read only canonical Claude session and sub-agent transcripts under ~/.claude/projects.
+  isTokenTranscript(p: string, cwd?: string) {
+    const c=this.canonical(p,cwd), root=real(path.join(this.cfg.home,'.claude/projects')); if(!under(c,root))return false;
+    const rel=relSegs(root,c), file=rel[rel.length-1];
+    return (rel.length===2&&/^[0-9a-f-]{36}\.jsonl$/i.test(file)) || (rel.length===4&&/^[0-9a-f-]{36}$/i.test(rel[1])&&rel[2]==='subagents'&&/^agent-[A-Za-z0-9_-]+\.jsonl$/i.test(file));
   }
   isRawLog(p: string, cwd?: string) { const c = this.canonical(p, cwd); return under(c, this.roots.coordination) && /\.log$/i.test(c); }
   // The Office's own spool: already filtered at write, read only per event (path-only on the file route).

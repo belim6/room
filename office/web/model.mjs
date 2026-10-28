@@ -11,6 +11,39 @@ export const PERM = {
   // 2026-10-26 roles, at the free spots farthest from existing nodes
   'role:jev-correspondent': [0.18, 0.21], 'role:brainstormer': [0.16, 0.06], 'role:intern': [0.20, 0.79],
 };
+
+// Operation tree display and matching are kept pure so the same rules can be tested without a browser.
+export function operationTreeRows(tree) {
+  if (!tree || tree.error) return [];
+  const nodes = tree.nodes || [], byParent = new Map();
+  for (const n of nodes) (byParent.get(n.parent) || byParent.set(n.parent, []).get(n.parent)).push(n);
+  const out = [];
+  const walk = (n, depth) => { out.push({ ...n, depth }); for (const c of byParent.get(n.id) || []) walk(c, depth + 1); };
+  for (const n of byParent.get(null) || []) walk(n, 0);
+  return out;
+}
+export function operationTreeNodeEvents(events, tree, id) {
+  const nodes = tree?.nodes || [], byId = new Map(nodes.map(n => [n.id, n]));
+  if (id === 'unfiled') return events.filter(e => !operationPlacement(e.operation, nodes));
+  const ids = new Set([id]); let changed = true;
+  while (changed) { changed = false; for (const n of nodes) if (n.parent && ids.has(n.parent) && !ids.has(n.id)) { ids.add(n.id); changed = true; } }
+  return events.filter(e => { const placed = operationPlacement(e.operation, nodes); return !!placed && ids.has(placed); });
+}
+const fraction = (n, d) => `${n ?? 0}/${d ?? 0}`;
+export function operationTreeDisplay(n) {
+  const t = n.tokenUsage, budget = n.budget || {}, events = n.eventCount || 0;
+  const known = t?.eventsWithTokens ?? t?.knownEvents ?? 0, total = t?.events ?? t?.totalEvents ?? events;
+  const sum = t && known ? (t.input || 0) + (t.output || 0) + (t.cacheRead || 0) + (t.cacheWrite || 0) : null;
+  const allowance = budget.tokens ?? budget.tokenAllowance ?? budget.token_allowance;
+  const burn = sum == null || allowance == null ? 'n/a' : `${sum}/${allowance}`;
+  const compact = (value) => {
+    if (value == null) return 'n/a';
+    const abs = Math.abs(value);
+    for (const [limit, unit] of [[1e12, 'T'], [1e9, 'B'], [1e6, 'M'], [1e3, 'K']]) if (abs >= limit) return `${Number((value / limit).toFixed(3))}${unit}`;
+    return String(value);
+  };
+  return { events: String(events), gaps: fraction(n.gapCount || 0, events), tokenGaps: fraction(Math.max(0, total - known), total), known: fraction(known, total), knownEvents: String(known), totalTokenEvents: String(total), unfiled: n.unfiledEventCount ? String(n.unfiledEventCount) : '', tokens: compact(sum), tokensFull: sum == null ? 'n/a' : String(sum), tokenHint: `${known} of ${total} events have a number`, budget: Object.entries(budget).map(([k, v]) => `${k}: ${v}`).join(' · '), burn };
+}
 export const ARTIFACT = new Set(['archive', 'ledger', 'vault', 'rooms', 'repo', 'outside', 'transcripts', 'work']);
 export const FAIL = new Set(['error', 'no-go', 'missing', 'gap', 'extraction-failed', 'extraction-failed-repaired', 'stopped', 'blocked', 'no-output']);
 export const isFailure = (e) => FAIL.has(e.outcome) || e.verb === 'error' || e.verb === 'deviation' || e.verb === 'block';
@@ -210,3 +243,4 @@ export function agentStory(events, actorId, nameOf = (x) => x, now = Date.now())
   else parts.push(`working for ${dur(now - t0)} so far`);
   return `${nameOf(actorId)}: ${parts.join('; ')}.`;
 }
+import { operationPlacement } from './operation-placement.mjs';

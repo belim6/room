@@ -14,7 +14,13 @@ export interface OfficeEvent {
   detailRef: DetailRef; source: string; derived: boolean; provenance: Provenance;
   outcome?: string; tsSource?: 'record' | 'mtime' | 'interpolated' | 'linked'; label?: string;
   findings?: number; step?: string;   hints?: string[]; gap?: { direction: 'log-without-action' | 'action-without-log'; ref?: string };
+  tokenUsage?: TokenUsage | null;
 }
+export interface TokenUsage { input: number; output: number; cacheRead: number; cacheWrite: number; model: string | null; engine: string; weightedAssumption?: number }
+export interface OperationClose { summary: string; evidence: string[]; closedAt: string; tokens?: TokenRollup }
+export interface OperationNode { id: string; title: string; parent: string | null; goal: string; status: string; owner: string; budget: Record<string, unknown>; aliases?: string[]; close?: OperationClose; closeProblems?: string[];
+  eventCount: number; unfiledEventCount: number; gapCount: number; tokenUsage?: TokenRollup }
+export interface TokenRollup { input: number; output: number; cacheRead: number; cacheWrite: number; weightedAssumption: number; weightedLabel: string; knownEvents: number; totalEvents: number }
 export interface SourceStat { kind: string; path: string; records: number; events: number; unparsed: number; note?: string }
 export interface Artifact { path: string; group: string; size: number; mtime: string; operation?: string }
 

@@ -11,6 +11,7 @@
   <strong>Office</strong>
   <span id="views"><button data-v="floor" class="on">Floor</button><button data-v="workflow">Workflow</button><button data-v="rooms">Rooms</button><button data-v="archive">Archive</button></span>
   <select id="op" title="Operation"></select>
+  <span id="operation-error" class="note" hidden></span>
   <span id="coverage" class="cov" title="Coverage for this operation: events by provenance, and gaps between events.jsonl and the session transcript"></span>
   <span class="sep"></span>
   <button id="play" title="Play / pause (space)">▶</button>
@@ -26,10 +27,13 @@
   <span id="legend" class="mono"></span>
 </header>
 <div id="scrub"><canvas id="tl"></canvas></div>
+<div id="workspace">
+<aside id="tree-panel" hidden><div id="tree-heading"><strong>Operations</strong><span id="tree-unattributed"></span><button id="tree-collapse" type="button" title="Collapse operation tree" aria-expanded="true">‹</button></div><div id="operation-tree"></div></aside>
 <main>
   <section id="floorwrap"><canvas id="floor"></canvas><div id="tip"></div><div id="view" hidden></div></section>
   <aside id="inspector"><div class="empty">Click a node, an edge, a chip or an event.</div></aside>
 </main>
+</div>
 <footer id="log"><div id="logbar"><label><input type="checkbox" id="raw"> raw events</label></div><div id="logrows"></div></footer>
 <script type="module" src="office.js"></script>
 </body>
