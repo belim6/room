@@ -22,6 +22,44 @@ export function operationTreeRows(tree) {
   for (const n of byParent.get(null) || []) walk(n, 0);
   return out;
 }
+export function operationTreeCard(n, largestSiblingTokens = null) {
+  const d = operationTreeDisplay(n), t = n.tokenUsage, tokens = d.tokensFull === 'n/a' ? null : Number(d.tokensFull);
+  const largest = largestSiblingTokens;
+  const raw=(n.status||'history').toLowerCase(), status=n.id==='unfiled'?'unfiled':n.close?'closed':(['done','complete','completed'].includes(raw)?'done':['active','paused','history'].includes(raw)?raw:'history');
+  return { id:n.id, title:n.title || n.id, status, events:d.events, knownEvents:d.knownEvents, tokenEvents:`${d.knownEvents}/${d.totalTokenEvents} events have tokens`, tokens:d.tokens, tokensFull:d.tokensFull, share:tokens == null || !largest ? 0 : Math.max(0,Math.min(1,tokens/largest)), tokenValue:tokens };
+}
+export function operationTreeGraph(tree, collapsed = new Set(), { cardWidth=220, cardHeight=64, gapX=60, gapY=24 } = {}) {
+  const rows=operationTreeRows(tree), kids=new Map();
+  for(const n of rows) (kids.get(n.parent)||kids.set(n.parent,[]).get(n.parent)).push(n);
+  const visible=[], edges=[]; let cursor=0;
+  const count=(n)=>{if(collapsed.has(n.id))return 1;const cs=kids.get(n.id)||[];return cs.length?cs.reduce((s,c)=>s+count(c),0):1;};
+  const place=(n,depth)=>{const x=depth*(cardWidth+gapX),entry={...n,x,y:cursor*(cardHeight+gapY),collapsed:collapsed.has(n.id),hiddenCount:0};visible.push(entry);cursor++;
+    const cs=kids.get(n.id)||[];
+    if(collapsed.has(n.id)){const descendants=(id)=>(kids.get(id)||[]).reduce((s,c)=>s+1+descendants(c.id),0);entry.hiddenCount=descendants(n.id);return;}
+    for(const c of cs){place(c,depth+1);edges.push({from:n.id,to:c.id});}
+  };
+  for(const root of kids.get(null)||[]) if(root.id!=='unfiled') { const before=cursor; place(root,0); const used=cursor-before; cursor += Math.max(0,count(root)-used); }
+  const sibs=new Map(); for(const n of visible){ const key=n.parent||'__root'; (sibs.get(key)||sibs.set(key,[]).get(key)).push(n); }
+  for(const group of sibs.values()){ const vals=group.map(n=>operationTreeCard(n).tokenValue).filter(Number.isFinite), max=Math.max(0,...vals); for(const n of group)n.card=operationTreeCard(n,max); }
+  const unfiled=rows.find(n=>n.id==='unfiled'); if(unfiled){ visible.push({...unfiled,x:0,y:cursor*(cardHeight+gapY),detached:true,card:operationTreeCard(unfiled)}); }
+  return {nodes:visible,edges,width:Math.max(cardWidth,...visible.map(n=>n.x+cardWidth)),height:Math.max(cardHeight,...visible.map(n=>n.y+cardHeight)),cardWidth,cardHeight};
+}
+export function operationGraphPointerHandlers({ select, pan, capture = () => {}, threshold = 4 }) {
+  let start = null, target = null, twist = false, moved = false, suppressClick = false;
+  return {
+    down(e) { start = [e.clientX, e.clientY]; target = e.target?.closest?.('.op-node'); twist = !!e.target?.closest?.('.op-twist, .op-more'); moved = false; },
+    move(e) {
+      if (!start) return;
+      const dx=e.clientX-start[0], dy=e.clientY-start[1];
+      if (!moved && Math.hypot(dx,dy) <= threshold) return;
+      if (!moved) { moved=true; capture(e.pointerId); }
+      pan(dx,dy); start=[e.clientX,e.clientY];
+    },
+    up() { if (start && !moved && target && !twist) { select(target); suppressClick=true; } start=null; target=null; twist=false; moved=false; },
+    cancel() { start=null; target=null; twist=false; moved=false; },
+    click(e) { if (!suppressClick) return true; suppressClick=false; e.preventDefault(); e.stopPropagation(); return false; }
+  };
+}
 export function operationTreeNodeEvents(events, tree, id) {
   const nodes = tree?.nodes || [], byId = new Map(nodes.map(n => [n.id, n]));
   if (id === 'unfiled') return events.filter(e => !operationPlacement(e.operation, nodes));

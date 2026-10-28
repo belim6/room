@@ -11,6 +11,7 @@ body { display: grid; grid-template-rows: auto 34px 1fr 128px; height: 100vh; ov
 #workspace.tree-hidden { grid-template-columns:minmax(0,1fr); }
 #workspace.tree-hidden.tree-collapsed { grid-template-columns:minmax(0,1fr); }
 #tree-panel { min-width:0; min-height:0; overflow:hidden; border-right:1px solid var(--line); background:var(--panel); display:flex; flex-direction:column; }
+#operation-tree { display:none; }
 #tree-panel[hidden] { display:none; }
 #tree-heading { min-height:34px; display:flex; align-items:center; gap:8px; padding:4px 7px; border-bottom:1px solid var(--line); }
 #tree-heading strong { flex:none; }
@@ -84,6 +85,23 @@ main { display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
 #views button.on { border-color: var(--cap); color: var(--cap); }
 #filterbar { color: var(--cap); }
 #view { position: absolute; inset: 0; overflow: auto; background: var(--bg); padding: 10px 14px; }
+.graph-mode { grid-template-columns:minmax(0,1fr) 400px; height:100%; }
+.graph-mode #floorwrap { height:100%; }
+.graph-mode #view { inset:0; padding:0; overflow:hidden; }
+.op-graph-wrap { position:absolute; inset:0; display:flex; flex-direction:column; overflow:hidden; }
+.op-graph-tools { flex:none; padding:5px 8px; border-bottom:1px solid var(--line); }
+.op-graph-tools button { background:#1b2129; color:var(--fg); border:1px solid var(--line); border-radius:3px; padding:3px 9px; cursor:pointer; }
+.op-graph-tools button+button { margin-left:5px; }
+.op-graph { width:100%; height:100%; min-height:0; flex:1; touch-action:none; cursor:grab; }
+.op-edge { fill:none; stroke:#46515e; stroke-width:1.4; }
+.op-card { fill:#131a22; stroke:#3a4652; stroke-width:1; }
+.op-node { cursor:pointer; outline:none; }
+.op-node:hover .op-card,.op-node.selected .op-card,.op-node:focus .op-card { stroke:#7cc4ff; stroke-width:2; }
+.op-title { fill:var(--fg); font-size:12px; font-weight:600; pointer-events:none; }
+.op-status,.op-meta,.op-more,.op-twist { fill:var(--dim); font-size:9px; pointer-events:none; }
+.op-meta { font-family:ui-monospace,Menlo,monospace; }
+.op-bar-bg { fill:#29323b; }.op-bar { fill:var(--cap); }
+.status-active .op-status { fill:var(--ok); }.status-paused .op-status { fill:var(--amber); }.status-done .op-status,.status-closed .op-status { fill:var(--cap); }.status-unfiled .op-card { stroke:var(--amber); stroke-dasharray:5 3; }.status-unfiled .op-status { fill:var(--amber); }
 #view h2 { font-size: 13px; margin: 8px 0 4px; } #view .sub { color: var(--dim); margin-bottom: 8px; }
 #view svg text { font: 11px system-ui, sans-serif; fill: var(--fg); } #view svg .dim { fill: var(--dim); } #view svg .small { font-size: 9px; }
 .wf-step { cursor: pointer; } .wf-step rect { fill: #0f1318; stroke: #3a434d; stroke-dasharray: 4 3; }

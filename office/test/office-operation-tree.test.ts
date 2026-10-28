@@ -7,7 +7,7 @@ import { Allowlist, config } from '../collect/privacy';
 import { operationTree } from '../collect/operations';
 // @ts-ignore untyped browser module
 import * as modelModule from '../web/model.mjs';
-const { operationTreeRows, operationTreeDisplay, operationTreeNodeEvents }: any = modelModule;
+const { operationTreeRows, operationTreeDisplay, operationTreeNodeEvents, operationTreeGraph, operationTreeCard, operationGraphPointerHandlers }: any = modelModule;
 import type { OfficeEvent } from '../collect/types';
 
 const realEvents = '/Users/denizyuksel/dev/room/events.jsonl';
@@ -28,10 +28,40 @@ test('configured operation tree aliases and rolls up a forest; missing tree pres
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('graph layout separates cards, layers children, collapses descendants, and card values stay compact', () => {
+  const tree:any={nodes:[{id:'a',parent:null,title:'A',status:'active',eventCount:4,tokenUsage:{events:4,eventsWithTokens:2,input:500000000}},{id:'b',parent:'a',title:'B',status:'paused',eventCount:2,tokenUsage:{events:2,eventsWithTokens:1,input:100}},{id:'c',parent:'b',title:'C',eventCount:1},{id:'z',parent:null,title:'Z',eventCount:1}]};
+  const g=operationTreeGraph(tree,new Set());
+  for(let i=0;i<g.nodes.length;i++)for(let j=i+1;j<g.nodes.length;j++){const a=g.nodes[i],b=g.nodes[j];assert.ok(a.x+g.cardWidth<=b.x||b.x+g.cardWidth<=a.x||a.y+g.cardHeight<=b.y||b.y+g.cardHeight<=a.y);}
+  assert.equal(g.cardWidth,220);assert.equal(g.cardHeight,64);
+  assert.ok(g.nodes.find((n:any)=>n.id==='a').x<g.nodes.find((n:any)=>n.id==='b').x);
+  assert.ok(g.nodes.find((n:any)=>n.id==='b').y<g.nodes.find((n:any)=>n.id==='z').y);
+  const folded=operationTreeGraph(tree,new Set(['a']));assert.equal(folded.nodes.some((n:any)=>n.id==='b'),false);assert.equal(folded.nodes.find((n:any)=>n.id==='a').hiddenCount,2);
+  assert.equal(operationTreeCard(tree.nodes[0],500000000).tokens,'500M');
+  assert.equal(operationTreeCard(tree.nodes[0],500000000).knownEvents,'2');
+  assert.equal(operationTreeCard(tree.nodes[0],500000000).events,'4');
+  assert.equal(operationTreeCard({id:'x',eventCount:1},null).tokens,'n/a');
+});
+
+test('graph click uses the same node event selector, including descendant operations', () => {
+  const tree:any={nodes:[{id:'p',parent:null},{id:'c',parent:'p'}]}, events=[event('p','p'),event('c','c'),event('other','else')];
+  assert.deepEqual(operationTreeNodeEvents(events,tree,'p').map((e:any)=>e.id),['p','c']);
+});
+
+test('graph pointer gesture selects a stationary card and pans only after the drag threshold', () => {
+  const selected:string[]=[], pans:number[][]=[], captured:number[]=[];
+  const card:any={id:'card',closest:(selector:string)=>selector==='.op-node'?card:null,getAttribute:(key:string)=>key==='data-id'?'card':null};
+  const target:any={closest:(selector:string)=>selector==='.op-node'?card:null};
+  const h=operationGraphPointerHandlers({select:(n:any)=>selected.push(n.id),pan:(x:number,y:number)=>pans.push([x,y]),capture:(id:number)=>captured.push(id)});
+  h.down({clientX:10,clientY:10,target,pointerId:1});h.up();
+  assert.deepEqual(selected,['card']);assert.deepEqual(pans,[]);assert.deepEqual(captured,[]);
+  h.down({clientX:10,clientY:10,target,pointerId:2});h.move({clientX:12,clientY:12,pointerId:2});assert.deepEqual(pans,[]);
+  h.move({clientX:16,clientY:10,pointerId:2});h.move({clientX:19,clientY:10,pointerId:2});h.up();
+  assert.deepEqual(selected,['card']);assert.deepEqual(pans,[[6,0],[3,0]]);assert.deepEqual(captured,[2]);
+});
+
 test('real events.jsonl: every record is placed by id/alias or counted under unfiled', () => {
   const records = fs.readFileSync(realEvents, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line));
-  assert.equal(records.length, 253);
-  assert.equal(records.filter(r => !r.operation).length, 15);
+  const noOp = records.filter(r => !r.operation).length; // the log grows; compare against itself, not a frozen count
   const ids = [...new Set(records.map(r => r.operation).filter((x): x is string => typeof x === 'string'))];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'office-tree-real-'));
   try {
@@ -43,7 +73,7 @@ test('real events.jsonl: every record is placed by id/alias or counted under unf
     const placed = tree.nodes.filter(n => n.id !== 'unfiled').reduce((sum, n) => sum + n.eventCount, 0);
     const missing = tree.nodes.find(n => n.id === 'unfiled');
     assert.equal(placed + (missing?.eventCount || 0), records.length);
-    assert.equal(missing?.eventCount, 15); assert.equal(missing?.unfiledEventCount, 15);
+    assert.equal(missing?.eventCount, noOp); assert.equal(missing?.unfiledEventCount, noOp);
     for (const n of tree.nodes) assert.equal(operationTreeNodeEvents(events, tree, n.id).length, n.eventCount);
     assert.deepEqual(events.map(e => e.operation), before);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
