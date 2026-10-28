@@ -1,4 +1,4 @@
-import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeRows, operationTreeDisplay, operationTreeGraph, operationGraphPointerHandlers, operationTreeNodeEvents } from './model.mjs';
+import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeRows, operationTreeDisplay, operationTreeGraph, operationGraphPointerHandlers, operationTreeNodeEvents, parseOfficeRoute, officeRouteHash, operationBreadcrumb, runningStripModel, createRouteGuard, validOfficeOperationRoute } from './model.mjs';
 import { liveClient } from './liveclient.mjs';
 
 const $ = (s) => document.querySelector(s);
@@ -14,75 +14,98 @@ const base = (p = '') => p.split('/').pop();
 const inOp = (e, op) => !op || op === '*' || e.operation === op || (e.operation || '').startsWith(op + '/');
 
 const S = { summary: null, op: '', events: [], actors: [], A: new Map(), L: null, tl: null, c: 0, playing: false, speed: 10, compress: true, sel: null, hover: null, lastLog: '',
-  byId: new Map(), live: false, es: null, focus: true, follow: null, raw: false, cam: { x: 0, y: 0, s: 1 }, opTitle: new Map(), changed: 0, treeNode: '', collapsed: new Set() };
+  byId: new Map(), live: false, es: null, focus: true, follow: null, raw: false, cam: { x: 0, y: 0, s: 1 }, opTitle: new Map(), changed: 0, treeNode: '', graphSelection: '', collapsed: new Set(), allEvents: null };
+const routeGuard = createRouteGuard();
 globalThis.officeState = S; // for inspection from the console
 const nameOf = (id) => { const a = S.A.get(id); return a?.name || a?.label || id; };
 const opTitleOf = (id) => S.opTitle.get(id) || id;
 
 async function init() {
-  let treeCollapsed = false;
-  try { treeCollapsed = localStorage.getItem('office-operation-tree-collapsed') === 'true'; } catch {}
-  $('#workspace').classList.toggle('tree-collapsed', treeCollapsed);
-  $('#tree-collapse').setAttribute('aria-expanded', String(!treeCollapsed));
-  $('#tree-collapse').onclick = () => {
-    const collapsed = !$('#workspace').classList.contains('tree-collapsed');
-    $('#workspace').classList.toggle('tree-collapsed', collapsed);
-    $('#tree-collapse').setAttribute('aria-expanded', String(!collapsed));
-    $('#tree-collapse').title = collapsed ? 'Expand operation tree' : 'Collapse operation tree';
-    try { localStorage.setItem('office-operation-tree-collapsed', String(collapsed)); } catch {}
-  };
   S.loadedAt = Date.now();
   S.summary = await get('/api/summary'); fillOps();
   const sel = $('#op'), ops = S.summary.operations;
-  const want = decodeURIComponent((location.hash.match(/op=([^&]+)/) || [])[1] || '');
+  const want = parseOfficeRoute(location.hash).id || '';
   sel.value = ops.some((o) => o.id === want) ? want : ops.some((o) => o.id === '2026-10-17/date/labeling') ? '2026-10-17/date/labeling' : [...ops].sort((a, b) => (a.end < b.end ? 1 : -1))[0]?.id || '*';
-  sel.onchange = () => loadOp(sel.value);
-  addEventListener('hashchange', () => { const o = decodeURIComponent((location.hash.match(/op=([^&]+)/) || [])[1] || ''); if (o && o !== S.op && [...sel.options].some((x) => x.value === o)) { sel.value = o; loadOp(o); } });
+  sel.onchange = () => navigateOperation(sel.value, 'floor', true);
+  addEventListener('hashchange', () => applyRoute());
   $('#play').onclick = togglePlay;
   for (const b of document.querySelectorAll('#speeds button')) b.onclick = () => { S.speed = +b.dataset.s; document.querySelectorAll('#speeds button').forEach((x) => x.classList.toggle('on', x === b)); };
   $('#compress').onchange = (e) => { const t = S.tl.toReal(S.c); S.compress = e.target.checked; S.tl = timeline(S.events, { compress: S.compress }); S.c = S.tl.toComp(t); };
   $('#focus').onchange = (e) => { S.focus = e.target.checked; };
   $('#raw').onchange = (e) => { S.raw = e.target.checked; $('#logrows').classList.toggle('raw', S.raw); S.lastLog = ''; };
   $('#live').onclick = toggleLive;
-  for (const b of document.querySelectorAll('#views button')) b.onclick = () => showView(b.dataset.v);
+  for (const b of document.querySelectorAll('#views button')) b.onclick = () => navigateOperation(S.op, b.dataset.v, true);
+  $('#home-link').onclick = () => { location.hash = '#/'; };
   addEventListener('keydown', (e) => { if (e.key === ' ' && e.target === document.body) { e.preventDefault(); togglePlay(); } if (e.key === 'Escape') follow(null); });
   $('#legend').append('read artifact→actor · write actor→artifact · ', h('span', { class: 'lc' }, '— captured '), h('span', { class: 'ld' }, '- - derived '), h('span', { class: 'li' }, '··· inferred '), h('span', { class: 'lr' }, '■ fail/gap'));
   setupCanvas(); setupTimeline();
-  await loadOp(sel.value);
+  if (!location.hash) history.replaceState(null, '', '#/');
+  await applyRoute();
   requestAnimationFrame(frame);
 }
 // Local calendar day of an operation's latest event, as YYYY-MM-DD.
 const lastDay = (ts) => new Date(ts).toLocaleDateString('en-CA');
 function fillOps() {
   const sel = $('#op'), cur = sel.value, ops = S.summary.operations; S.opTitle = new Map(ops.map((o) => [o.id, o.title || o.label]));
-  const tree = S.summary.operationTree, treeMode = !!tree && !tree.error;
-  $('#op').hidden = treeMode; $('#tree-panel').hidden = !treeMode; $('#workspace').classList.toggle('tree-hidden', !treeMode); $('#operation-error').hidden = !tree?.error; $('#operation-error').textContent = tree?.error || ''; document.querySelector('[data-v="graph"]').hidden=!treeMode;
-  if (treeMode) { renderOperationTree(); return; }
+  const tree = S.summary.operationTree, fallback = !tree || !!tree.error;
+  $('#op').hidden = !fallback; $('#operation-error').hidden = !tree?.error; $('#operation-error').textContent = tree?.error || '';
   sel.replaceChildren(h('option', { value: '*' }, `All operations (${S.summary.counts?.events ?? ''} events)`),
     ...ops.map((o) => h('option', { value: o.id, title: o.packet || '' }, `${'  '.repeat(o.id.split('/').length - 1)}${o.title || o.label}${o.packet && o.id.split('/').length === 2 ? ' — ' + o.packet : ''}  ·  ${o.coverage.events} ev${o.coverage.gaps ? ` · ${o.coverage.gaps} gaps` : ''}${Number.isFinite(Date.parse(o.end)) ? `  ·  last ${lastDay(o.end)}` : ''}`)));
   if (cur) sel.value = cur;
 }
-function renderOperationTree() {
-  const tree = S.summary.operationTree;
-  const unattributed = tree?.unattributed, unattributedSum = unattributed ? ['input','output','cacheRead','cacheWrite'].reduce((sum,k)=>sum+(unattributed[k]||0),0) : null;
-  $('#tree-unattributed').textContent = unattributedSum == null ? '' : `Unattributed ${compactTokens(unattributedSum)} tokens`;
-  $('#tree-unattributed').title = unattributedSum == null ? '' : `Unattributed ${unattributedSum} tokens`;
+async function navigateOperation(id, tab = 'floor', push = false) {
+  if (!id) return;
+  const route = { page: 'operation', id, tab };
+  const hash = officeRouteHash(route);
+  if (push && location.hash !== hash) location.hash = hash;
+  const token = routeGuard.begin(); await applyRoute(route, token); if (!routeGuard.current(token)) return;
+}
+async function applyRoute(route = parseOfficeRoute(location.hash), token = routeGuard.begin()) {
+  if (validOfficeOperationRoute(route, S.summary.operationTree, S.summary.operations)) {
+    const canonical=officeRouteHash(route); if(location.hash!==canonical) history.replaceState(null,'',canonical);
+    const same = S.op === route.id && S.treeNode === route.id;
+    if (S.summary.operationTree && !S.summary.operationTree.error) {
+      if (!same) await loadTreeNode(route.id, token);
+    } else if (!same) { S.treeNode=''; await loadOp(route.id, token); }
+    if (!routeGuard.current(token)) return;
+    document.body.classList.remove('home-page'); $('#workspace').classList.remove('home-mode'); $('#scrub').hidden=false; $('#log').hidden=false; $('#running-now').hidden=true;
+    $('#views').hidden=false; $('#breadcrumb').replaceChildren(...operationBreadcrumb(S.summary.operationTree,route.id).map((c,i,a)=>h('button',{class:'crumb',on:{click:()=>{if(c.id==null)location.hash='#/';else if(i<a.length-1)navigateOperation(c.id,'floor',true);}}},i?' › ':'',c.title)));
+    showView(route.tab); renderRunning(); renderTopRunning();
+    return;
+  }
+  S.treeNode=''; document.body.classList.add('home-page'); $('#workspace').classList.add('home-mode'); $('#scrub').hidden=true; $('#log').hidden=true; $('#views').hidden=true; $('#running-now').hidden=false;
+  if (!S.allEvents) { const {events}=await get('/api/events?op=*'); if (!routeGuard.current(token)) return; S.allEvents=events; S.homeEventsLoaded=true; }
+  if (!routeGuard.current(token)) return;
+  if (S.treeNode || S.op !== '*') setEvents(S.allEvents,true);
+  S.op='*';
+  $('#breadcrumb').replaceChildren(h('button',{class:'crumb',on:{click:()=>{}}},'Home'));
+  S.view='home'; $('#view').hidden=false; renderOperationGraph(); renderRunning(); renderTopRunning();
+}
+function renderRunning() {
+  const strip=$('#running-now'); if(!strip)return;
+  const rows=runningStripModel(S.events,S.actors,S.summary.operationTree);
+  strip.replaceChildren(h('strong',{},'Running now'),...(rows.length?rows.map(r=>h('button',{class:'running-row',on:{click:()=>navigateOperation(r.nodeId,'floor',true)}},`${r.nodeTitle} · ${r.who} · ${Math.floor(r.ageMs/60000)}m · ${r.burn}`)):[h('span',{class:'empty-running'},'Nothing running')]));
+}
+function renderTopRunning() {
+  const rows=runningStripModel(S.events,S.actors,S.summary.operationTree);
+  $('#running-line').replaceChildren(...(rows.length?[h('button',{on:{click:()=>navigateOperation(rows[0].nodeId,'floor',true)}},`${rows.length} running · ${rows.map(r=>`${r.nodeTitle} · ${r.who} · ${r.burn}`).join(' · ')}`)]:[]));
 }
 function renderOperationGraph() {
   const box=$('#view'), tree=S.summary.operationTree, pad=12;
+  const liveNodes=new Set(runningStripModel(S.events,S.actors,tree).map(r=>r.nodeId));
   if(!S.graphInitialized){const rows=operationTreeRows(tree),children=new Set(rows.filter(n=>n.parent).map(n=>n.parent));for(const n of rows)if(n.parent&&rows.find(p=>p.id===n.parent)?.parent)S.collapsed.add(n.id);S.graphInitialized=true;}
   const g=operationTreeGraph(tree,S.collapsed), outer=h('div',{class:'op-graph-wrap'}), tools=h('div',{class:'op-graph-tools'});
   const svg=sv('svg',{class:'op-graph',tabindex:'0'}), defs=sv('defs'), world=sv('g');
   for(const edge of g.edges){const a=g.nodes.find(n=>n.id===edge.from),b=g.nodes.find(n=>n.id===edge.to); if(!a||!b)continue; const mid=a.y+g.cardHeight+35; world.append(sv('path',{class:'op-edge',d:`M${a.x+g.cardWidth/2},${a.y+g.cardHeight} V${mid} H${b.x+g.cardWidth/2} V${b.y}`}));}
-  for(const [index,n] of g.nodes.entries()){const c=n.card, clipId=`op-card-clip-${index}`, clip=sv('clipPath',{id:clipId});clip.append(sv('rect',{x:8,y:5,width:g.cardWidth-16,height:48}));defs.append(clip);const group=sv('g',{class:`op-node status-${c.status}${S.treeNode===n.id?' selected':''}${n.detached?' detached':''}`,transform:`translate(${n.x},${n.y})`,tabindex:'0',role:'button', 'aria-label':`${c.title}, ${c.status}`});
+  for(const [index,n] of g.nodes.entries()){const c=n.card, clipId=`op-card-clip-${index}`, clip=sv('clipPath',{id:clipId});clip.append(sv('rect',{x:8,y:5,width:g.cardWidth-16,height:48}));defs.append(clip);const group=sv('g',{class:`op-node status-${c.status}${liveNodes.has(n.id)?' live':''}${S.graphSelection===n.id?' selected':''}${n.detached?' detached':''}`,transform:`translate(${n.x},${n.y})`,tabindex:'0',role:'button', 'aria-label':`${c.title}, ${c.status}${liveNodes.has(n.id)?', running':''}`});
     const title=c.title.length>25?`${c.title.slice(0,24)}…`:c.title;
     group.append(sv('rect',{class:'op-card',width:g.cardWidth,height:g.cardHeight,rx:5}),sv('text',{class:'op-title',x:10,y:19,'clip-path':`url(#${clipId})`},title),sv('text',{class:'op-status',x:10,y:35,'clip-path':`url(#${clipId})`},c.status),sv('text',{class:'op-meta',x:10,y:49,'clip-path':`url(#${clipId})`},`${c.events} ev · ${c.knownEvents} w/ tokens · ${c.tokens}`),sv('rect',{class:'op-bar-bg',x:10,y:56,width:g.cardWidth-20,height:3,rx:2}),sv('rect',{class:'op-bar',x:10,y:56,width:Math.max(0,(g.cardWidth-20)*c.share),height:3,rx:2}));
     if(n.collapsed)group.append(sv('text',{class:'op-more',x:g.cardWidth-10,y:19,'text-anchor':'end',on:{click:e=>{e.stopPropagation();S.collapsed.delete(n.id);renderOperationGraph();}}},`+${n.hiddenCount}`));
-    else if((tree.nodes||[]).some(x=>x.parent===n.id))group.append(sv('text',{class:'op-twist',x:g.cardWidth-10,y:19,'text-anchor':'end',on:{click:e=>{e.stopPropagation();S.collapsed.add(n.id);renderOperationGraph();}}},'−'));
-    group.append(sv('title',{},`${c.title}\n${c.events} ev · ${c.knownEvents} w/ tokens · ${c.tokensFull} tokens\n${c.status}\n${n.goal||''} · owner ${n.owner||'n/a'} · budget ${JSON.stringify(n.budget||{})}\n${n.close?.summary||''}\n${(n.closeProblems||[]).join('; ')}`)); group.addEventListener('click',()=>{loadTreeNode(n.id).then(()=>showOperationDetail(n));}); group.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();loadTreeNode(n.id).then(()=>showOperationDetail(n));}}); world.append(group);
+    else if((tree?.nodes||[]).some(x=>x.parent===n.id))group.append(sv('text',{class:'op-twist',x:g.cardWidth-10,y:19,'text-anchor':'end',on:{click:e=>{e.stopPropagation();S.collapsed.add(n.id);renderOperationGraph();}}},'−'));
+    group.append(sv('title',{},`${c.title}\n${c.events} ev · ${c.knownEvents} w/ tokens · ${c.tokensFull} tokens\n${c.status}\n${n.goal||''} · owner ${n.owner||'n/a'} · budget ${JSON.stringify(n.budget||{})}\n${n.close?.summary||''}\n${(n.closeProblems||[]).join('; ')}`)); group.addEventListener('click',()=>{navigateOperation(n.id,'floor',true);}); group.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();navigateOperation(n.id,'floor',true);}}); world.append(group);
   }
   svg.append(defs,world); svg.addEventListener('keydown',e=>{if(!['ArrowDown','ArrowRight','ArrowUp','ArrowLeft'].includes(e.key))return;e.preventDefault();const list=[...svg.querySelectorAll('.op-node')],i=list.indexOf(document.activeElement),next=e.key==='ArrowDown'||e.key==='ArrowRight'?Math.min(list.length-1,i+1):Math.max(0,i-1);list[next]?.focus();});
-  const gesture=operationGraphPointerHandlers({select:node=>{const n=g.nodes.find(x=>x.id===node.dataset?.id)||g.nodes.find(x=>x.id===node.getAttribute?.('data-id'));if(n)loadTreeNode(n.id).then(()=>showOperationDetail(n));},pan:(dx,dy)=>{S.graphCam.x+=dx;S.graphCam.y+=dy;world.setAttribute('transform',`translate(${S.graphCam.x},${S.graphCam.y}) scale(${S.graphCam.s})`);},capture:id=>svg.setPointerCapture(id)});
+  const gesture=operationGraphPointerHandlers({select:node=>{const n=g.nodes.find(x=>x.id===node.dataset?.id)||g.nodes.find(x=>x.id===node.getAttribute?.('data-id'));if(n)navigateOperation(n.id,'floor',true);},pan:(dx,dy)=>{S.graphCam.x+=dx;S.graphCam.y+=dy;world.setAttribute('transform',`translate(${S.graphCam.x},${S.graphCam.y}) scale(${S.graphCam.s})`);},capture:id=>svg.setPointerCapture(id)});
   for(const [node,n] of [...world.querySelectorAll('.op-node')].map((node,i)=>[node,g.nodes[i]]))node.dataset.id=n.id;
   svg.addEventListener('pointerdown',e=>gesture.down(e));svg.addEventListener('pointermove',e=>gesture.move(e));svg.addEventListener('pointerup',e=>gesture.up(e));svg.addEventListener('pointercancel',()=>gesture.cancel());svg.addEventListener('click',e=>gesture.click(e),true);svg.addEventListener('wheel',e=>{e.preventDefault();const factor=e.deltaY<0?1.1:.9;S.graphCam.s=Math.max(.6,Math.min(2.5,S.graphCam.s*factor));world.setAttribute('transform',`translate(${S.graphCam.x},${S.graphCam.y}) scale(${S.graphCam.s})`);},{passive:false});
   const sync=()=>{const r=svg.getBoundingClientRect();svg.setAttribute('viewBox',`0 0 ${Math.max(1,r.width)} ${Math.max(1,r.height)}`);world.setAttribute('transform',`translate(${S.graphCam.x},${S.graphCam.y}) scale(${S.graphCam.s})`);};
@@ -96,11 +119,11 @@ function showOperationDetail(n){
   box.replaceChildren(h('h3',{},n.title||n.id),h('table',{},...lines.map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.close?.summary?[['Close summary',n.close.summary],['Close evidence',(n.close.evidence||[]).join(', ')],['Closed at',n.close.closedAt]]:[]).map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.closeProblems||[]).map(p=>h('tr',{class:'note'},h('td',{},'Close issue'),h('td',{},p)))),evList(S.events));
 }
 function compactTokens(value) { const abs=Math.abs(value); for (const [limit,unit] of [[1e12,'T'],[1e9,'B'],[1e6,'M'],[1e3,'K']]) if(abs>=limit)return `${Number((value/limit).toFixed(3))}${unit}`; return String(value); }
-async function loadTreeNode(id) { S.treeNode=id; S.op=id; location.hash='op='+encodeURIComponent(id); const {events}=await get('/api/events/node?id='+encodeURIComponent(id)); S.filter=null; $('#filterbar').replaceChildren(); setEvents(events,true); renderOperationTree(); if(S.view&&S.view!=='floor')showView(S.view); S.playing=false; $('#play').textContent='▶'; follow(null); select(null); }
-async function loadOp(op) {
+async function loadTreeNode(id, token) { const {events}=await get('/api/events/node?id='+encodeURIComponent(id)); if(!routeGuard.current(token))return; S.treeNode=id; S.graphSelection=id; S.op=id; S.filter=null; $('#filterbar').replaceChildren(); setEvents(events,true); if(S.view&&S.view!=='floor')showView(S.view); S.playing=false; $('#play').textContent='▶'; follow(null); select(null); }
+async function loadOp(op, token) {
   if (S.live) { live.stop(); live.start(); } // re-subscribe so the catch-up targets the new operation
-  S.op = op; location.hash = 'op=' + encodeURIComponent(op);
-  S.treeNode=''; const { events } = await get('/api/events?op=' + encodeURIComponent(op));
+  const { events } = await get('/api/events?op=' + encodeURIComponent(op)); if(!routeGuard.current(token))return;
+  S.op = op; S.treeNode='';
   S.filter = null; $('#filterbar').replaceChildren(); setEvents(events, true); if (S.view && S.view !== 'floor') showView(S.view);
   S.playing = false; $('#play').textContent = '▶'; follow(null); select(null);
 }
@@ -123,7 +146,7 @@ function togglePlay() { if (S.live) toggleLive(); if (!S.playing && S.c >= S.tl.
 
 // ---- live (SSE) ----------------------------------------------------------------------------------------------------
 const live = liveClient({
-  refetch: async () => { const summary=await get('/api/summary'); return { summary, events:(await get(S.treeNode?'/api/events/node?id='+encodeURIComponent(S.treeNode):'/api/events?op='+encodeURIComponent(S.op))).events }; },
+  refetch: async () => { const summary=await get('/api/summary'); return { summary, events:(await get(S.treeNode?'/api/events/node?id='+encodeURIComponent(S.treeNode):'/api/events?op='+encodeURIComponent(S.view==='home'?'*':S.op))).events }; },
   onReset: ({ summary, events }) => { S.summary = summary; fillOps(); setEvents(events, false); },
   onDelta: (d) => applyLive(d),
 });
@@ -140,9 +163,11 @@ export function applyLive(msg) {
   if (msg.operationTree) S.summary.operationTree = msg.operationTree;
   if (msg.operations || msg.operationTree) fillOps();
   const rm = new Set(msg.removes || []), byId = new Map((S.base || S.events).filter((e) => !rm.has(e.id)).map((e) => [e.id, e]));
-  for (const e of msg.upserts || []) if (S.treeNode ? operationTreeNodeEvents([e],S.summary.operationTree,S.treeNode).length : inOp(e, S.op)) byId.set(e.id, e); else byId.delete(e.id);
+  for (const e of msg.upserts || []) if (S.treeNode ? operationTreeNodeEvents([e],S.summary.operationTree,S.treeNode).length : S.view==='home' || inOp(e, S.op)) byId.set(e.id, e); else byId.delete(e.id);
   setEvents([...byId.values()].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.seq - b.seq)), false);
-  if(S.view==='graph') renderOperationGraph();
+  if(S.view==='home') S.allEvents=S.events;
+  if(S.view==='home') renderOperationGraph();
+  renderRunning(); renderTopRunning();
 }
 
 // ---- follow ----------------------------------------------------------------------------------------------------------
@@ -349,9 +374,9 @@ const section = (s) => h('details', { open: s.hidden ? null : '' }, h('summary',
 
 // ---- O3 views: workflow graph, experiment fans, archive -------------------------------------------------------------------
 function showView(v) {
-  S.view = v; for (const b of document.querySelectorAll('#views button')) b.classList.toggle('on', b.dataset.v === v); $('#workspace').classList.toggle('graph-mode',v==='graph'); $('#tree-panel').hidden=v==='graph'||!S.summary.operationTree||!!S.summary.operationTree.error;
+  S.view = v; for (const b of document.querySelectorAll('#views button')) b.classList.toggle('on', b.dataset.v === v);
   const box = $('#view'); if (v === 'floor') { box.hidden = true; return; }
-  box.hidden = false; if(v==='graph'){renderOperationGraph();return;} box.replaceChildren(h('div', { class: 'sub' }, 'loading…'));
+  box.hidden = false; if(v==='home'){renderOperationGraph();return;} box.replaceChildren(h('div', { class: 'sub' }, 'loading…'));
   (v === 'workflow' ? workflowView : v === 'rooms' ? roomsView : archiveView)(box).catch((e) => box.replaceChildren(h('pre', { class: 'fatal' }, e.message)));
 }
 // filter the floor and narration to one step's events (clicking a step)

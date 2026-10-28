@@ -22,6 +22,50 @@ export function operationTreeRows(tree) {
   for (const n of byParent.get(null) || []) walk(n, 0);
   return out;
 }
+export function parseOfficeRoute(hash = '') {
+  const value = String(hash).replace(/^#/, '');
+  if (!value || value === '/') return { page: 'home' };
+  const legacy = value.match(/^op=(.*)$/);
+  if (legacy) return { page: 'operation', id: decodeURIComponent(legacy[1]), tab: 'floor', legacy: true };
+  const match = value.match(/^\/op\/([^/]+)\/(floor|workflow|rooms|archive)$/);
+  return match ? { page: 'operation', id: decodeURIComponent(match[1]), tab: match[2] } : { page: 'home' };
+}
+export function officeRouteHash(route) {
+  return route?.page === 'operation' ? `#/op/${encodeURIComponent(route.id)}/${route.tab || 'floor'}` : '#/';
+}
+export function createRouteGuard() {
+  let token = 0;
+  return { begin() { return ++token; }, current(value) { return value === token; } };
+}
+export function validOfficeOperationRoute(route, tree, operations = []) {
+  if (route?.page !== 'operation' || !['floor','workflow','rooms','archive'].includes(route.tab)) return false;
+  return tree && !tree.error ? (tree.nodes || []).some(n => n.id === route.id) : route.id === '*' || operations.some(o => o.id === route.id);
+}
+export function operationBreadcrumb(tree, id) {
+  const rows = tree?.nodes || [], byId = new Map(rows.map(n => [n.id, n])), path = [];
+  let node = byId.get(id), seen = new Set();
+  while (node && !seen.has(node.id)) { seen.add(node.id); path.unshift({ id: node.id, title: node.title || node.id }); node = node.parent ? byId.get(node.parent) : null; }
+  return [{ id: null, title: 'Home' }, ...path];
+}
+export function runningStripModel(events, actors, tree, now = Date.now()) {
+  const byActor = new Map();
+  for (const e of events || []) {
+    if (!e.actor?.id) continue;
+    const old = byActor.get(e.actor.id);
+    if (!old || Date.parse(e.ts) > Date.parse(old.ts)) byActor.set(e.actor.id, e);
+  }
+  const out = [];
+  for (const [id, e] of byActor) {
+    const actor = (actors || []).find(a => a.id === id);
+    if (!actor || actor.permanent || /end|finish|complete|stop|fail|error/i.test(e.verb || '')) continue;
+    const start = Date.parse(e.ts), age = Math.max(0, now - start);
+    if (!Number.isFinite(start) || age > 10 * 60_000) continue;
+    const placement = operationPlacement(e.operation, tree?.nodes || []);
+    const node = (tree?.nodes || []).find(n => n.id === placement) || (placement ? null : (tree?.nodes || []).find(n => n.id === 'unfiled'));
+    out.push({ actorId: id, who: actor.name || actor.label || id, nodeId: placement || 'unfiled', nodeTitle: node?.title || placement || 'Unfiled', ageMs: age, burn: operationTreeDisplay(node || {}).burn });
+  }
+  return out;
+}
 export function operationTreeCard(n, largestSiblingTokens = null) {
   const d = operationTreeDisplay(n), t = n.tokenUsage, tokens = d.tokensFull === 'n/a' ? null : Number(d.tokensFull);
   const largest = largestSiblingTokens;
