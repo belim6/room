@@ -160,5 +160,17 @@ export function redact(s: string): string { if (!s) return s; for (const [re, f]
 export function redactPath(s: string): string { if (!s) return s; for (const [re, f] of PREFIX) s = s.replace(re, f as any); return s; }
 // Path-like fields get only the key-prefix rules, so the generic secret rule can't mangle a path or id.
 const PATHISH = new Set(['path', 'id', 'source', 'file', 'ref', 'agentFile', 'launch', 'of', 'parent', 'target', 'transcript', 'cwd', 'reads', 'writes', 'session', 'run', 'thread', 'toolUseId', 'agent', 'agentId']);
-export const redactDeep = <T>(v: T, key = ''): T => typeof v === 'string' ? (PATHISH.has(key) ? redactPath(v) : redact(v)) as any : Array.isArray(v) ? v.map(x => redactDeep(x, key)) as any :
-  v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactDeep(x, k)])) as any : v;
+export const redactDeep = <T>(v: T, key = ''): T => {
+  // Repeated labels/ids dominate event summaries. Keep caches local and separate path rules from prose rules.
+  const paths = new Map<string, string>(), prose = new Map<string, string>();
+  const go = (value: any, field: string): any => {
+    if (typeof value === 'string') {
+      const pathish=PATHISH.has(field), cache=pathish?paths:prose;
+      if(!cache.has(value)) cache.set(value,pathish?redactPath(value):redact(value));
+      return cache.get(value)!;
+    }
+    if(Array.isArray(value)) return value.map(x=>go(x,field));
+    return value && typeof value==='object' ? Object.fromEntries(Object.entries(value).map(([k,x])=>[k,go(x,k)])) : value;
+  };
+  return go(v,key);
+};

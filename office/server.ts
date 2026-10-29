@@ -10,6 +10,7 @@ import { fileTitle, workStatus } from './collect/legible';
 import type { OfficeEvent } from './collect/types';
 import { Live, type LiveOpts } from './live';
 import { operationPlacement } from './web/operation-placement.mjs';
+
 import { deniedDocument, visibleDocuments } from './collect/deny';
 import { nodeDocuments } from './collect/documents';
 
@@ -23,6 +24,8 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   const app = express();
   app.disable('x-powered-by'); app.disable('etag');
   app.use((req, res, next) => {
+    const started = performance.now();
+    res.on('finish', () => { if (req.path.startsWith('/api/')) console.info('[office timing]', req.path, Math.round(performance.now()-started), 'ms'); });
     const host = req.headers.host || '';
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return res.status(403).json({ error: 'Local connections only' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(405).set('Allow', 'GET, HEAD').json({ error: 'The Office is read-only.' });
@@ -40,10 +43,7 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   app.get('/api/events', (req, res) => { const op = String(req.query.op || ''); send(res, { op, events: data.events.filter(e => inOp(e, op)).map(meta) }); });
   app.get('/api/events/node', (req, res) => { const id = String(req.query.id || ''), tree = data.operationTree;
     if (!tree || tree.error || !tree.nodes.some(n => n.id === id)) return res.status(404).json({ error: 'No such operation tree node' });
-    const nodes = new Map(tree.nodes.map(n => [n.id, n])), ids = new Set([id]); let changed = true;
-    while (changed) { changed = false; for (const n of tree.nodes) if (n.parent && ids.has(n.parent) && !ids.has(n.id)) { ids.add(n.id); changed = true; } }
-    if (id === 'unfiled') return send(res, { id, events: data.events.filter(e => !operationPlacement(e.operation, tree.nodes)).map(meta) });
-    send(res, { id, events: data.events.filter(e => { const placed = operationPlacement(e.operation, tree.nodes); return !!placed && ids.has(placed); }).map(meta) });
+    send(res, { id, events: (data.eventNodeIndex?.get(id) || []).map(meta) });
   });
   app.get('/api/artifacts', (req, res) => { const op = String(req.query.op || ''), g = String(req.query.group || '');
     send(res, visibleDocuments(data.artifacts, data.allow).filter(a => (!op || op === '*' || a.operation === op || a.operation?.startsWith(op + '/')) && (!g || a.group === g)).slice(0, 2000)); });
@@ -64,7 +64,9 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
     const op = String(req.query.op || ''), q = String(req.query.q || '').toLowerCase(), titles = new Map<string, string>(), by = new Map<string, OfficeEvent[]>();
     for (const e of data.events) if (e.target?.kind === 'file' && e.target.path && (e.verb === 'write' || e.verb === 'read')) (by.get(e.target.path) || by.set(e.target.path, []).get(e.target.path)!).push(e);
     const ref = (e: OfficeEvent) => ({ id: e.id, ts: e.ts, actor: e.actor.name || e.actor.label, provenance: e.provenance });
-    const items = visibleDocuments(data.artifacts, data.allow).filter(a => !op || op === '*' || a.operation === op || a.operation?.startsWith(op + '/')).map(a => {
+    // a tree node id: same placement as the graph's counts and documents (node + descendants; 'unfiled' = unplaced)
+    const tn = data.operationTree?.nodes, inNode = tn?.some(n => n.id === op) ? (() => { const ids = new Set([op]); for (let ch = true; ch;) { ch = false; for (const n of tn!) if (n.parent && ids.has(n.parent) && !ids.has(n.id)) { ids.add(n.id); ch = true; } } return (o?: string) => { const pl = operationPlacement(o, tn as any); return op === 'unfiled' ? !pl : ids.has(pl || ''); }; })() : null;
+    const items = visibleDocuments(data.artifacts, data.allow).filter(a => inNode ? inNode(a.operation) : (!op || op === '*' || a.operation === op || a.operation?.startsWith(op + '/'))).map(a => {
       const evs = by.get(a.path) || [], w = evs.find(e => e.verb === 'write'), readers = evs.filter(e => e.verb === 'read' && e !== w);
       return { path: a.path, title: fileTitle(a.path, data.allow, titles), group: a.group, mtime: a.mtime, operation: a.operation, size: a.size, writer: w ? ref(w) : null, readers: readers.slice(-20).map(ref), readerCount: readers.length };
     }).filter(a => !q || a.title.toLowerCase().includes(q)).sort((a, b) => (a.operation || '').localeCompare(b.operation || '') || a.mtime.localeCompare(b.mtime));
@@ -77,7 +79,7 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
     if (!tree || tree.error || !tree.nodes.some(n => n.id === id)) return res.status(404).json({ error: 'No such operation tree node' });
     send(res, { id, items: nodeDocuments(id, tree.nodes, data.artifacts, data.allow) });
   });
-  app.get('/api/recollect', (_req, res) => { live.full(); send(res, { collectedAt: data.collectedAt, events: data.events.length }); });
+  app.get('/api/recollect', (_req, res) => { void live.full(); send(res, { collectedAt: data.collectedAt, events: data.events.length }); });
   // Server-sent events: upserts/removals as the live tier merges them. Same metadata tier and redaction as /api/events.
   app.get('/api/live', (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });

@@ -91,7 +91,7 @@ export function operationTreeGraph(tree, collapsed = new Set(), { cardWidth=220,
 export function operationGraphPointerHandlers({ select, pan, capture = () => {}, threshold = 4 }) {
   let start = null, target = null, twist = false, moved = false, suppressClick = false;
   return {
-    down(e) { start = [e.clientX, e.clientY]; target = e.target?.closest?.('.op-node'); twist = !!e.target?.closest?.('.op-twist, .op-more'); moved = false; },
+    down(e) { start = [e.clientX, e.clientY]; target = e.target?.closest?.('.op-node'); twist = !!e.target?.closest?.('.op-open'); suppressClick=false; moved = false; },
     move(e) {
       if (!start) return;
       const dx=e.clientX-start[0], dy=e.clientY-start[1];
@@ -99,7 +99,7 @@ export function operationGraphPointerHandlers({ select, pan, capture = () => {},
       if (!moved) { moved=true; capture(e.pointerId); }
       pan(dx,dy); start=[e.clientX,e.clientY];
     },
-    up() { if (start && !moved && target && !twist) { select(target); suppressClick=true; } start=null; target=null; twist=false; moved=false; },
+    up() { if(moved)suppressClick=true; if (start && !moved && target && !twist) { select(target); suppressClick=true; } start=null; target=null; twist=false; moved=false; },
     cancel() { start=null; target=null; twist=false; moved=false; },
     click(e) { if (!suppressClick) return true; suppressClick=false; e.preventDefault(); e.stopPropagation(); return false; }
   };
@@ -326,3 +326,34 @@ export function agentStory(events, actorId, nameOf = (x) => x, now = Date.now())
   return `${nameOf(actorId)}: ${parts.join('; ')}.`;
 }
 import { operationPlacement } from './operation-placement.mjs';
+
+// Wheel deltas are in screen coordinates. Pinch/modifier zoom preserves the world point under the cursor.
+export function operationGraphWheel(cam, { deltaX=0, deltaY=0, deltaMode=0, ctrlKey=false, metaKey=false }, point, pageHeight=800) {
+  const unit=deltaMode===1?16:deltaMode===2?pageHeight:1;
+  if(!ctrlKey&&!metaKey)return {...cam,x:cam.x-deltaX*unit,y:cam.y-deltaY*unit};
+  return operationGraphZoom(cam,Math.exp(-deltaY*unit*.002),point);
+}
+export function operationGraphZoom(cam,factor,{x,y}) {
+  const s=Math.max(.6,Math.min(2.5,cam.s*factor)),ratio=s/cam.s;
+  return {x:x-(x-cam.x)*ratio,y:y-(y-cam.y)*ratio,s};
+}
+export function visibleOperationNodes(tree, expanded=new Set()) {
+  const rows=operationTreeRows(tree),visible=new Set();
+  return rows.filter(n=>{const show=n.id!=='unfiled'&&(n.parent==null||(visible.has(n.parent)&&expanded.has(n.parent)));if(show)visible.add(n.id);return show;});
+}
+// Reserve a stable slot at each depth independent of disclosure. Hidden branches cannot move existing cards.
+export function progressiveOperationGraph(tree, expanded=new Set()) {
+  const full=operationTreeGraph(tree),rows=operationTreeRows(tree),slots=new Map(),positions=new Map();
+  for(const n of rows){const slot=slots.get(n.depth)||0;slots.set(n.depth,slot+1);positions.set(n.id,{x:n.depth*280,y:slot*104});}
+  const visible=new Set(visibleOperationNodes(tree,expanded).map(n=>n.id));
+  const nodes=full.nodes.filter(n=>visible.has(n.id)).map(n=>({...n,...positions.get(n.id),collapsed:!expanded.has(n.id),childCount:rows.filter(c=>c.parent===n.id).length}));
+  return {...full,nodes,edges:full.edges.filter(e=>visible.has(e.from)&&visible.has(e.to)),cardHeight:88,width:Math.max(220,...nodes.map(n=>n.x+220)),height:Math.max(88,...nodes.map(n=>n.y+88))};
+}
+export function centreOperationGraph(graph,id,{width,height},includeChildren=true) {
+  const nodes=graph.nodes.filter(n=>n.id===id||(includeChildren&&n.parent===id));
+  if(!nodes.length)return {x:12,y:12,s:1};
+  const left=Math.min(...nodes.map(n=>n.x)),top=Math.min(...nodes.map(n=>n.y));
+  const right=Math.max(...nodes.map(n=>n.x+graph.cardWidth)),bottom=Math.max(...nodes.map(n=>n.y+graph.cardHeight));
+  const s=Math.max(.6,Math.min(1.2,(width-32)/(right-left),(height-32)/(bottom-top)));
+  return {x:width/2-(left+right)/2*s,y:height/2-(top+bottom)/2*s,s};
+}

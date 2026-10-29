@@ -1,10 +1,10 @@
-import { PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeRows, operationTreeDisplay, operationTreeGraph, operationGraphPointerHandlers, operationTreeNodeEvents, parseOfficeRoute, officeRouteHash, operationBreadcrumb, runningStripModel, createRouteGuard, validOfficeOperationRoute } from './model.mjs';
+import { progressiveOperationGraph, centreOperationGraph, operationGraphWheel, operationGraphZoom, PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeDisplay, operationGraphPointerHandlers, operationTreeNodeEvents, parseOfficeRoute, officeRouteHash, operationBreadcrumb, runningStripModel, createRouteGuard, validOfficeOperationRoute } from './model.mjs';
 import { liveClient } from './liveclient.mjs';
 
 const $ = (s) => document.querySelector(s);
 const h = (tag, attrs = {}, ...kids) => { const n = document.createElement(tag); for (const [k, v] of Object.entries(attrs || {})) if (v != null) k === 'on' ? Object.entries(v).forEach(([e, f]) => n.addEventListener(e, f)) : k === 'class' ? (n.className = v) : n.setAttribute(k, v);
   for (const c of kids.flat()) if (c != null && c !== false) n.append(c instanceof Node ? c : String(c)); return n; };
-const get = (u) => fetch(u).then((r) => (r.ok ? r.json() : r.json().then((j) => Promise.reject(Error(j.error || r.status)))));
+const get = async (u) => { const t=performance.now(); try { const r=await fetch(u), j=await r.json(); if(!r.ok)throw Error(j.error||r.status); return j; } finally { console.info('[office timing] fetch',u,Math.round(performance.now()-t),'ms'); } };
 const KIND = { human: '#e6edf3', coordinator: '#58a6ff', critic: '#c297ff', labeler: '#3fd0c9', engineer: '#56d364', reviewer: '#f0883e', writer: '#d2a8ff', driver: '#8fb3d9', server: '#9aa7b4', provider: '#7d8590', artifact: '#59636e', unknown: '#7d8590',
   partner: '#ffa657', operator: '#79c0ff', housekeeper: '#a5d6a7', secretary: '#f2cc60', prompter: '#ff7b72', experimenter: '#7ee787', 'jev-correspondent': '#db61a2', brainstormer: '#ffb3d1', intern: '#b1bac4', session: '#8b949e', external: '#e3b341' };
 const COL = { cap: '#7cc4ff', der: '#b39cff', inf: '#8b949e', ok: '#4fd18b', amber: '#f0b429', red: '#ff5c5c', dim: '#3a434d', fg: '#c9d1d9' };
@@ -14,8 +14,12 @@ const base = (p = '') => p.split('/').pop();
 const inOp = (e, op) => !op || op === '*' || e.operation === op || (e.operation || '').startsWith(op + '/');
 
 const S = { summary: null, op: '', events: [], actors: [], A: new Map(), L: null, tl: null, c: 0, playing: false, speed: 10, compress: true, sel: null, hover: null, lastLog: '',
-  byId: new Map(), live: false, es: null, focus: true, follow: null, raw: false, cam: { x: 0, y: 0, s: 1 }, opTitle: new Map(), changed: 0, treeNode: '', graphSelection: '', collapsed: new Set(), allEvents: null };
+  byId: new Map(), live: false, es: null, focus: true, follow: null, raw: false, cam: { x: 0, y: 0, s: 1 }, opTitle: new Map(), changed: 0, treeNode: '', graphSelection: '', expanded: new Set(), allEvents: null };
 const routeGuard = createRouteGuard();
+const nodeEvents = new Map(), pendingEvents = new Map();
+let eventModels = new WeakMap(), eventEpoch=0;
+function invalidateEventCaches(){eventEpoch++;nodeEvents.clear();pendingEvents.clear();eventModels=new WeakMap();S.modelCompress=null;}
+const EMPTY_EVENTS = [];
 globalThis.officeState = S; // for inspection from the console
 const nameOf = (id) => { const a = S.A.get(id); return a?.name || a?.label || id; };
 const opTitleOf = (id) => S.opTitle.get(id) || id;
@@ -30,7 +34,7 @@ async function init() {
   addEventListener('hashchange', () => applyRoute());
   $('#play').onclick = togglePlay;
   for (const b of document.querySelectorAll('#speeds button')) b.onclick = () => { S.speed = +b.dataset.s; document.querySelectorAll('#speeds button').forEach((x) => x.classList.toggle('on', x === b)); };
-  $('#compress').onchange = (e) => { const t = S.tl.toReal(S.c); S.compress = e.target.checked; S.tl = timeline(S.events, { compress: S.compress }); S.c = S.tl.toComp(t); };
+  $('#compress').onchange = (e) => { if(!S.tl){S.compress=e.target.checked;return;}const t = S.tl.toReal(S.c); S.compress = e.target.checked; S.tl = timeline(S.events, { compress: S.compress }); S.c = S.tl.toComp(t); S.modelCompress=S.compress; eventModels=new WeakMap(); };
   $('#focus').onchange = (e) => { S.focus = e.target.checked; };
   $('#raw').onchange = (e) => { S.raw = e.target.checked; $('#logrows').classList.toggle('raw', S.raw); S.lastLog = ''; };
   $('#live').onclick = toggleLive;
@@ -57,71 +61,108 @@ async function navigateOperation(id, tab = 'floor', push = false) {
   if (!id) return;
   const route = { page: 'operation', id, tab };
   const hash = officeRouteHash(route);
-  if (push && location.hash !== hash) location.hash = hash;
+  if (push && location.hash !== hash) history.pushState(null,'',hash);
   const token = routeGuard.begin(); await applyRoute(route, token); if (!routeGuard.current(token)) return;
 }
 async function applyRoute(route = parseOfficeRoute(location.hash), token = routeGuard.begin()) {
+  const started=performance.now();
+  requestAnimationFrame(()=>console.info('[office timing] route first frame',route.id||'home',Math.round(performance.now()-started),'ms'));
   if (validOfficeOperationRoute(route, S.summary.operationTree, S.summary.operations)) {
     const canonical=officeRouteHash(route); if(location.hash!==canonical) history.replaceState(null,'',canonical);
-    const same = S.op === route.id && S.treeNode === route.id;
-    if (S.summary.operationTree && !S.summary.operationTree.error) {
-      if (!same) await loadTreeNode(route.id, token);
-    } else if (!same) { S.treeNode=''; await loadOp(route.id, token); }
-    if (!routeGuard.current(token)) return;
+    const same = S.op === route.id && (S.treeNode === route.id || !S.summary.operationTree || S.summary.operationTree.error);
     document.body.classList.remove('home-page'); $('#workspace').classList.remove('home-mode'); $('#scrub').hidden=false; $('#log').hidden=false; $('#running-now').hidden=true;
+    S.view=route.tab;
+    if (!same || pendingEvents.has(route.id)) {
+      if (S.summary.operationTree && !S.summary.operationTree.error) void loadTreeNode(route.id, token);
+      else void loadOp(route.id, token);
+    }
     $('#views').hidden=false; $('#breadcrumb').replaceChildren(...operationBreadcrumb(S.summary.operationTree,route.id).map((c,i,a)=>h('button',{class:'crumb',on:{click:()=>{if(c.id==null)location.hash='#/';else if(i<a.length-1)navigateOperation(c.id,'floor',true);}}},i?' › ':'',c.title)));
     showView(route.tab); renderRunning(); renderTopRunning();
     return;
   }
   S.treeNode=''; document.body.classList.add('home-page'); $('#workspace').classList.add('home-mode'); $('#scrub').hidden=true; $('#log').hidden=true; $('#views').hidden=true; $('#running-now').hidden=false;
-  if (!S.allEvents) { const {events}=await get('/api/events?op=*'); if (!routeGuard.current(token)) return; S.allEvents=events; S.homeEventsLoaded=true; }
-  if (!routeGuard.current(token)) return;
-  if (S.treeNode || S.op !== '*') setEvents(S.allEvents,true);
-  S.op='*';
+  const epoch=eventEpoch;
+  if (!S.allEvents) get('/api/events?op=*').then(({events})=>{if(epoch!==eventEpoch)return;S.allEvents=events;if(S.view==='home'){renderRunning();renderTopRunning();renderOperationGraph();}}).catch(console.error);
+  S.op='*'; $('#clock').textContent='';
   $('#breadcrumb').replaceChildren(h('button',{class:'crumb',on:{click:()=>{}}},'Home'));
   S.view='home'; $('#view').hidden=false; renderOperationGraph(); renderRunning(); renderTopRunning();
 }
 function renderRunning() {
   const strip=$('#running-now'); if(!strip)return;
-  const rows=runningStripModel(S.events,S.actors,S.summary.operationTree);
+  const rows=runningStripModel(S.allEvents||S.events,S.summary.actors,S.summary.operationTree);
   strip.replaceChildren(h('strong',{},'Running now'),...(rows.length?rows.map(r=>h('button',{class:'running-row',on:{click:()=>navigateOperation(r.nodeId,'floor',true)}},`${r.nodeTitle} · ${r.who} · ${Math.floor(r.ageMs/60000)}m · ${r.burn}`)):[h('span',{class:'empty-running'},'Nothing running')]));
 }
 function renderTopRunning() {
-  const rows=runningStripModel(S.events,S.actors,S.summary.operationTree);
+  const rows=runningStripModel(S.allEvents||S.events,S.summary.actors,S.summary.operationTree);
   $('#running-line').replaceChildren(...(rows.length?[h('button',{on:{click:()=>navigateOperation(rows[0].nodeId,'floor',true)}},`${rows.length} running · ${rows.map(r=>`${r.nodeTitle} · ${r.who} · ${r.burn}`).join(' · ')}`)]:[]));
 }
-function renderOperationGraph() {
-  const box=$('#view'), tree=S.summary.operationTree, pad=12;
-  const liveNodes=new Set(runningStripModel(S.events,S.actors,tree).map(r=>r.nodeId));
-  if(!S.graphInitialized){const rows=operationTreeRows(tree),children=new Set(rows.filter(n=>n.parent).map(n=>n.parent));for(const n of rows)if(n.parent&&rows.find(p=>p.id===n.parent)?.parent)S.collapsed.add(n.id);S.graphInitialized=true;}
-  const g=operationTreeGraph(tree,S.collapsed), outer=h('div',{class:'op-graph-wrap'}), tools=h('div',{class:'op-graph-tools'});
-  const svg=sv('svg',{class:'op-graph',tabindex:'0'}), defs=sv('defs'), world=sv('g');
-  for(const edge of g.edges){const a=g.nodes.find(n=>n.id===edge.from),b=g.nodes.find(n=>n.id===edge.to); if(!a||!b)continue; const mid=a.y+g.cardHeight+35; world.append(sv('path',{class:'op-edge',d:`M${a.x+g.cardWidth/2},${a.y+g.cardHeight} V${mid} H${b.x+g.cardWidth/2} V${b.y}`}));}
-  for(const [index,n] of g.nodes.entries()){const c=n.card, clipId=`op-card-clip-${index}`, clip=sv('clipPath',{id:clipId});clip.append(sv('rect',{x:8,y:5,width:g.cardWidth-16,height:48}));defs.append(clip);const group=sv('g',{class:`op-node status-${c.status}${liveNodes.has(n.id)?' live':''}${S.graphSelection===n.id?' selected':''}${n.detached?' detached':''}`,transform:`translate(${n.x},${n.y})`,tabindex:'0',role:'button', 'aria-label':`${c.title}, ${c.status}${liveNodes.has(n.id)?', running':''}`});
-    const title=c.title.length>25?`${c.title.slice(0,24)}…`:c.title;
-    group.append(sv('rect',{class:'op-card',width:g.cardWidth,height:g.cardHeight,rx:5}),sv('text',{class:'op-title',x:10,y:19,'clip-path':`url(#${clipId})`},title),sv('text',{class:'op-status',x:10,y:35,'clip-path':`url(#${clipId})`},c.status),sv('text',{class:'op-meta',x:10,y:49,'clip-path':`url(#${clipId})`},`${c.events} ev · ${c.knownEvents} w/ tokens · ${c.tokens} · ${n.documentCount||0} docs`),sv('rect',{class:'op-bar-bg',x:10,y:56,width:g.cardWidth-20,height:3,rx:2}),sv('rect',{class:'op-bar',x:10,y:56,width:Math.max(0,(g.cardWidth-20)*c.share),height:3,rx:2}));
-    if(n.collapsed)group.append(sv('text',{class:'op-more',x:g.cardWidth-10,y:19,'text-anchor':'end',on:{click:e=>{e.stopPropagation();S.collapsed.delete(n.id);renderOperationGraph();}}},`+${n.hiddenCount}`));
-    else if((tree?.nodes||[]).some(x=>x.parent===n.id))group.append(sv('text',{class:'op-twist',x:g.cardWidth-10,y:19,'text-anchor':'end',on:{click:e=>{e.stopPropagation();S.collapsed.add(n.id);renderOperationGraph();}}},'−'));
-    group.append(sv('title',{},`${c.title}\n${c.events} ev · ${n.documentCount||0} docs · ${c.tokensFull} tokens\n${c.status}`)); group.addEventListener('click',()=>{S.graphSelection=n.id;showOperationDetail(n);renderOperationGraph();}); group.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();S.graphSelection=n.id;showOperationDetail(n);renderOperationGraph();}}); world.append(group);
+let graphAnimation=0,graphResize=null;
+function renderOperationGraph(focusId=null) {
+  graphResize?.disconnect();
+  const animation=++graphAnimation,box=$('#view'),tree=S.summary.operationTree;
+  const liveNodes=new Set(runningStripModel(S.allEvents||S.events,S.summary.actors,tree).map(r=>r.nodeId));
+  const g=progressiveOperationGraph(tree,S.expanded),outer=h('div',{class:'op-graph-wrap'}),tools=h('div',{class:'op-graph-tools'});
+  const svg=sv('svg',{class:'op-graph',tabindex:'0'}),world=sv('g');
+  const activate=n=>{S.graphSelection=n.id;if(S.expanded.has(n.id))S.expanded.delete(n.id);else S.expanded.add(n.id);showOperationDetail(n);requestAnimationFrame(()=>{if(S.view==='home')renderOperationGraph(n.id);});};
+  for(const edge of g.edges){const a=g.nodes.find(n=>n.id===edge.from),b=g.nodes.find(n=>n.id===edge.to),mid=a.x+g.cardWidth+30;world.append(sv('path',{class:'op-edge',d:`M${a.x+g.cardWidth},${a.y+g.cardHeight/2} H${mid} V${b.y+g.cardHeight/2} H${b.x}`}));}
+  for(const n of g.nodes){const c=n.card,group=sv('g',{class:`op-node status-${c.status}${liveNodes.has(n.id)?' live':''}${S.graphSelection===n.id?' selected':''}`,transform:`translate(${n.x},${n.y})`,'data-id':n.id,tabindex:'0',role:'button','aria-label':`${c.title}, ${c.status}, ${n.documentCount||0} documents`,...(n.childCount?{'aria-expanded':String(S.expanded.has(n.id))}:{})});
+    const title=c.title.length>24?`${c.title.slice(0,23)}…`:c.title;
+    group.append(sv('rect',{class:'op-card',width:g.cardWidth,height:g.cardHeight,rx:5}),sv('text',{class:'op-title',x:10,y:19},title),sv('text',{class:'op-status',x:10,y:35},c.status),sv('text',{class:'op-meta',x:10,y:49},`${c.events} ev · ${c.knownEvents} w/ tokens · ${c.tokens}`),sv('text',{class:'op-meta',x:10,y:67},`${n.documentCount||0} docs`),sv('rect',{class:'op-bar-bg',x:10,y:78,width:g.cardWidth-20,height:3,rx:2}),sv('rect',{class:'op-bar',x:10,y:78,width:(g.cardWidth-20)*c.share,height:3,rx:2}));
+    if(n.childCount)group.append(sv('text',{class:'op-twist',x:g.cardWidth-10,y:35,'text-anchor':'end'},`${S.expanded.has(n.id)?'−':'+'}${n.childCount}`));
+    const open=sv('g',{class:'op-open',tabindex:'0',role:'button','aria-label':`Open ${c.title}`},sv('rect',{x:172,y:54,width:38,height:20,rx:3}),sv('text',{x:191,y:68,'text-anchor':'middle'},'▶'));
+    open.addEventListener('click',e=>{e.stopPropagation();navigateOperation(n.id,'floor',true);});
+    open.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();navigateOperation(n.id,'floor',true);}});
+    group.append(open,sv('title',{},`${c.title}\n${c.events} ev · ${n.documentCount||0} docs · ${c.tokensFull} tokens\n${c.status}`));
+    group.addEventListener('click',()=>activate(n));
+    group.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();if(e.shiftKey)navigateOperation(n.id,'floor',true);else activate(n);}});
+    world.append(group);
   }
-  svg.append(defs,world); svg.addEventListener('keydown',e=>{if(!['ArrowDown','ArrowRight','ArrowUp','ArrowLeft'].includes(e.key))return;e.preventDefault();const list=[...svg.querySelectorAll('.op-node')],i=list.indexOf(document.activeElement),next=e.key==='ArrowDown'||e.key==='ArrowRight'?Math.min(list.length-1,i+1):Math.max(0,i-1);list[next]?.focus();});
-  const gesture=operationGraphPointerHandlers({select:node=>{const n=g.nodes.find(x=>x.id===node.dataset?.id)||g.nodes.find(x=>x.id===node.getAttribute?.('data-id'));if(n){S.graphSelection=n.id;showOperationDetail(n);renderOperationGraph();}},pan:(dx,dy)=>{S.graphCam.x+=dx;S.graphCam.y+=dy;world.setAttribute('transform',`translate(${S.graphCam.x},${S.graphCam.y}) scale(${S.graphCam.s})`);},capture:id=>svg.setPointerCapture(id)});
-  for(const [node,n] of [...world.querySelectorAll('.op-node')].map((node,i)=>[node,g.nodes[i]]))node.dataset.id=n.id;
-  svg.addEventListener('pointerdown',e=>gesture.down(e));svg.addEventListener('pointermove',e=>gesture.move(e));svg.addEventListener('pointerup',e=>gesture.up(e));svg.addEventListener('pointercancel',()=>gesture.cancel());svg.addEventListener('click',e=>gesture.click(e),true);svg.addEventListener('wheel',e=>{e.preventDefault();const factor=e.deltaY<0?1.1:.9;S.graphCam.s=Math.max(.6,Math.min(2.5,S.graphCam.s*factor));world.setAttribute('transform',`translate(${S.graphCam.x},${S.graphCam.y}) scale(${S.graphCam.s})`);},{passive:false});
-  const sync=()=>{const r=svg.getBoundingClientRect();svg.setAttribute('viewBox',`0 0 ${Math.max(1,r.width)} ${Math.max(1,r.height)}`);world.setAttribute('transform',`translate(${S.graphCam.x},${S.graphCam.y}) scale(${S.graphCam.s})`);};
-  const fit=()=>{const r=svg.getBoundingClientRect();S.graphCam={x:pad,y:pad,s:Math.max(.6,Math.min(1,(r.width-pad*2)/g.width))};sync();};
-  const zoom=(factor)=>{S.graphCam.s=Math.max(.6,Math.min(2.5,S.graphCam.s*factor));sync();};
-  tools.append(h('button',{on:{click:fit}},'Fit'),h('button',{on:{click:()=>zoom(1.2)}},'+'),h('button',{on:{click:()=>zoom(1/1.2)}},'−'));
-  outer.append(tools,svg); box.replaceChildren(outer); requestAnimationFrame(()=>{if(!S.graphCam)fit();else sync();});
+  const sync=()=>world.setAttribute('transform',`translate(${S.graphCam.x},${S.graphCam.y}) scale(${S.graphCam.s})`);
+  const viewport=()=>{const r=svg.getBoundingClientRect(),panel=$('#inspector').getBoundingClientRect();return {width:Math.max(1,Math.min(r.width,panel.left-r.left-12)),height:Math.max(1,r.height)};};
+  const fit=()=>{const v=viewport(),s=Math.max(.6,Math.min(1.2,(v.width-24)/g.width,(v.height-24)/g.height));S.graphCam={x:v.width/2-g.width*s/2,y:v.height/2-g.height*s/2,s};sync();};
+  const zoom=factor=>{graphAnimation++;const v=viewport();S.graphCam=operationGraphZoom(S.graphCam,factor,{x:v.width/2,y:v.height/2});sync();};
+  const gesture=operationGraphPointerHandlers({select:node=>{const n=g.nodes.find(n=>n.id===node.getAttribute('data-id'));if(n)activate(n);},pan:(dx,dy)=>{graphAnimation++;S.graphCam.x+=dx;S.graphCam.y+=dy;sync();},capture:id=>svg.setPointerCapture(id)});
+  svg.append(world);
+  svg.addEventListener('keydown',e=>{if(!['ArrowDown','ArrowRight','ArrowUp','ArrowLeft'].includes(e.key))return;e.preventDefault();const list=[...svg.querySelectorAll('.op-node')],i=list.indexOf(document.activeElement?.closest('.op-node')),next=e.key==='ArrowDown'||e.key==='ArrowRight'?Math.min(list.length-1,i+1):Math.max(0,i-1);list[next]?.focus();const n=g.nodes[next];if(n){S.graphSelection=n.id;showOperationDetail(n);S.graphCam=centreOperationGraph(g,n.id,viewport(),false);sync();}});
+  svg.addEventListener('pointerdown',e=>{graphAnimation++;gesture.down(e);});svg.addEventListener('pointermove',e=>gesture.move(e));svg.addEventListener('pointerup',e=>gesture.up(e));svg.addEventListener('pointercancel',()=>gesture.cancel());svg.addEventListener('click',e=>gesture.click(e),true);
+  svg.addEventListener('wheel',e=>{e.preventDefault();graphAnimation++;const r=svg.getBoundingClientRect();S.graphCam=operationGraphWheel(S.graphCam,e,{x:e.clientX-r.left,y:e.clientY-r.top},r.height);sync();},{passive:false});
+  tools.append(h('button',{on:{click:()=>{graphAnimation++;fit();}}},'Fit'),h('button',{on:{click:()=>zoom(1.2)}},'+'),h('button',{on:{click:()=>zoom(1/1.2)}},'−'));
+  const unfiled=tree?.nodes?.find(n=>n.id==='unfiled');if(unfiled)tools.append(h('button',{on:{click:()=>showOperationDetail(unfiled)}},`Unfiled · ${unfiled.documentCount||0} docs`));
+  outer.append(tools,svg);box.replaceChildren(outer);
+  graphResize=new ResizeObserver(()=>{const r=svg.getBoundingClientRect();svg.setAttribute('viewBox',`0 0 ${Math.max(1,r.width)} ${Math.max(1,r.height)}`);});graphResize.observe(svg);
+  requestAnimationFrame(()=>{
+    if(!svg.isConnected)return;
+    const r=svg.getBoundingClientRect();svg.setAttribute('viewBox',`0 0 ${Math.max(1,r.width)} ${Math.max(1,r.height)}`);
+    if(!S.graphCam)fit();else sync();
+    if(focusId){[...svg.querySelectorAll('.op-node')].find(n=>n.dataset.id===focusId)?.focus({preventScroll:true});
+      const from={...S.graphCam},to=centreOperationGraph(g,focusId,viewport(),S.expanded.has(focusId)),start=performance.now();
+      const step=now=>{if(animation!==graphAnimation||!svg.isConnected)return;const t=Math.min(1,(now-start)/240),ease=1-(1-t)**3;S.graphCam=Object.fromEntries(['x','y','s'].map(k=>[k,from[k]+(to[k]-from[k])*ease]));sync();if(t<1)requestAnimationFrame(step);};requestAnimationFrame(step);
+    }
+  });
 }
 function showOperationDetail(n){
+  const documents=h('div',{class:'rows'},'Loading documents…');
   const box=$('#inspector'), d=operationTreeDisplay(n), lines=[['Goal',n.goal||'n/a'],['Owner',n.owner||'n/a'],['Budget',d.budget||'n/a'],['Spend',d.burn],['Events',d.events],['Event gaps',String(n.gapCount??'n/a')],['Token gaps',d.tokenGaps],['Tokens',d.tokensFull],['Close',n.close?.status|| (n.close?'closed':'n/a')]];
-  box.replaceChildren(h('h3',{},n.title||n.id),h('table',{},...lines.map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.close?.summary?[['Close summary',n.close.summary],['Close evidence',(n.close.evidence||[]).join(', ')],['Closed at',n.close.closedAt]]:[]).map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.closeProblems||[]).map(p=>h('tr',{class:'note'},h('td',{},'Close issue'),h('td',{},p)))),h('h3',{},n.id==='unfiled'?'Documents · not yet housed':'Documents'),h('div',{class:'rows'},'Loading documents…'));
-  get('/api/node/documents?id='+encodeURIComponent(n.id)).then(({items})=>{const rows=[];let raw=[];for(const a of items){if(/\.raw\.log$/i.test(a.path)){raw.push(a);continue;}rows.push(h('div',{class:'row'},h('a',{on:{click:()=>select({type:'file',id:a.path})}},a.title),h('span',{class:'note'},` · ${a.operation}`)));}if(raw.length)rows.push(h('details',{},h('summary',{},`raw (${raw.length})`),...raw.map(a=>h('div',{class:'row'},h('a',{on:{click:()=>select({type:'file',id:a.path})}},a.title),h('span',{class:'note'},` · ${a.operation}`)))));box.append(h('div',{class:'rows'},...rows));}).catch(()=>{});
+  box.replaceChildren(h('h3',{},n.title||n.id),h('button',{title:'Go to this operation\u2019s floor',on:{click:()=>navigateOperation(n.id,'floor',true)}},'▶ Floor'),h('table',{},...lines.map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.close?.summary?[['Close summary',n.close.summary],['Close evidence',(n.close.evidence||[]).join(', ')],['Closed at',n.close.closedAt]]:[]).map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.closeProblems||[]).map(p=>h('tr',{class:'note'},h('td',{},'Close issue'),h('td',{},p)))),h('h3',{},n.id==='unfiled'?'Documents · not yet housed':'Documents'),documents);
+  get('/api/node/documents?id='+encodeURIComponent(n.id)).then(({items})=>{if(!documents.isConnected)return;const rows=[];let raw=[];for(const a of items){if(/\.raw\.log$/i.test(a.path)){raw.push(a);continue;}rows.push(h('div',{class:'row'},h('a',{on:{click:()=>select({type:'file',id:a.path})}},a.title),h('span',{class:'note'},` · ${a.operation}`)));}if(raw.length)rows.push(h('details',{},h('summary',{},`raw (${raw.length})`),...raw.map(a=>h('div',{class:'row'},h('a',{on:{click:()=>select({type:'file',id:a.path})}},a.title),h('span',{class:'note'},` · ${a.operation}`)))));documents.replaceChildren(...(rows.length?rows:[h('div',{class:'note'},'No documents')]));}).catch(error=>{if(documents.isConnected)documents.replaceChildren(h('div',{class:'note'},'Documents unavailable: '+error.message));});
 }
 function compactTokens(value) { const abs=Math.abs(value); for (const [limit,unit] of [[1e12,'T'],[1e9,'B'],[1e6,'M'],[1e3,'K']]) if(abs>=limit)return `${Number((value/limit).toFixed(3))}${unit}`; return String(value); }
-async function loadTreeNode(id, token) { const {events}=await get('/api/events/node?id='+encodeURIComponent(id)); if(!routeGuard.current(token))return; S.treeNode=id; S.graphSelection=id; S.op=id; S.filter=null; $('#filterbar').replaceChildren(); setEvents(events,true); if(S.view&&S.view!=='floor')showView(S.view); S.playing=false; $('#play').textContent='▶'; follow(null); select(null); }
+async function loadTreeNode(id, token) {
+  S.treeNode=id; S.graphSelection=id; S.op=id; S.filter=null; $('#filterbar').replaceChildren();
+  S.playing=false; $('#play').textContent='▶'; follow(null); select(null);
+  if(nodeEvents.has(id)){setEvents(nodeEvents.get(id),true);return;}
+  setEvents(EMPTY_EVENTS,true);
+  try {
+    const epoch=eventEpoch;
+    let pending=pendingEvents.get(id);
+    if(!pending){pending=get('/api/events/node?id='+encodeURIComponent(id)).then(({events})=>{if(epoch===eventEpoch)nodeEvents.set(id,events);return events;}).finally(()=>{if(epoch===eventEpoch)pendingEvents.delete(id);});pendingEvents.set(id,pending);}
+    const events=await pending;
+    if(!routeGuard.current(token)||epoch!==eventEpoch)return;
+    setEvents(events,true);
+  } catch(error) { if(routeGuard.current(token)) $('#inspector').replaceChildren(h('p',{class:'fatal'},error.message)); }
+}
 async function loadOp(op, token) {
+  S.op=op;S.treeNode='';S.filter=null;setEvents(EMPTY_EVENTS,true);
   if (S.live) { live.stop(); live.start(); } // re-subscribe so the catch-up targets the new operation
   const { events } = await get('/api/events?op=' + encodeURIComponent(op)); if(!routeGuard.current(token))return;
   S.op = op; S.treeNode='';
@@ -129,6 +170,10 @@ async function loadOp(op, token) {
   S.playing = false; $('#play').textContent = '▶'; follow(null); select(null);
 }
 function setEvents(events, reset) {
+  const started=performance.now();
+  if(S.base===events && !S.filter && S.modelCompress===S.compress){if(reset)S.c=S.tl.duration;coverage();return;}
+  const cached=!S.filter && eventModels.get(events);
+  if(cached && cached.compress===S.compress){Object.assign(S,cached.state);S.base=events;S.modelCompress=S.compress;if(reset)S.c=S.tl.duration;S.changed++;S.lastLog='';coverage();return;}
   S.base = events; if (S.filter) events = events.filter((e) => S.filter.ids.has(e.id));
   S.events = events; S.byId = new Map(events.map((e) => [e.id, e])); S.titles = new Map(events.filter((e) => e.target?.title).map((e) => [e.target.path, e.target.title]));
   const ids = new Set(events.flatMap((e) => [e.actor.id, e.target?.kind === 'actor' ? e.target.id : null]));
@@ -137,18 +182,21 @@ function setEvents(events, reset) {
   const keep = S.tl && !reset ? S.tl.toReal(S.c) : null;
   S.tl = timeline(events, { compress: S.compress }); S.c = reset || S.live ? S.tl.duration : S.tl.toComp(keep);
   S.lastLog = ''; S.changed++; coverage();
+  S.modelCompress=S.compress;
+  if(!S.filter)eventModels.set(events,{compress:S.compress,state:Object.fromEntries(['events','byId','titles','actors','A','L','tl','c'].map(k=>[k,S[k]]))});
+  console.info('[office timing] setEvents',events.length,Math.round(performance.now()-started),'ms');
 }
 function coverage() {
   const o = S.summary.operations.find((x) => x.id === S.op), cv = o?.coverage || S.events.reduce((m, e) => (e.gap ? m.gaps++ : m[e.provenance]++, m), { captured: 0, derived: 0, inferred: 0, gaps: 0 });
   $('#coverage').replaceChildren('events: ', h('b', { class: 'c' }, cv.captured), ' captured · ', h('b', { class: 'd' }, cv.derived), ' derived · ', h('b', { class: 'i' }, cv.inferred), ' inferred · ', h('b', { class: cv.gaps ? 'g' : 'g0' }, cv.gaps), ' gaps',
     o?.inferred ? h('span', { class: 'i' }, ' · operation inferred') : '');
 }
-function togglePlay() { if (S.live) toggleLive(); if (!S.playing && S.c >= S.tl.duration) S.c = 0; S.playing = !S.playing; $('#play').textContent = S.playing ? '❚❚' : '▶'; }
+function togglePlay() { if(!S.tl)return; if (S.live) toggleLive(); if (!S.playing && S.c >= S.tl.duration) S.c = 0; S.playing = !S.playing; $('#play').textContent = S.playing ? '❚❚' : '▶'; }
 
 // ---- live (SSE) ----------------------------------------------------------------------------------------------------
 const live = liveClient({
-  refetch: async () => { const summary=await get('/api/summary'); return { summary, events:(await get(S.treeNode?'/api/events/node?id='+encodeURIComponent(S.treeNode):'/api/events?op='+encodeURIComponent(S.view==='home'?'*':S.op))).events }; },
-  onReset: ({ summary, events }) => { S.summary = summary; fillOps(); setEvents(events, false); },
+  refetch: async () => { const token=routeGuard.begin(),node=S.treeNode,url=node?'/api/events/node?id='+encodeURIComponent(node):'/api/events?op='+encodeURIComponent(S.view==='home'?'*':S.op);const [summary,result]=await Promise.all([get('/api/summary'),get(url)]);return {summary,events:result.events,token,node}; },
+  onReset: ({ summary, events, token, node }) => { if(!routeGuard.current(token))return;S.summary=summary; invalidateEventCaches();S.allEvents=null;fillOps();if(node)nodeEvents.set(node,events);if(S.view==='home'){S.allEvents=events;renderOperationGraph();}else setEvents(events,false);renderRunning();renderTopRunning(); },
   onDelta: (d) => applyLive(d),
 });
 function toggleLive() {
@@ -159,14 +207,19 @@ function toggleLive() {
 }
 // The same fold as replay: live upserts land in the same event list the replay renderer reads.
 export function applyLive(msg) {
+  const reload=pendingEvents.has(S.treeNode);
+  invalidateEventCaches();
+  if(S.allEvents){const all=new Map(S.allEvents.map(e=>[e.id,e]));for(const id of msg.removes||[])all.delete(id);for(const e of msg.upserts||[])all.set(e.id,e);S.allEvents=[...all.values()].sort((a,b)=>a.ts.localeCompare(b.ts)||a.seq-b.seq);}
   for (const a of msg.actors || []) { const i = S.summary.actors.findIndex((x) => x.id === a.id); if (i >= 0) S.summary.actors[i] = a; else S.summary.actors.push(a); }
   if (msg.operations) S.summary.operations = msg.operations;
   if (msg.operationTree) S.summary.operationTree = msg.operationTree;
   if (msg.operations || msg.operationTree) fillOps();
+  if(S.view==='home'){renderOperationGraph();renderRunning();renderTopRunning();return;}
+  if(reload){void loadTreeNode(S.treeNode,routeGuard.begin());return;}
   const rm = new Set(msg.removes || []), byId = new Map((S.base || S.events).filter((e) => !rm.has(e.id)).map((e) => [e.id, e]));
   for (const e of msg.upserts || []) if (S.treeNode ? operationTreeNodeEvents([e],S.summary.operationTree,S.treeNode).length : S.view==='home' || inOp(e, S.op)) byId.set(e.id, e); else byId.delete(e.id);
   setEvents([...byId.values()].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.seq - b.seq)), false);
-  if(S.view==='home') S.allEvents=S.events;
+  if(S.treeNode)nodeEvents.set(S.treeNode,S.events);
   if(S.view==='home') renderOperationGraph();
   renderRunning(); renderTopRunning();
 }
@@ -378,7 +431,8 @@ function showView(v) {
   S.view = v; for (const b of document.querySelectorAll('#views button')) b.classList.toggle('on', b.dataset.v === v);
   const box = $('#view'); if (v === 'floor') { box.hidden = true; return; }
   box.hidden = false; if(v==='home'){renderOperationGraph();return;} box.replaceChildren(h('div', { class: 'sub' }, 'loading…'));
-  (v === 'workflow' ? workflowView : v === 'rooms' ? roomsView : archiveView)(box).catch((e) => box.replaceChildren(h('pre', { class: 'fatal' }, e.message)));
+  const content=h('div');box.replaceChildren(content);
+  (v === 'workflow' ? workflowView : v === 'rooms' ? roomsView : archiveView)(content).catch((e) => content.replaceChildren(h('pre', { class: 'fatal' }, e.message)));
 }
 // filter the floor and narration to one step's events (clicking a step)
 function setFilter(ids, label) {
@@ -463,7 +517,7 @@ async function archiveView(box) {
 let prev = performance.now(), lastCard = '';
 function frame(now) {
   const dt = Math.min(100, now - prev); prev = now;
-  if (S.tl) {
+  if (S.tl && S.view!=='home') {
     if (S.live) S.c = S.tl.duration;
     else if (S.playing) { S.c += dt * S.speed; if (S.c >= S.tl.duration) { S.c = S.tl.duration; S.playing = false; $('#play').textContent = '▶'; } }
     const t = S.live ? Math.max(Date.now(), S.tl.end) : S.tl.toReal(S.c); draw(t); drawTimeline(); drawLog(t);

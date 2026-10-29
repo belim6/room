@@ -11,7 +11,7 @@ export function liveClient({ url = '/api/live', ES = globalThis.EventSource, ref
     onReset(snap); const q = pending; pending = null; for (const d of q) onDelta(d);
   };
   return {
-    start() { if (src) return; src = new ES(url); src.addEventListener('hello', hello); src.addEventListener('events', (m) => { const d = JSON.parse(m.data); if (pending) pending.push(d); else onDelta(d); }); },
+    start() { if (src) return; src = new ES(url); src.addEventListener('hello', hello); src.addEventListener('reset', hello); src.addEventListener('events', (m) => { const d = JSON.parse(m.data); if (pending) pending.push(d); else onDelta(d); }); },
     stop() { src?.close(); src = null; gen++; pending = null; },
     get on() { return !!src; },
   };

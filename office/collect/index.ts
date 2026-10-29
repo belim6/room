@@ -1,3 +1,4 @@
+import { eventNodeIndex } from './event-index';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Sink, hid, type OfficeEvent, type Artifact, type Actor, type Provenance } from './types';
@@ -18,7 +19,7 @@ export interface Coverage { captured: number; derived: number; inferred: number;
 export interface Operation { id: string; label: string; title: string; packet?: string; inferred: boolean; start: string; end: string; coverage: Coverage; actors: number;
   workflow: { template: { source: 'template'; steps: string[] }; run: { source: 'events'; steps: { step: string; first: string; count: number }[] } } }
 export interface Collected { cfg: Config; allow: Allowlist; events: OfficeEvent[]; byId: Map<string, OfficeEvent>; actors: Map<string, Actor>; operations: Operation[];
-  operationTree?: OperationTree; tokenUnattributed?: TokenUsage; tokenRecords?: { total: number; attributed: number; unattributed: number }; artifacts: Artifact[]; sources: Sink['sources']; lineIndex: Map<string, number[]>; holdUntil: Map<string, number>; collectedAt: string; primarySession?: string; ident: Identity }
+  eventNodeIndex?: Map<string, OfficeEvent[]>; operationTree?: OperationTree; tokenUnattributed?: TokenUsage; tokenRecords?: { total: number; attributed: number; unattributed: number }; artifacts: Artifact[]; sources: Sink['sources']; lineIndex: Map<string, number[]>; holdUntil: Map<string, number>; collectedAt: string; primarySession?: string; ident: Identity }
 
 const walk = (root: string, pick: (p: string) => boolean, out: string[] = []) => {
   if (!fs.existsSync(root)) return out;
@@ -67,7 +68,7 @@ export function collect(cfg: Config = config()): Collected {
   const tokens = attachTokenUsage(events, allow);
   const artifacts: Artifact[] = [...coordFiles, ...walk(cfg.promptKnowledge, () => true), ...workFiles, ...researchFiles, ...extraFiles].map(p => { const st = fs.statSync(p); return { path: p, group: allow.group(p), size: st.size, mtime: st.mtime.toISOString(), operation: ops.of(p) }; });
   const tree = operationTree(cfg.operations, allow, events, tokens.available ? tokens.unattributed : undefined, artifacts);
-  return { cfg, allow, events, byId: new Map(events.map(e => [e.id, e])), actors: sink.actors, operations: operations(events, sink.actors, allow), ...(tree ? { operationTree: tree } : {}), ...(tokens.available ? { tokenUnattributed: tokens.unattributed, tokenRecords: { total: tokens.records, attributed: tokens.attributedRecords, unattributed: tokens.unattributedRecords } } : {}), artifacts, sources: sink.sources, lineIndex: sink.lineIndex, holdUntil: sink.holdUntil, collectedAt: new Date().toISOString(), primarySession, ident };
+  return { cfg, allow, events, eventNodeIndex: eventNodeIndex(events, tree), byId: new Map(events.map(e => [e.id, e])), actors: sink.actors, operations: operations(events, sink.actors, allow), ...(tree ? { operationTree: tree } : {}), ...(tokens.available ? { tokenUnattributed: tokens.unattributed, tokenRecords: { total: tokens.records, attributed: tokens.attributedRecords, unattributed: tokens.unattributedRecords } } : {}), artifacts, sources: sink.sources, lineIndex: sink.lineIndex, holdUntil: sink.holdUntil, collectedAt: new Date().toISOString(), primarySession, ident };
 }
 const firstTs = (f: string) => { try { const fd = fs.openSync(f, 'r'), b = Buffer.alloc(65536), n = fs.readSync(fd, b, 0, b.length, 0); fs.closeSync(fd); return (b.toString('utf8', 0, n).match(/"timestamp":\s*"([^"]+)"/) || [])[1] || '9999'; } catch { return '9999'; } };
 

@@ -128,11 +128,15 @@ export function masking(allow: Allowlist) {
 }
 export const maskAll = (allow: Allowlist) => masking(allow).full;
 const maskDeepWith = (f: ReturnType<typeof masking>) => {
+  // Request-local memoization only: the masker is rebuilt against current blinding on every response.
+  const ownPaths = new Map<unknown, boolean>(), fullText = new Map<string, string>(), ownText = new Map<string, string>();
+  const isOwn = (p: unknown) => { if (!ownPaths.has(p)) ownPaths.set(p, f.isOwn(p)); return ownPaths.get(p)!; };
+  const text = (s: string, mine: boolean) => { const cache=mine?ownText:fullText; if(!cache.has(s)) cache.set(s,mine?f.own(s):f.full(s)); return cache.get(s)!; };
   const go = (v: any, k = '', mine = false): any => {
-    if (typeof v === 'string') return k === 'path' || k === 'source' || k === 'file' ? v : mine ? f.own(v) : f.full(v);
+    if (typeof v === 'string') return k === 'path' || k === 'source' || k === 'file' ? v : text(v, mine);
     if (Array.isArray(v)) return v.map(x => go(x, k, mine));
     if (!v || typeof v !== 'object') return v;
-    const m = mine || f.isOwn(v.source) || f.isOwn(v.detailRef?.file) || f.isOwn(v.path);
+    const m = mine || isOwn(v.source) || isOwn(v.detailRef?.file) || isOwn(v.path);
     return Object.fromEntries(Object.entries(v).map(([kk, x]) => [kk, go(x, kk, m)]));
   };
   return go;

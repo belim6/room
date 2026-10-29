@@ -276,7 +276,7 @@ test('review 3: sub-agent transcript progress triggers the transcript fallback',
   const before = o.live.sig(), n0 = o.data.events.length, rec = JSON.parse(fs.readFileSync(sub, 'utf8').split('\n').filter(Boolean).find(l => l.includes('"tool_use"') && l.includes('"Read"'))!);
   rec.uuid = 'f9-1'; rec.timestamp = '2026-10-17T17:42:20.500Z'; rec.message.id = 'msg_late'; rec.message.content[0].id = 'toolu_late';
   fs.appendFileSync(sub, JSON.stringify(rec) + '\n');
-  assert.notEqual(o.live.sig(), before); o.live.tick();
+  assert.notEqual(o.live.sig(), before); await o.live.tick();
   assert.equal(o.live.fulls, 1); assert.ok(o.data.events.length > n0); assert.ok(o.data.events.some(e => e.detailRef.key === 'toolu_late'));
 });
 
@@ -296,7 +296,7 @@ test('review 4: PostToolUse output is checked against the PreToolUse cwd', async
   assert.equal(out(recs[0]).text, 'PROMPT-TEXT');
 });
 
-test('review 5: spool tails are read by byte offset; the transcript fallback backs off while hooks deliver', () => {
+test('review 5: spool tails are read by byte offset; the transcript fallback backs off while hooks deliver', async () => {
   const { cfg } = fixture(), f = path.join(cfg.spool!, 'hooks-2026-10-18.jsonl'), line = (id: string) => JSON.stringify({ v: 1, src: 'hook', ts: new Date().toISOString(), id, event: 'Stop', session: S }) + '\n';
   fs.mkdirSync(cfg.spool!, { recursive: true }); fs.writeFileSync(f, line('a') + line('b') + '{"v":1,"partial');
   const st = readSpoolTail(f); assert.equal(st.recs.length, 2); const off = st.offset; assert.equal(off, Buffer.byteLength(line('a') + line('b')));
@@ -306,7 +306,7 @@ test('review 5: spool tails are read by byte offset; the transcript fallback bac
   readSpoolTail(f, st); assert.deepEqual(st.recs.map(x => x.r.id), ['a', 'b', 'c']); assert.equal(st.unparsed, 1, 'the joined partial line is one bad record');
   const o = createOffice(cfg, { fullMs: 0, fullMsWithHooks: 60_000 });
   fs.appendFileSync(path.join(cfg.claudeProject, S + '.jsonl'), '\n'); o.live.tick(); assert.equal(o.live.fulls, 0, 'hooks active: transcripts wait for the longer interval');
-  o.live.tick(Date.now() + 61_000); assert.equal(o.live.fulls, 1);
+  await o.live.tick(Date.now() + 61_000); assert.equal(o.live.fulls, 1);
 });
 
 test('review 6: a hook load failure is still counted; Ctrl-C is not forwarded twice', () => {

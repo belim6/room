@@ -1,6 +1,9 @@
+import { collectBackground } from './collect/background';
+import { eventNodeIndex } from './collect/event-index';
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { collect, finalize, operations, type Collected } from './collect/index';
+import { finalize, operations, type Collected } from './collect/index';
 import { Sink, type OfficeEvent, type Actor } from './collect/types';
 import { parseEvents } from './collect/events';
 import { parseManifest } from './collect/manifests';
@@ -16,12 +19,14 @@ import { attachTokenUsage } from './collect/token-usage';
 // and fold them with the same renderer as replay.
 export const meta = (e: OfficeEvent) => { const { hints, ...m } = e; return m; };
 const same = (a: OfficeEvent, b: OfficeEvent) => JSON.stringify({ ...meta(a), seq: 0 }) === JSON.stringify({ ...meta(b), seq: 0 });
-export interface LiveOpts { tickMs?: number; fullMs?: number; fullMsWithHooks?: number; roomFeed?: string }
+export interface LiveOpts { tickMs?: number; fullMs?: number; fullMsWithHooks?: number; roomFeed?: string; collectAsync?: (cfg: Config) => Promise<Collected> }
 export type Push = (type: string, data: unknown) => void;
 
 export class Live {
   clients = new Set<Push>(); sizes = new Map<string, number>(); spool = new Map<string, SpoolState>(); transcriptSig = ''; lastFull = Date.now(); version = 0; fulls = 0;
-  private timer?: NodeJS.Timeout; private feedStop?: () => void; private busy = false;
+  droppedNotices = 0;
+  private retryCollect = false; private droppedThisCollect = 0;
+  private timer?: NodeJS.Timeout; private feedStop?: () => void; private busy = false; private collecting?: Promise<void>; private pendingNotices: Parameters<Live['notice']>[0][] = [];
   constructor(private get: () => Collected, private set: (c: Collected) => void, private cfg: Config, private opts: LiveOpts = {}) {
     for (const f of this.tracked()) { this.sizes.set(f, this.size(f)); if (this.get().allow.isSpool(f)) this.spool.set(f, readSpoolTail(f)); }
     this.transcriptSig = this.sig();
@@ -43,6 +48,7 @@ export class Live {
   }
   // Session transcripts and every sub-agent transcript (subagents/**/agent-*.jsonl): sizes and mtimes. Any change, including
   // an agent appending to its own transcript, schedules a full collect (the transcript fallback).
+  // Operations edits share the debounce; hashing also catches edits preserving size and mtime.
   sig() {
     const root = this.get().allow.roots.claudeProject, parts: string[] = [];
     const walk = (d: string) => { let ns: string[] = []; try { ns = fs.readdirSync(d).sort(); } catch { return; }
@@ -50,12 +56,17 @@ export class Live {
         if (st.isDirectory()) walk(p); else if (/^agent-.*\.jsonl$/.test(n)) parts.push(`${p}:${st.size}:${st.mtimeMs}`); } };
     try { for (const n of fs.readdirSync(root).sort()) { const p = path.join(root, n); const st = fs.statSync(p);
       if (st.isFile() && n.endsWith('.jsonl')) parts.push(`${n}:${st.size}:${st.mtimeMs}`); else if (st.isDirectory()) walk(path.join(p, 'subagents')); } } catch {}
+    if (this.cfg.operations) {
+      const file = this.cfg.operations;
+      try { const st = fs.statSync(file); parts.push(`${file}:${st.size}:${st.mtimeMs}:${createHash('sha256').update(fs.readFileSync(file)).digest('hex')}`); }
+      catch { parts.push(`${file}:missing`); }
+    }
     return parts.join(';');
   }
-  // While the hooks are delivering, transcripts only reconcile: the blocking full collect then runs far less often.
+  // While hooks deliver, full background reconciliation runs less often.
   private hooksActive(now: number) { for (const [f, st] of this.spool) if (path.basename(f).startsWith('hooks') && st.lastTs && now - Date.parse(st.lastTs) < 120e3) return true; return false; }
   tick(now = Date.now()) {
-    if (this.busy) return; this.busy = true;
+    if (this.busy || this.collecting) return this.collecting; this.busy = true;
     try {
       const changed: string[] = [];
       for (const f of this.tracked()) { const s = this.size(f); if (s !== this.sizes.get(f)) { this.sizes.set(f, s); if (s >= 0) changed.push(f); } }
@@ -64,7 +75,7 @@ export class Live {
       if (changed.length) this.incremental(changed);
       const sig = this.sig();
       const every = this.hooksActive(now) ? (this.opts.fullMsWithHooks ?? 120000) : (this.opts.fullMs ?? 15000);
-      if (sig !== this.transcriptSig && now - this.lastFull >= every) { this.transcriptSig = sig; this.full(); }
+      if (this.retryCollect || (sig !== this.transcriptSig && now - this.lastFull >= every)) { this.transcriptSig = sig; return this.full(); }
     } finally { this.busy = false; }
   }
   incremental(files: string[]) {
@@ -84,18 +95,28 @@ export class Live {
     const removes = data.events.filter(e => fileSet.has(e.source) && !fresh.has(e.id)).map(e => e.id);
     this.merge(events, removes, sink.actors);
   }
-  full() {
-    const prev = this.get(), next = collect(this.cfg), ids = new Set(next.events.map(e => e.id)); this.fulls++;
-    for (const f of spoolFiles(next.allow.roots.spool)) this.spool.set(f, readSpoolTail(f, this.spool.get(f)));
-    const removes = prev.events.filter(e => !ids.has(e.id)).map(e => e.id);
-    this.lastFull = Date.now(); this.set(next);
-    const changed = next.events.filter(e => { const p = prev.byId.get(e.id); return !p || !same(p, e); });
-    this.broadcast(changed, removes, [...next.actors.values()].filter(a => JSON.stringify(a) !== JSON.stringify(prev.actors.get(a.id))));
+  full(): Promise<void> {
+    if (this.collecting) return this.collecting;
+    this.retryCollect = false;
+    this.collecting = (async () => (this.opts.collectAsync || collectBackground)(this.cfg))().then(next => {
+      this.set(next); this.fulls++; this.lastFull = Date.now(); this.version++;
+      // A reset also carries document/tree-only changes. Clients refetch the published snapshot.
+      for (const push of this.clients) try { push('reset', { version: this.version }); } catch {}
+    }).catch(error => { this.retryCollect = true; console.error('[office collect]', error.message); }).finally(() => {
+      this.collecting = undefined;
+      if (this.droppedThisCollect) { console.warn('[office live] dropped', this.droppedThisCollect, 'oldest pending notices; total', this.droppedNotices); this.droppedThisCollect = 0; }
+      for (const notice of this.pendingNotices.splice(0)) this.notice(notice);
+    });
+    return this.collecting;
   }
   // Room's ID-only live notices (optional; off unless OFFICE_ROOM_FEED is set). A turn notice becomes a server `turn`.
   notice(n: { kind?: string; id?: string; branch?: string; at?: string }) {
     // Codex privacy P1 (O3 release): only Room's own record ids (UUIDs) pass; any other field of the notice is ignored, so a
     // notice cannot carry turn text or a trajectory id into the metadata tier. The label is fixed.
+    if (this.collecting) {
+      if (this.pendingNotices.length >= 5000) { this.pendingNotices.shift(); this.droppedNotices++; this.droppedThisCollect++; }
+      this.pendingNotices.push(n); return;
+    }
     if (n.kind !== 'turns' || !UUID.test(String(n.id || ''))) return;
     const data = this.get(), op = UUID.test(String(n.branch || '')) ? data.events.find(e => e.verb === 'write' && e.target?.kind === 'branch' && e.target.id === n.branch)?.operation : undefined;
     const sink = new Sink(); for (const [k, a] of data.actors) sink.actors.set(k, { ...a });
@@ -113,7 +134,8 @@ export class Live {
     data.operations = operations(data.events, data.actors, data.allow);
     const tokens = attachTokenUsage(data.events, data.allow);
     if(tokens.available){data.tokenUnattributed=tokens.unattributed;data.tokenRecords={total:tokens.records,attributed:tokens.attributedRecords,unattributed:tokens.unattributedRecords};}
-    data.operationTree = operationTree(this.cfg.operations, data.allow, data.events, tokens.available ? tokens.unattributed : undefined);
+    data.operationTree = operationTree(this.cfg.operations, data.allow, data.events, tokens.available ? tokens.unattributed : undefined, data.artifacts);
+    data.eventNodeIndex = eventNodeIndex(data.events, data.operationTree);
     this.broadcast(up, removes, newActors);
   }
   broadcast(up: OfficeEvent[], removes: string[], actors: Actor[]) {
