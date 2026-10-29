@@ -3,13 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 export interface Config { coordination: string; promptKnowledge: string; roomData: string; claudeProject: string; coordinatorSession?: string; home: string; spool?: string; repos?: string[]; operations?: string;
-  room?: string; work?: string; research?: string; sessions?: string; extra?: string[] }
+  board?: string; room?: string; work?: string; research?: string; sessions?: string; extra?: string[] }
 export function config(env: NodeJS.ProcessEnv = process.env): Config {
   const home = env.OFFICE_HOME || os.homedir(), room = env.OFFICE_ROOM || path.join(home, 'dev/room');
   // coordination/ moves to archive/coordination/ in phase 2 of the file reorganisation: whichever exists is read as history
   const coordination = env.OFFICE_COORDINATION || [path.join(room, 'coordination'), path.join(room, 'archive/coordination')].find(p => fs.existsSync(p)) || path.join(room, 'coordination');
   return {
-    home, coordination, room,
+    home, coordination, room, board: env.OFFICE_BOARD || path.join(room, 'board'),
     work: env.OFFICE_WORK || path.join(room, 'work'), research: env.OFFICE_RESEARCH || path.join(room, 'research'),
     sessions: env.OFFICE_SESSIONS || path.join(room, 'roles/sessions.json'),
     operations: env.OFFICE_OPERATIONS || path.join(room, 'work/office/operations.json'),
@@ -82,7 +82,7 @@ export class Allowlist {
   allows(p: string, cwd?: string) {
     if (!p || p.includes('\0')) return false;
     const c = this.canonical(p, cwd), r = this.roots;
-    if (/\.log$/i.test(c) || under(c, r.spool) || /^\.env/i.test(path.basename(c))) return false; // .env* anywhere: path only
+    if (under(c, real(this.cfg.board || path.join(this.cfg.room || path.join(this.cfg.home, 'dev/room'), 'board'))) || /\.log$/i.test(c) || under(c, r.spool) || /^\.env/i.test(path.basename(c))) return false; // .env* anywhere: path only
     if (this.blind?.(c)) return false;
     if (under(c, r.roomData)) { const rel = relSegs(r.roomData, c); return rel.length === 2 && ROOM_KINDS.test(rel[0]) && rel[1].endsWith('.json'); }
     // restricted/ (keys, unmask records, read sides) is never served: the Office validates it internally (rooms.ts)

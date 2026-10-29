@@ -1,0 +1,3 @@
+#!/bin/sh
+here="$(cd "$(dirname "$0")" && pwd)"
+exec node --import "$here/../../node_modules/tsx/dist/loader.mjs" "$here/../board-cli.ts" post "$@"

@@ -1,4 +1,5 @@
 import express from 'express';
+import { appendBoard, pageBoard, roomOf, visibleMessage, BoardError } from './board';
 import path from 'node:path';
 import { collect, type Collected } from './collect/index';
 import { config, redact, redactDeep, type Config } from './collect/privacy';
@@ -14,7 +15,7 @@ import { operationPlacement } from './web/operation-placement.mjs';
 import { deniedDocument, visibleDocuments } from './collect/deny';
 import { nodeDocuments } from './collect/documents';
 
-// The Office: read-only, loopback-only view over saved records. GET routes only; nothing here writes to any source.
+// The Office is loopback-only. The board POST is its sole write route.
 const meta = (e: OfficeEvent) => { const { hints, ...m } = e; return m; }; // hints carry command/prompt text: never in the summary tier
 const inOp = (e: OfficeEvent, op?: string) => !op || op === '*' || e.operation === op || !!e.operation?.startsWith(op + '/');
 
@@ -28,7 +29,7 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
     res.on('finish', () => { if (req.path.startsWith('/api/')) console.info('[office timing]', req.path, Math.round(performance.now()-started), 'ms'); });
     const host = req.headers.host || '';
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return res.status(403).json({ error: 'Local connections only' });
-    if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(405).set('Allow', 'GET, HEAD').json({ error: 'The Office is read-only.' });
+    if (req.method !== 'GET' && req.method !== 'HEAD' && !(req.method === 'POST' && /^\/api\/board\/[^/]+$/.test(req.path))) return res.status(405).set('Allow', 'GET, HEAD').json({ error: 'The Office is read-only.' });
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
     if (req.path.startsWith('/api/')) { res.setHeader('Cache-Control', 'no-store'); refreshBlind(data.allow); } // fail closed: index any new masked folder before answering
@@ -36,6 +37,22 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   });
   // last line of defence: every API string passes redaction, and trajectory ids of masked operations are masked
   const send = (res: any, v: unknown) => res.json(redactDeep(maskDeep(data.allow)(v)));
+  app.get('/api/board/:room', (req, res) => {
+    try { const room = roomOf(req.params.room); send(res, { messages: pageBoard(cfg, room, req.query.after === undefined ? undefined : String(req.query.after), req.query.limit === undefined ? 100 : Number(req.query.limit)).map(m => visibleMessage(m, data.allow)) }); }
+    catch (e) { const err = e as BoardError; res.status(err.status || 503).json({ error: err instanceof BoardError ? err.message : 'Board unavailable' }); }
+  });
+  let posts: number[] = [];
+  app.post('/api/board/:room', (req, res, next) => {
+    if (req.headers.origin !== `http://${req.headers.host}` || Number(req.headers.host?.split(':')[1] || 80) !== req.socket.localPort) return res.status(403).json({ error: 'Office same-origin required' });
+    if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) return res.status(415).json({ error: 'JSON content-type required' });
+    try { roomOf(req.params.room); } catch { return res.status(404).json({ error: 'Unknown board room' }); }
+    const now = Date.now(); posts = posts.filter(t => now - t < 60000);
+    if (posts.length >= 30) return res.status(429).set('Retry-After', '60').json({ error: 'Board rate limit: 30/minute' });
+    posts.push(now); next();
+  }, express.json({ limit: 16384, inflate: false }), (req, res) => {
+    try { const message = appendBoard(cfg, roomOf(req.params.room), req.body, { role: 'deniz', kind: 'human' }); res.status(201); send(res, { message: visibleMessage(message, data.allow) }); }
+    catch (e) { const err = e as BoardError; res.status(err.status || 503).json({ error: err instanceof BoardError ? err.message : 'Board unavailable' }); }
+  });
   app.get('/api/summary', (_req, res) => send(res, {
     collectedAt: data.collectedAt, operations: data.operations, ...(data.operationTree ? { operationTree: data.operationTree } : {}), ...(data.tokenRecords ? { tokenRecords: data.tokenRecords } : {}), actors: [...data.actors.values()],
     sources: data.sources.map(s => ({ ...s })), counts: { events: data.events.length, artifacts: visibleDocuments(data.artifacts, data.allow).length },
@@ -91,7 +108,7 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   });
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
   app.use(express.static(path.join(__dirname, 'web'), { etag: false, setHeaders: (res, p) => { res.setHeader('Cache-Control', 'no-cache'); if (p.endsWith('.mjs')) res.setHeader('Content-Type', 'text/javascript; charset=utf-8'); } }));
-  app.use((err: any, _req: any, res: any, _next: any) => res.status(500).json({ error: redact(String(err?.message || err)) }));
+  app.use((err: any, req: any, res: any, _next: any) => req.path.startsWith('/api/board/') ? res.status(err.status === 413 ? 413 : err.status === 415 ? 415 : 400).json({ error: 'Invalid board request' }) : res.status(500).json({ error: redact(String(err?.message || err)) }));
   return { app, live, get data() { return data; } };
 }
 

@@ -1,3 +1,4 @@
+import { serve } from './serve';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -67,11 +68,6 @@ function fixture() {
   const cfg: Config = { home: path.join(root, 'home'), coordination: path.join(root, 'coordination'), promptKnowledge: path.join(root, 'pk'), roomData: path.join(root, 'room-data'),
     claudeProject: path.join(root, 'proj'), coordinatorSession: S };
   return { root, cfg };
-}
-async function serve(cfg: Config) {
-  const { app } = createOffice(cfg); const srv = app.listen(0, '127.0.0.1'); await new Promise(r => srv.once('listening', r));
-  const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-  return { base, close: () => new Promise(r => srv.close(r)), get: async (u: string) => { const r = await fetch(base + u); return { status: r.status, text: await r.text() }; } };
 }
 // Every GET the page can make: summary, events, artifacts, every event expanded, every artifact/target file expanded.
 async function crawl(s: Awaited<ReturnType<typeof serve>>, extraPaths: string[] = []) {
@@ -179,7 +175,7 @@ test('privacy gate: off-allowlist, traversal and symlink escapes return the path
   } finally { await s.close(); }
 });
 
-test('read-only gate: source trees unchanged after collect, every API call and a full replay; no non-GET routes', async () => {
+test('read-only gate: source trees unchanged after collect, every API call and a full replay; board is the sole write route', async () => {
   const { root, cfg } = fixture(), before = snapshot(root);
   await new Promise(r => setTimeout(r, 20));
   const s = await serve(cfg), M: any = await import(path.join(__dirname, '../web/model.mjs'));
@@ -193,7 +189,8 @@ test('read-only gate: source trees unchanged after collect, every API call and a
   } finally { await s.close(); }
   assert.deepEqual(snapshot(root), before);
   const { app } = createOffice(cfg), routes = (app as any)._router.stack.filter((l: any) => l.route).map((l: any) => Object.keys(l.route.methods));
-  assert.ok(routes.length >= 6); for (const ms of routes) assert.deepEqual(ms, ['get']);
+  assert.ok(routes.length >= 6); for (const ms of routes) assert.ok(JSON.stringify(ms) === '["get"]' || JSON.stringify(ms) === '["post"]');
+  assert.deepEqual((app as any)._router.stack.filter((l: any) => l.route?.methods.post).map((l: any) => l.route.path), ['/api/board/:room']);
 });
 
 test('replay determinism: same records, same events; same t, same floor state', async () => {
