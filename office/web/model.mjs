@@ -25,12 +25,14 @@ export function operationTreeRows(tree) {
 export function parseOfficeRoute(hash = '') {
   const value = String(hash).replace(/^#/, '');
   if (!value || value === '/') return { page: 'home' };
+  const board = parseBoardRoute(value); if (board) return board;
   const legacy = value.match(/^op=(.*)$/);
   if (legacy) return { page: 'operation', id: decodeURIComponent(legacy[1]), tab: 'floor', legacy: true };
   const match = value.match(/^\/op\/([^/]+)\/(floor|workflow|rooms|archive)$/);
   return match ? { page: 'operation', id: decodeURIComponent(match[1]), tab: match[2] } : { page: 'home' };
 }
 export function officeRouteHash(route) {
+  if (route?.page === 'board') return `#/board/${BOARD_ROOMS.includes(route.room) ? route.room : 'work'}`;
   return route?.page === 'operation' ? `#/op/${encodeURIComponent(route.id)}/${route.tab || 'floor'}` : '#/';
 }
 export function createRouteGuard() {
@@ -331,7 +333,7 @@ import { operationPlacement } from './operation-placement.mjs';
 export function operationGraphWheel(cam, { deltaX=0, deltaY=0, deltaMode=0, ctrlKey=false, metaKey=false }, point, pageHeight=800) {
   const unit=deltaMode===1?16:deltaMode===2?pageHeight:1;
   if(!ctrlKey&&!metaKey)return {...cam,x:cam.x-deltaX*unit,y:cam.y-deltaY*unit};
-  return operationGraphZoom(cam,Math.exp(-deltaY*unit*.002),point);
+  return operationGraphZoom(cam,Math.exp(-deltaY*unit*.004),point);
 }
 export function operationGraphZoom(cam,factor,{x,y}) {
   const s=Math.max(.6,Math.min(2.5,cam.s*factor)),ratio=s/cam.s;
@@ -434,4 +436,58 @@ export function unfiledByDay(events, tree, now = Date.now()) {
 export function operationGraphEdgePath(a, b, cardWidth, cardHeight, stub = 14) {
   const x1 = a.x + cardWidth, y1 = a.y + cardHeight / 2, sx = x1 + stub, x2 = b.x, y2 = b.y + cardHeight / 2, mx = sx + Math.max(8, (x2 - sx) / 2);
   return y1 === y2 ? `M${x1},${y1} H${x2}` : `M${x1},${y1} H${sx} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+}
+
+// ---- Board page (step b): routes, unread counts, chips, message view-model, @role autocomplete ------------------------
+export const BOARD_ROOMS = ['work', 'leisure'];
+export const BOARD_ROLES = ['operator', 'coordinator', 'partner', 'experimenter', 'engineer', 'jev-correspondent', 'prompter', 'brainstormer', 'intern'];
+export const BOARD_WITHHELD = 'withheld by the Office deny-list';
+export const BOARD_LIMIT = 2000;
+export const boardIdNum = (id) => { const n = Number(String(id || '').slice(2)); return Number.isFinite(n) ? n : 0; };
+export function parseBoardRoute(value) { const m = String(value).match(/^\/board(?:\/([a-z]+))?\/?$/); return m ? { page: 'board', room: BOARD_ROOMS.includes(m[1]) ? m[1] : 'work' } : null; }
+// Messages newer than the last one Deniz saw in that room; never seen counts every loaded message.
+export function boardUnread(messages, seenId) { const seen = boardIdNum(seenId); return (messages || []).filter(m => boardIdNum(m.id) > seen && m.author?.kind !== 'human').length; }
+// A stand-in is never shown under the bare role name.
+export function boardAuthorName(a = {}) { return a.kind === 'standin' ? `${a.role} (stand-in)` : a.kind === 'human' && a.role === 'deniz' ? 'Deniz' : a.role || 'unknown'; }
+// Node ids chip in prose only when they cannot be ordinary words (they carry a '-' or '/'); links resolve any node id.
+export function boardTokens(text, nodeIds = new Set()) {
+  const out = [], push = (t, v, extra = {}) => { const last = out[out.length - 1]; if (t === 'text' && last?.t === 'text') last.v += v; else out.push({ t, v, ...extra }); };
+  let i = 0;
+  for (const m of String(text).matchAll(/\S+/g)) {
+    if (m.index > i) push('text', text.slice(i, m.index)); i = m.index + m[0].length;
+    const [, lead, core, trail] = m[0].match(/^([("'\[`]*)(.*?)([)"'\]`.,;:!?]*)$/s), at = core.match(/^@([a-z][a-z0-9-]*)$/);
+    const prev = m.index ? text[m.index - 1] : '';
+    if (at && BOARD_ROLES.includes(at[1]) && !(lead === '' && /[\w@.-]/.test(prev))) { push('text', lead); push('mention', core, { role: at[1] }); push('text', trail); }
+    else if (core && /[-/]/.test(core) && nodeIds.has(core)) { push('text', lead); push('node', core, { id: core }); push('text', trail); }
+    else push('text', m[0]);
+  }
+  if (i < String(text).length) push('text', text.slice(i));
+  return out.filter(t => t.v !== '');
+}
+// A link opens an operation (a node id), a repo file in the document viewer (a path), or stays plain text.
+export function boardLinkTarget(link, nodeIds = new Set(), room = '~/dev/room') {
+  if (!link) return null;
+  if (nodeIds.has(link)) return { type: 'node', id: link };
+  if (/^[a-z][a-z0-9+.-]*:/i.test(link) || /\s/.test(link) || !/[/.]/.test(link)) return { type: 'text' };
+  return { type: 'file', path: link.startsWith('/') || link.startsWith('~/') ? link : `${room}/${link.replace(/^\.\//, '')}` };
+}
+export function boardMessageView(m, { now = Date.now(), nodeIds = new Set(), byId = new Map() } = {}) {
+  const ts = Date.parse(m.at), withheld = m.text === BOARD_WITHHELD, parent = m.replyTo ? byId.get(m.replyTo) : null;
+  return { id: m.id, author: boardAuthorName(m.author), kind: ['human', 'session', 'standin'].includes(m.author?.kind) ? m.author.kind : 'session',
+    ago: Number.isFinite(ts) ? relativeAgo(now - ts) : 'unknown time', absolute: Number.isFinite(ts) ? new Date(ts).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'medium' }) : String(m.at || ''),
+    withheld, tokens: withheld ? [{ t: 'text', v: m.text }] : boardTokens(m.text || '', nodeIds), link: withheld ? null : m.link ? { value: m.link, target: boardLinkTarget(m.link, nodeIds) } : null,
+    replyTo: m.replyTo ? { id: m.replyTo, author: parent ? boardAuthorName(parent.author) : null, snippet: parent ? boardSnippet(parent.text) : '' } : null };
+}
+export const boardSnippet = (s = '', n = 60) => { const t = String(s).replace(/\s+/g, ' ').trim(); return [...t].length > n ? [...t].slice(0, n - 1).join('') + '…' : t; };
+// The draft as the API will judge it: 1–2000 code points, at most one run of line breaks.
+export function boardDraft(text) {
+  const n = [...String(text)].length, runs = (String(text).match(/(?:\r\n|[\r\n\u2028\u2029])+/g) || []).length;
+  return { count: `${n}/${BOARD_LIMIT}`, over: n > BOARD_LIMIT, problem: !String(text).trim() ? 'empty' : n > BOARD_LIMIT ? `${n - BOARD_LIMIT} character${n - BOARD_LIMIT === 1 ? '' : 's'} over the limit` : runs > 1 ? 'only one line break (or one blank-line run) per message' : '' };
+}
+// @-autocomplete at the caret: the partial role after an @ that starts a token.
+export function boardMentionCompletions(text, caret, room = 'work') {
+  const m = String(text).slice(0, caret).match(/(?<![\w@.-])@([a-z0-9-]*)$/);
+  if (!m) return null;
+  const q = m[1], hits = BOARD_ROLES.filter(r => r.startsWith(q)).concat(BOARD_ROLES.filter(r => !r.startsWith(q) && q && r.includes(q)));
+  return hits.length ? { start: caret - q.length - 1, end: caret, query: q, options: hits.map(role => ({ role, label: room === 'leisure' ? `${role} (stand-in)` : role })) } : null;
 }

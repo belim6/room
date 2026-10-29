@@ -140,3 +140,66 @@ main { display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
 .op-open rect { fill:#223448; stroke:#48637c; }
 .op-open:hover rect,.op-open:focus rect { stroke:var(--cap); }
 .op-open text { pointer-events:none; }
+
+/* ---- Board page ---- */
+body.board-page #scrub, body.board-page #log { display:none; }
+.board-mode main { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr); }
+.board-mode #floor, .board-mode #tip, .board-mode #inspector { display:none; }
+.board-mode #view { inset:0; padding:0; overflow:hidden; }
+.board-mode.doc-open #inspector { display:block; position:absolute; z-index:3; right:10px; top:10px; bottom:10px; width:min(560px,46vw); border:1px solid var(--line); border-radius:5px; box-shadow:0 8px 28px #0009; }
+#inspector .board-doc-close { float:right; margin:0 0 4px 6px; }
+.board { position:absolute; inset:0; display:flex; flex-direction:column; max-width:1180px; margin:0 auto; border-left:1px solid var(--line); border-right:1px solid var(--line); }
+.board-mode.doc-open .board { margin:0; max-width:none; right:min(580px,48vw); }
+.board-tabs { display:flex; gap:4px; padding:8px 12px 0; border-bottom:1px solid var(--line); background:var(--panel); flex:none; }
+.board-tab { background:transparent; color:var(--dim); border:1px solid transparent; border-bottom:0; border-radius:4px 4px 0 0; padding:5px 14px; font:inherit; font-size:13px; cursor:pointer; display:flex; align-items:center; gap:6px; }
+.board-tab:hover { color:var(--fg); }
+.board-tab.on { color:var(--fg); background:var(--bg); border-color:var(--line); margin-bottom:-1px; }
+.board-tab:focus-visible, .board-msg:focus-visible, .board button:focus-visible, #board-input:focus-visible { outline:2px solid var(--cap); outline-offset:1px; }
+.board-unread { background:var(--cap); color:#06121e; border-radius:9px; padding:0 6px; font-size:11px; font-weight:700; line-height:16px; }
+.board-header { flex:none; padding:6px 14px; color:var(--dim); border-bottom:1px solid var(--line); background:#10141a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.board-header.leisure { color:#c8b98a; }
+.board-list { flex:1; min-height:0; overflow:auto; padding:8px 0; }
+.board-empty { color:var(--dim); padding:24px 16px; text-align:center; font-style:italic; }
+.board-empty.error { color:var(--red); font-style:normal; }
+.board-msg { padding:5px 14px 6px; border-left:3px solid transparent; cursor:pointer; font-size:13px; }
+.board-msg:hover { background:#141a21; }
+.board-msg.replying { border-left-color:var(--cap); background:#13202b; }
+.board-meta { display:flex; align-items:baseline; gap:8px; }
+.board-author { font-weight:600; }
+.k-human .board-author { color:var(--amber); }
+.k-session .board-author { color:var(--cap); }
+.k-standin .board-author { color:var(--dim); font-style:italic; font-weight:400; }
+.k-standin .board-text { color:#9aa4ae; font-style:italic; }
+.board-meta time { color:var(--dim); font-size:11px; }
+.board-reply-btn { margin-left:auto; background:transparent; border:1px solid transparent; color:var(--dim); font:inherit; font-size:11px; cursor:pointer; padding:0 6px; border-radius:3px; opacity:0; }
+.board-msg:hover .board-reply-btn, .board-msg:focus-within .board-reply-btn { opacity:1; border-color:var(--line); }
+.board-text { white-space:pre-wrap; overflow-wrap:anywhere; margin-top:1px; }
+.board-msg.withheld .board-text { color:var(--dim); font-style:italic; }
+.board-chip { display:inline-block; padding:0 5px; border-radius:3px; font:inherit; font-size:12px; line-height:17px; border:1px solid #2f4a63; background:#13202b; color:var(--cap); }
+.board-chip.node { border-color:#3e3a63; background:#1b1830; color:var(--der); cursor:pointer; }
+.board-chip.node:hover { border-color:var(--der); }
+.board-link { margin-top:2px; }
+.board-link button { background:transparent; border:0; padding:0; color:var(--cap); font:inherit; font-size:12px; cursor:pointer; text-align:left; overflow-wrap:anywhere; }
+.board-link button:hover { text-decoration:underline; }
+.board-link-text { color:var(--dim); font-size:12px; overflow-wrap:anywhere; }
+.board-replyto { display:block; background:transparent; border:0; padding:0; color:var(--dim); font:inherit; font-size:11px; cursor:pointer; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+.board-compose { flex:none; border-top:1px solid var(--line); background:var(--panel); padding:8px 12px 8px; }
+.board-reply { display:flex; gap:8px; align-items:center; color:var(--dim); font-size:12px; padding:0 2px 5px; }
+.board-reply[hidden] { display:none; }
+.board-reply span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.board-reply button { background:transparent; border:1px solid var(--line); color:var(--dim); border-radius:3px; cursor:pointer; font:inherit; }
+.board-input-wrap { position:relative; }
+#board-input { width:100%; resize:vertical; min-height:56px; max-height:40vh; background:#0a0d10; color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:6px 8px; font:13px/1.4 ui-sans-serif, system-ui, sans-serif; }
+.board-ac { position:absolute; left:8px; bottom:100%; margin:0 0 4px; padding:3px 0; list-style:none; background:#161c24; border:1px solid var(--line); border-radius:4px; box-shadow:0 6px 18px #0008; min-width:220px; max-height:260px; overflow:auto; z-index:4; }
+.board-ac[hidden] { display:none; }
+.board-ac li { padding:3px 10px; cursor:pointer; }
+.board-ac li.on, .board-ac li:hover { background:#1f2a36; color:var(--fg); }
+.board-ac li.standin { font-style:italic; color:#9aa4ae; }
+.board-row { display:flex; align-items:center; gap:10px; margin-top:5px; }
+.board-count { color:var(--dim); font-family:ui-monospace, Menlo, monospace; font-size:11px; }
+.board-count.over { color:var(--red); font-weight:700; }
+.board-error { color:var(--red); font-size:12px; min-width:0; }
+.board-send { background:#1d3346; color:var(--fg); border:1px solid #2f5876; border-radius:3px; padding:4px 16px; font:inherit; cursor:pointer; }
+.board-send:disabled { opacity:.45; cursor:default; }
+.board-note { color:var(--dim); font-style:italic; font-size:11px; margin-top:3px; }
+.board-note:empty { display:none; }

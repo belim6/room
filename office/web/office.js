@@ -1,4 +1,4 @@
-import { progressiveOperationGraph, centreOperationGraph, operationGraphWheel, operationGraphZoom, PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeDisplay, operationGraphPointerHandlers, operationTreeNodeEvents, parseOfficeRoute, officeRouteHash, operationBreadcrumb, runningStripModel, createRouteGuard, validOfficeOperationRoute, recentOperations, nodeAncestors, groupNodeDocuments, breadcrumbDisplay, unfiledByDay, operationGraphEdgePath } from './model.mjs';
+import { progressiveOperationGraph, centreOperationGraph, operationGraphWheel, operationGraphZoom, PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeDisplay, operationGraphPointerHandlers, operationTreeNodeEvents, parseOfficeRoute, officeRouteHash, operationBreadcrumb, runningStripModel, createRouteGuard, validOfficeOperationRoute, recentOperations, nodeAncestors, groupNodeDocuments, breadcrumbDisplay, unfiledByDay, operationGraphEdgePath, BOARD_ROOMS, boardUnread, boardAuthorName, boardMessageView, boardDraft, boardMentionCompletions, boardSnippet, boardIdNum } from './model.mjs';
 import { operationPlacement } from './operation-placement.mjs';
 import { liveClient } from './liveclient.mjs';
 
@@ -41,6 +41,9 @@ async function init() {
   $('#live').onclick = toggleLive;
   for (const b of document.querySelectorAll('#views button')) b.onclick = () => navigateOperation(S.op, b.dataset.v, true);
   $('#unfiled-chip').onclick = openUnfiled;
+  $('#nav-home').onclick = () => { location.hash = '#/'; };
+  $('#nav-board').onclick = () => { location.hash = officeRouteHash({ page: 'board', room: B.room }); };
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && S.view === 'board') void pollBoard(); });
   loadUnfiled();
   addEventListener('keydown', (e) => { if (e.key === ' ' && e.target === document.body) { e.preventDefault(); togglePlay(); } if (e.key === 'Escape') follow(null); });
   $('#legend').append('read artifact→actor · write actor→artifact · ', h('span', { class: 'lc' }, '— captured '), h('span', { class: 'ld' }, '- - derived '), h('span', { class: 'li' }, '··· inferred '), h('span', { class: 'lr' }, '■ fail/gap'));
@@ -68,7 +71,10 @@ async function navigateOperation(id, tab = 'floor', push = false) {
 }
 async function applyRoute(route = parseOfficeRoute(location.hash), token = routeGuard.begin()) {
   const started=performance.now();
-  requestAnimationFrame(()=>console.info('[office timing] route first frame',route.id||'home',Math.round(performance.now()-started),'ms'));
+  requestAnimationFrame(()=>console.info('[office timing] route first frame',route.id||route.page,Math.round(performance.now()-started),'ms'));
+  $('#nav-home').classList.toggle('on',route.page==='home'); $('#nav-board').classList.toggle('on',route.page==='board');
+  if (route.page === 'board') { const canonical=officeRouteHash(route); if(location.hash!==canonical) history.replaceState(null,'',canonical); return enterBoard(route.room); }
+  leaveBoard();
   if (validOfficeOperationRoute(route, S.summary.operationTree, S.summary.operations)) {
     const canonical=officeRouteHash(route); if(location.hash!==canonical) history.replaceState(null,'',canonical);
     const same = S.op === route.id && (S.treeNode === route.id || !S.summary.operationTree || S.summary.operationTree.error);
@@ -571,11 +577,157 @@ async function archiveView(box) {
   box.replaceChildren(h('div', { class: 'arch' }, h('h2', {}, `Archive — ${S.op === '*' ? 'all operations' : opTitleOf(S.op)}`), search, list)); await load();
 }
 
+// ---- Board (step b): two rooms, unread markers, composer. Text only, via textContent; nothing answers an @ yet. -------------
+const B = { room: 'work', msgs: { work: [], leisure: [] }, loaded: {}, error: {}, timer: 0, polling: null, reply: null, sendError: '', sending: false, ac: null, acIndex: 0, shell: null, renderKey: '' };
+const ROOM_LABEL = { work: 'Work', leisure: 'Leisure' };
+const ROOM_HEADER = { work: 'The board is an index: results live in the linked summaries and artifacts.', leisure: 'Replies here are stand-ins: small fresh sessions playing the role. They aren’t the role’s position.' };
+const seenKey = (r) => 'office.board.seen.' + r;
+const getSeen = (r) => { try { return localStorage.getItem(seenKey(r)); } catch { return null; } };
+const setSeen = (r, id) => { try { if (id && boardIdNum(id) > boardIdNum(getSeen(r))) localStorage.setItem(seenKey(r), id); } catch {} };
+const nodeIdSet = () => new Set((S.summary.operationTree?.nodes || []).map((n) => n.id));
+function enterBoard(room) {
+  B.room = room; S.view = 'board'; S.treeNode = '';
+  document.body.classList.add('home-page', 'board-page'); $('#workspace').classList.remove('home-mode'); $('#workspace').classList.add('board-mode');
+  for (const id of ['#scrub', '#log', '#views', '#crumbs', '#running-now']) $(id).hidden = true;
+  $('#view').hidden = false; $('#clock').textContent = '';
+  if (!B.shell) buildBoardShell();
+  if (!$('#view').contains(B.shell)) $('#view').replaceChildren(B.shell);
+  B.renderKey = ''; renderBoard(true); void pollBoard();
+  if (!B.timer) B.timer = setInterval(() => { if (!document.hidden && S.view === 'board') void pollBoard(); }, 10_000);
+  requestAnimationFrame(() => B.input?.focus({ preventScroll: true }));
+}
+function leaveBoard() {
+  if (B.timer) { clearInterval(B.timer); B.timer = 0; }
+  document.body.classList.remove('board-page'); $('#workspace').classList.remove('board-mode', 'doc-open');
+}
+function pollBoard() {
+  if (B.polling) return B.polling;
+  B.polling = Promise.all(BOARD_ROOMS.map(async (r) => {
+    const last = B.msgs[r].at(-1);
+    try { const { messages } = await get(`/api/board/${r}${last ? `?after=${encodeURIComponent(last.id)}&limit=1000` : ''}`); addMessages(r, messages); B.error[r] = ''; B.loaded[r] = true; }
+    catch (e) { B.error[r] = e.message === 'Failed to fetch' ? 'the Office server is not answering' : e.message; }
+  })).then(() => { if (S.view === 'board') renderBoard(); }).finally(() => { B.polling = null; });
+  return B.polling;
+}
+function addMessages(r, list) { const have = new Set(B.msgs[r].map((m) => m.id)); B.msgs[r] = [...B.msgs[r], ...(list || []).filter((m) => !have.has(m.id))].sort((a, b) => boardIdNum(a.id) - boardIdNum(b.id)); }
+function buildBoardShell() {
+  B.tabs = h('div', { class: 'board-tabs', role: 'tablist', 'aria-label': 'Board rooms' });
+  B.header = h('div', { class: 'board-header' });
+  B.list = h('div', { class: 'board-list', role: 'log', 'aria-live': 'polite', tabindex: '-1' });
+  B.replyBar = h('div', { class: 'board-reply', hidden: '' });
+  B.input = h('textarea', { id: 'board-input', rows: '3', 'aria-label': 'Message', placeholder: 'Write to the room. Enter sends, Shift+Enter adds a line, @ names a role.', 'aria-autocomplete': 'list', 'aria-controls': 'board-ac' });
+  B.acBox = h('ul', { id: 'board-ac', class: 'board-ac', role: 'listbox', hidden: '' });
+  B.counter = h('span', { class: 'board-count' });
+  B.send = h('button', { class: 'board-send', on: { click: () => void sendBoard() } }, 'Send');
+  B.err = h('div', { class: 'board-error', role: 'alert' });
+  B.note = h('div', { class: 'board-note' });
+  B.input.addEventListener('input', () => { B.sendError = ''; updateComposer(); updateAutocomplete(); });
+  B.input.addEventListener('click', updateAutocomplete);
+  B.input.addEventListener('blur', () => setTimeout(() => closeAutocomplete(), 120));
+  B.input.addEventListener('keydown', composerKey);
+  B.shell = h('div', { class: 'board' }, B.tabs, B.header, B.list, h('div', { class: 'board-compose' }, B.replyBar, h('div', { class: 'board-input-wrap' }, B.acBox, B.input), h('div', { class: 'board-row' }, B.counter, B.err, h('span', { class: 'grow' }), B.send), B.note));
+}
+function renderBoard(force = false) {
+  const room = B.room, msgs = B.msgs[room], visible = !document.hidden;
+  if (visible && msgs.length) setSeen(room, msgs.at(-1).id);
+  B.tabs.replaceChildren(...BOARD_ROOMS.map((r) => {
+    const unread = r === room ? 0 : boardUnread(B.msgs[r], getSeen(r)), latest = [...B.msgs[r]].reverse().find((m) => m.author?.kind !== 'human');
+    return h('button', { role: 'tab', 'aria-selected': String(r === room), class: 'board-tab' + (r === room ? ' on' : ''), title: unread ? `${unread} new since you last opened ${ROOM_LABEL[r]} · latest from ${boardAuthorName(latest?.author)}` : `${ROOM_LABEL[r]}: nothing new`,
+      on: { click: () => { if (r !== room) location.hash = officeRouteHash({ page: 'board', room: r }); } } }, ROOM_LABEL[r], unread ? h('span', { class: 'board-unread', 'aria-label': `${unread} new` }, String(unread)) : null);
+  }));
+  B.tabs.onkeydown = (e) => { if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return; const next = BOARD_ROOMS[(BOARD_ROOMS.indexOf(room) + 1) % 2]; location.hash = officeRouteHash({ page: 'board', room: next }); requestAnimationFrame(() => B.tabs.querySelector('.on')?.focus()); };
+  B.header.replaceChildren(h('span', {}, ROOM_HEADER[room]));
+  B.header.classList.toggle('leisure', room === 'leisure');
+  B.note.textContent = room === 'leisure' ? 'stand-in replies aren’t connected yet' : '';
+  B.input.placeholder = `Write to ${ROOM_LABEL[room]}. Enter sends, Shift+Enter adds a line, @ names a role.`;
+  const key = `${room}|${msgs.at(-1)?.id || ''}|${B.error[room] || ''}|${B.loaded[room] ? 1 : 0}|${Math.floor(Date.now() / 60e3)}`;
+  if (force || key !== B.renderKey) {
+    const roomChanged = !B.renderKey.startsWith(room + '|'), L = B.list, atBottom = L.scrollHeight - L.scrollTop - L.clientHeight < 32, top = L.scrollTop;
+    B.renderKey = key;
+    const nodeIds = nodeIdSet(), byId = new Map(msgs.map((m) => [m.id, m])), now = Date.now();
+    const rows = msgs.map((m) => messageRow(boardMessageView(m, { now, nodeIds, byId }), m));
+    const status = B.error[room] ? h('div', { class: 'board-empty error' }, `Board unavailable: ${B.error[room]}. Retrying every 10 s.`) : !B.loaded[room] ? h('div', { class: 'board-empty' }, 'Loading…')
+      : !msgs.length ? h('div', { class: 'board-empty' }, room === 'work' ? 'No posts yet. Sessions post one line per finished piece of work, pointing at its summary.' : 'Nothing here yet.') : null;
+    L.replaceChildren(...(status && !msgs.length ? [status] : []), ...rows, ...(status && msgs.length ? [status] : []));
+    if (roomChanged || atBottom || force) L.scrollTop = L.scrollHeight; else L.scrollTop = top;
+  }
+  updateComposer(); renderReply();
+}
+function messageRow(v, m) {
+  const reply = () => { B.reply = m; renderReply(); B.input.focus(); };
+  const text = h('div', { class: 'board-text' }, ...v.tokens.map((t) => t.t === 'mention' ? h('span', { class: 'board-chip mention', title: B.room === 'leisure' ? `${t.role} (stand-in)` : t.role }, t.v)
+    : t.t === 'node' ? h('button', { class: 'board-chip node', title: `Open operation ${nodeTitle(t.id)}`, on: { click: (e) => { e.stopPropagation(); navigateOperation(t.id, 'floor', true); } } }, t.v) : t.v));
+  const link = v.link ? h('div', { class: 'board-link' }, v.link.target.type === 'node' ? h('button', { title: 'Open this operation', on: { click: (e) => { e.stopPropagation(); navigateOperation(v.link.target.id, 'floor', true); } } }, '→ ', nodeTitle(v.link.target.id))
+    : v.link.target.type === 'file' ? h('button', { title: `Open ${v.link.target.path} in the document viewer`, on: { click: (e) => { e.stopPropagation(); openBoardDoc(v.link.target.path); } } }, '→ ', v.link.value)
+    : h('span', { class: 'board-link-text', title: 'Not opened by the Office' }, '→ ', v.link.value)) : null;
+  const parent = v.replyTo ? h('button', { class: 'board-replyto', title: 'Show the message this replies to', on: { click: (e) => { e.stopPropagation(); const el = B.list.querySelector(`[data-id="${CSS.escape(v.replyTo.id)}"]`); el?.scrollIntoView({ block: 'center' }); el?.focus({ preventScroll: true }); } } },
+    '↪ ', v.replyTo.author ? `${v.replyTo.author}: ${v.replyTo.snippet}` : `message ${v.replyTo.id} (not loaded)`) : null;
+  return h('article', { class: `board-msg k-${v.kind}${v.withheld ? ' withheld' : ''}${B.reply?.id === v.id ? ' replying' : ''}`, 'data-id': v.id, tabindex: '0', 'aria-label': `${v.author}, ${v.ago}${v.withheld ? ', withheld' : ''}. Enter to reply.`,
+    on: { click: (e) => { if (!e.target.closest('button') && !getSelection().toString()) reply(); }, keydown: (e) => { if (e.key === 'Enter' && e.target === e.currentTarget) { e.preventDefault(); reply(); } } } },
+    h('div', { class: 'board-meta' }, h('span', { class: 'board-author' }, v.author), h('time', { datetime: m.at, title: v.absolute }, v.ago), h('button', { class: 'board-reply-btn', title: 'Reply to this message', on: { click: (e) => { e.stopPropagation(); reply(); } } }, 'Reply')),
+    parent, text, link);
+}
+const nodeTitle = (id) => S.summary.operationTree?.nodes?.find((n) => n.id === id)?.title || id;
+function openBoardDoc(p) {
+  $('#workspace').classList.add('doc-open'); select({ type: 'file', id: p });
+  $('#inspector').prepend(h('button', { class: 'panel-close board-doc-close', title: 'Close the document', on: { click: () => { $('#workspace').classList.remove('doc-open'); B.input.focus(); } } }, '✕ Close'));
+}
+function renderReply() {
+  for (const el of B.list.querySelectorAll('.board-msg')) el.classList.toggle('replying', el.dataset.id === B.reply?.id);
+  if (!B.reply || B.reply.room !== B.room) { B.replyBar.hidden = true; return; }
+  B.replyBar.hidden = false;
+  B.replyBar.replaceChildren(h('span', {}, `Replying to ${boardAuthorName(B.reply.author)}: ${boardSnippet(B.reply.text)}`), h('button', { title: 'Cancel the reply', on: { click: () => { B.reply = null; renderReply(); B.input.focus(); } } }, '✕'));
+}
+function updateComposer() {
+  const d = boardDraft(B.input.value);
+  B.counter.textContent = d.count; B.counter.classList.toggle('over', d.over);
+  B.send.disabled = B.sending || !!d.problem;
+  B.err.textContent = B.sendError || (d.problem && d.problem !== 'empty' ? d.problem : '');
+}
+function updateAutocomplete() {
+  const ac = boardMentionCompletions(B.input.value, B.input.selectionStart, B.room);
+  if (!ac || B.input.selectionStart !== B.input.selectionEnd) return closeAutocomplete();
+  if (B.ac?.query !== ac.query) B.acIndex = 0;
+  B.ac = ac; B.acBox.hidden = false; B.input.setAttribute('aria-expanded', 'true');
+  B.acBox.replaceChildren(...ac.options.map((o, i) => h('li', { role: 'option', id: `board-ac-${i}`, class: (i === B.acIndex ? 'on ' : '') + (B.room === 'leisure' ? 'standin' : ''), 'aria-selected': String(i === B.acIndex),
+    on: { mousedown: (e) => { e.preventDefault(); pickCompletion(i); } } }, o.label)));
+  B.input.setAttribute('aria-activedescendant', `board-ac-${B.acIndex}`);
+}
+function closeAutocomplete() { B.ac = null; B.acBox.hidden = true; B.input?.setAttribute('aria-expanded', 'false'); B.input?.removeAttribute('aria-activedescendant'); }
+function pickCompletion(i) {
+  const o = B.ac?.options[i]; if (!o) return;
+  const v = B.input.value, insert = `@${o.role} `; B.input.value = v.slice(0, B.ac.start) + insert + v.slice(B.ac.end).replace(/^ /, '');
+  const at = B.ac.start + insert.length; B.input.setSelectionRange(at, at); closeAutocomplete(); updateComposer(); B.input.focus();
+}
+function composerKey(e) {
+  if (B.ac) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); B.acIndex = (B.acIndex + (e.key === 'ArrowDown' ? 1 : -1) + B.ac.options.length) % B.ac.options.length; return updateAutocomplete(); }
+    if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); return pickCompletion(B.acIndex); }
+    if (e.key === 'Escape') { e.preventDefault(); return closeAutocomplete(); }
+  }
+  if (e.key === 'Escape' && B.reply) { e.preventDefault(); B.reply = null; return renderReply(); }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void sendBoard(); }
+}
+async function sendBoard() {
+  const room = B.room, text = B.input.value, d = boardDraft(text);
+  if (B.sending || d.problem) { if (d.problem && d.problem !== 'empty') { B.sendError = ''; updateComposer(); } return; }
+  B.sending = true; B.sendError = ''; updateComposer();
+  try {
+    const r = await fetch(`/api/board/${room}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ text, ...(B.reply?.room === room ? { replyTo: B.reply.id } : {}) }) });
+    let j = {}; try { j = await r.json(); } catch {}
+    if (!r.ok) { B.sendError = `Not sent (${r.status}): ${j.error || r.statusText}${r.status === 429 ? '. Try again in a minute.' : ''}`; return; }
+    addMessages(room, [j.message]); setSeen(room, j.message.id);
+    if (B.input.value === text) B.input.value = '';
+    B.reply = null; B.renderKey = '';
+  } catch (e) { B.sendError = 'Not sent: the Office server is not answering.'; }
+  finally { B.sending = false; if (S.view === 'board' && B.room === room) { renderBoard(); B.list.scrollTop = B.list.scrollHeight; } updateComposer(); }
+}
+
 // ---- loop ----------------------------------------------------------------------------------------------------------------
 let prev = performance.now(), lastCard = '';
 function frame(now) {
   const dt = Math.min(100, now - prev); prev = now;
-  if (S.tl && S.view!=='home') {
+  if (S.tl && S.view!=='home' && S.view!=='board') {
     if (S.live) S.c = S.tl.duration;
     else if (S.playing) { S.c += dt * S.speed; if (S.c >= S.tl.duration) { S.c = S.tl.duration; S.playing = false; $('#play').textContent = '▶'; } }
     const t = S.live ? Math.max(Date.now(), S.tl.end) : S.tl.toReal(S.c); draw(t); drawTimeline(); drawLog(t);
