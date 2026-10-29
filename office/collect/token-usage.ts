@@ -3,12 +3,13 @@ import path from 'node:path';
 import type { OfficeEvent, TokenUsage, TokenRollup } from './types';
 import type { Allowlist } from './privacy';
 
+export const weightedTokens = (v: Pick<TokenUsage, 'input'|'output'|'cacheRead'|'cacheWrite'>) => v.input + v.output * 5 + v.cacheRead * .1 + v.cacheWrite * 1.25;
 const usageOf = (u: any, engine: string, model: unknown): TokenUsage => {
   const its = Array.isArray(u?.iterations) ? u.iterations : [];
   const src = its.length && its.some((x: any) => x?.output_tokens || x?.cache_read_input_tokens || x?.input_tokens) ? its : [u || {}];
   const sum = (k: string) => src.reduce((n: number, x: any) => n + (Number.isFinite(x?.[k]) ? x[k] : 0), 0);
   const v: TokenUsage = { input: sum('input_tokens'), output: sum('output_tokens'), cacheRead: sum(engine === 'codex' ? 'cached_input_tokens' : 'cache_read_input_tokens'), cacheWrite: sum('cache_creation_input_tokens'), model: typeof model === 'string' ? model : null, engine };
-  v.weightedAssumption = v.input + v.output * 5 + v.cacheRead * .1 + v.cacheWrite * 1.25;
+  v.weightedAssumption = weightedTokens(v);
   return v;
 };
 const add = (a: TokenUsage, b: TokenUsage): TokenUsage => ({ input:a.input+b.input, output:a.output+b.output, cacheRead:a.cacheRead+b.cacheRead, cacheWrite:a.cacheWrite+b.cacheWrite, weightedAssumption:(a.weightedAssumption||0)+(b.weightedAssumption||0), model:a.model===b.model?a.model:null, engine:a.engine });

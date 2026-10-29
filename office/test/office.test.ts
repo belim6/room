@@ -190,7 +190,7 @@ test('read-only gate: source trees unchanged after collect, every API call and a
   assert.deepEqual(snapshot(root), before);
   const { app } = createOffice(cfg), routes = (app as any)._router.stack.filter((l: any) => l.route).map((l: any) => Object.keys(l.route.methods));
   assert.ok(routes.length >= 6); for (const ms of routes) assert.ok(JSON.stringify(ms) === '["get"]' || JSON.stringify(ms) === '["post"]');
-  assert.deepEqual((app as any)._router.stack.filter((l: any) => l.route?.methods.post).map((l: any) => l.route.path), ['/api/board/:room']);
+  assert.deepEqual((app as any)._router.stack.filter((l: any) => l.route?.methods.post).map((l: any) => l.route.path), ['/api/board/leisure/state', '/api/board/:room']);
 });
 
 test('replay determinism: same records, same events; same t, same floor state', async () => {

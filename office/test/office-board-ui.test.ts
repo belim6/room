@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 // @ts-ignore browser module
 import * as model from '../web/model.mjs';
-const { parseOfficeRoute, officeRouteHash, boardUnread, boardAuthorName, boardTokens, boardLinkTarget, boardMessageView, boardDraft, boardMentionCompletions } = model as any;
+const { parseOfficeRoute, officeRouteHash, boardUnread, boardAuthorName, boardTokens, boardLinkTarget, boardMessageView, boardDraft, boardMentionCompletions, boardForkHeader } = model as any;
 const msg = (n: number, kind = 'session', role = 'operator', extra: any = {}) => ({ id: `w-${String(n).padStart(6, '0')}`, at: '2026-10-29T10:00:00.000Z', room: 'work', author: { role, kind }, text: 'x', mentions: [], ...extra });
 
 test('board routes parse and print; old routes are unchanged', () => {
@@ -25,12 +25,12 @@ test('unread counts messages after the last seen id, never Deniz\'s own, and all
   assert.equal(boardUnread([], 'w-000004'), 0);
 });
 
-test('stand-ins are always named "<role> (stand-in)", never the bare role', () => {
-  assert.equal(boardAuthorName({ role: 'partner', kind: 'standin' }), 'partner (stand-in)');
+test('fork replies and leisure mentions are always labelled as forks', () => {
+  assert.equal(boardAuthorName({ role: 'partner', kind: 'standin' }), 'partner (fork)');
   assert.equal(boardAuthorName({ role: 'partner', kind: 'session' }), 'partner');
   assert.equal(boardAuthorName({ role: 'deniz', kind: 'human' }), 'Deniz');
   const v = boardMessageView(msg(5, 'standin', 'intern', { room: 'leisure' }));
-  assert.equal(v.author, 'intern (stand-in)'); assert.equal(v.kind, 'standin');
+  assert.equal(v.author, 'intern (fork)'); assert.equal(v.kind, 'standin');
 });
 
 test('tokens chip known @roles and multi-part node ids; unknown roles, emails and plain words stay text', () => {
@@ -75,10 +75,17 @@ test('@ autocomplete filters roles at the caret and labels stand-ins in leisure'
   const a = boardMentionCompletions('hey @pa', 7, 'work');
   assert.deepEqual(a.options.map((o: any) => o.label), ['partner']); assert.equal(a.start, 4); assert.equal(a.end, 7);
   assert.equal(boardMentionCompletions('hey @', 5, 'work').options.length, 9);
-  assert.deepEqual(boardMentionCompletions('@pro', 4, 'leisure').options, [{ role: 'prompter', label: 'prompter (stand-in)' }]);
+  assert.deepEqual(boardMentionCompletions('@pro', 4, 'leisure').options, [{ role: 'prompter', label: 'prompter (fork)' }]);
   assert.deepEqual(boardMentionCompletions('@corr', 5).options.map((o: any) => o.role), ['jev-correspondent']);
   assert.equal(boardMentionCompletions('mail a@pa', 9), null);
   assert.equal(boardMentionCompletions('@zz', 3), null);
   assert.equal(boardMentionCompletions('@critic', 7), null);
   assert.equal(boardMentionCompletions('no at here', 5), null);
+});
+
+test('leisure fork header exposes toggle state, count, cost and pending status', () => {
+  assert.deepEqual(boardForkHeader({ enabled:false, usedToday:0, cap:20, avgWeighted:null },false), { toggle:'Leisure forks: off', count:'fork replies today 0/20 · unmeasured', pending:'' });
+  assert.deepEqual(boardForkHeader({ enabled:true, usedToday:4, cap:20, avgWeighted:210000 },true), { toggle:'Leisure forks: on', count:'fork replies today 4/20 · ~210k weighted each', pending:'fork pending' });
+  assert.equal(boardForkHeader({enabled:true},false,true).pending,'no reply arrived');
+  assert.match(boardForkHeader({enabled:true,usedToday:3,unknownToday:2,cap:20,avgWeighted:null},false).count,/2 unknown/);
 });

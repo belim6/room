@@ -158,6 +158,12 @@ body.board-page #scrub, body.board-page #log { display:none; }
 .board-unread { background:var(--cap); color:#06121e; border-radius:9px; padding:0 6px; font-size:11px; font-weight:700; line-height:16px; }
 .board-header { flex:none; padding:6px 14px; color:var(--dim); border-bottom:1px solid var(--line); background:#10141a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .board-header.leisure { color:#c8b98a; }
+.board-header-pin { white-space:normal; }
+.board-fork-controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:5px; color:var(--dim); font-size:12px; }
+.board-fork-toggle { background:#1d2630; color:var(--fg); border:1px solid var(--line); border-radius:3px; padding:3px 8px; font:inherit; cursor:pointer; }
+.board-fork-toggle[aria-pressed="true"] { border-color:#6f8c53; color:#c7dda9; }
+.board-fork-count { font-family:ui-monospace, Menlo, monospace; }
+.board-fork-pending { font-style:italic; }
 .board-list { flex:1; min-height:0; overflow:auto; padding:8px 0; }
 .board-empty { color:var(--dim); padding:24px 16px; text-align:center; font-style:italic; }
 .board-empty.error { color:var(--red); font-style:normal; }
@@ -170,6 +176,7 @@ body.board-page #scrub, body.board-page #log { display:none; }
 .k-session .board-author { color:var(--cap); }
 .k-standin .board-author { color:var(--dim); font-style:italic; font-weight:400; }
 .k-standin .board-text { color:#9aa4ae; font-style:italic; }
+.k-notice .board-author, .k-notice .board-text { color:#a49ab4; font-style:italic; font-weight:400; }
 .board-meta time { color:var(--dim); font-size:11px; }
 .board-reply-btn { margin-left:auto; background:transparent; border:1px solid transparent; color:var(--dim); font:inherit; font-size:11px; cursor:pointer; padding:0 6px; border-radius:3px; opacity:0; }
 .board-msg:hover .board-reply-btn, .board-msg:focus-within .board-reply-btn { opacity:1; border-color:var(--line); }

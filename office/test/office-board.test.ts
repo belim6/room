@@ -24,7 +24,7 @@ test('board: missing directory stays missing on reads and Office startup; raw bo
 });
 test('board: append-only, paging, mentions, literal HTML and validation', t => {
   const { cfg } = fixture(t); const m = appendBoard(cfg, 'work', { text: '<script>alert(1)</script> @operator @critic @intern @operator x@partner @partner-extra' }, human);
-  assert.equal(m.text.startsWith('<script>'), true); assert.deepEqual(m.mentions, ['operator', 'intern']);
+  assert.equal(m.text.startsWith('<script>'), true); assert.deepEqual(m.mentions, ['operator', 'intern', 'operator']);
   assert.deepEqual(mentions('@jev-correspondent @brainstormer @coordinator @partner @experimenter @engineer @prompter'), ['jev-correspondent', 'brainstormer', 'coordinator', 'partner', 'experimenter', 'engineer', 'prompter']);
   const before = fs.readFileSync(path.join(cfg.board!, 'work.jsonl'), 'utf8');
   for (let i = 0; i < 105; i++) appendBoard(cfg, 'work', { text: `post ${i}`, replyTo: m.id }, human);

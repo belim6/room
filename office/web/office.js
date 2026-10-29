@@ -1,4 +1,4 @@
-import { progressiveOperationGraph, centreOperationGraph, operationGraphWheel, operationGraphZoom, PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeDisplay, operationGraphPointerHandlers, operationTreeNodeEvents, parseOfficeRoute, officeRouteHash, operationBreadcrumb, runningStripModel, createRouteGuard, validOfficeOperationRoute, recentOperations, nodeAncestors, groupNodeDocuments, breadcrumbDisplay, unfiledByDay, operationGraphEdgePath, BOARD_ROOMS, boardUnread, boardAuthorName, boardMessageView, boardDraft, boardMentionCompletions, boardSnippet, boardIdNum } from './model.mjs';
+import { progressiveOperationGraph, centreOperationGraph, operationGraphWheel, operationGraphZoom, PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeDisplay, operationGraphPointerHandlers, operationTreeNodeEvents, parseOfficeRoute, officeRouteHash, operationBreadcrumb, runningStripModel, createRouteGuard, validOfficeOperationRoute, recentOperations, nodeAncestors, groupNodeDocuments, breadcrumbDisplay, unfiledByDay, operationGraphEdgePath, BOARD_ROOMS, boardUnread, boardAuthorName, boardMessageView, boardDraft, boardMentionCompletions, boardSnippet, boardIdNum, boardForkHeader } from './model.mjs';
 import { operationPlacement } from './operation-placement.mjs';
 import { liveClient } from './liveclient.mjs';
 
@@ -578,9 +578,9 @@ async function archiveView(box) {
 }
 
 // ---- Board (step b): two rooms, unread markers, composer. Text only, via textContent; nothing answers an @ yet. -------------
-const B = { room: 'work', msgs: { work: [], leisure: [] }, loaded: {}, error: {}, timer: 0, polling: null, reply: null, sendError: '', sending: false, ac: null, acIndex: 0, shell: null, renderKey: '' };
+const B = { room: 'work', msgs: { work: [], leisure: [] }, loaded: {}, error: {}, timer: 0, polling: null, reply: null, sendError: '', sending: false, ac: null, acIndex: 0, shell: null, renderKey: '', leisure: { enabled: false, cap: 20, usedToday: 0, avgWeighted: null }, forkTimer: 0, pending: new Map(), noReply: false };
 const ROOM_LABEL = { work: 'Work', leisure: 'Leisure' };
-const ROOM_HEADER = { work: 'The board is an index: results live in the linked summaries and artifacts.', leisure: 'Replies here are stand-ins: small fresh sessions playing the role. They aren’t the role’s position.' };
+const ROOM_HEADER = { work: 'The board is an index: results live in the linked summaries and artifacts.', leisure: "Replies here are forks of the role's session: they know what the role knows, but they aren't the role's position." };
 const seenKey = (r) => 'office.board.seen.' + r;
 const getSeen = (r) => { try { return localStorage.getItem(seenKey(r)); } catch { return null; } };
 const setSeen = (r, id) => { try { if (id && boardIdNum(id) > boardIdNum(getSeen(r))) localStorage.setItem(seenKey(r), id); } catch {} };
@@ -592,7 +592,7 @@ function enterBoard(room) {
   $('#view').hidden = false; $('#clock').textContent = '';
   if (!B.shell) buildBoardShell();
   if (!$('#view').contains(B.shell)) $('#view').replaceChildren(B.shell);
-  B.renderKey = ''; renderBoard(true); void pollBoard();
+  B.renderKey = ''; renderBoard(true); void pollBoard(); if (room === 'leisure') void loadLeisureState();
   if (!B.timer) B.timer = setInterval(() => { if (!document.hidden && S.view === 'board') void pollBoard(); }, 10_000);
   requestAnimationFrame(() => B.input?.focus({ preventScroll: true }));
 }
@@ -609,7 +609,20 @@ function pollBoard() {
   })).then(() => { if (S.view === 'board') renderBoard(); }).finally(() => { B.polling = null; });
   return B.polling;
 }
-function addMessages(r, list) { const have = new Set(B.msgs[r].map((m) => m.id)); B.msgs[r] = [...B.msgs[r], ...(list || []).filter((m) => !have.has(m.id))].sort((a, b) => boardIdNum(a.id) - boardIdNum(b.id)); }
+function addMessages(r, list) {
+  const have = new Set(B.msgs[r].map((m) => m.id)), fresh = (list || []).filter((m) => !have.has(m.id));
+  B.msgs[r] = [...B.msgs[r], ...fresh].sort((a, b) => boardIdNum(a.id) - boardIdNum(b.id));
+  for (const m of fresh) if (m.replyTo && B.pending.has(m.replyTo)) { const item=B.pending.get(m.replyTo), left=item.remaining-1; if (left <= 0) B.pending.delete(m.replyTo); else B.pending.set(m.replyTo,{...item,remaining:left}); }
+  if (!B.pending.size && B.forkTimer) { clearInterval(B.forkTimer); B.forkTimer = 0; }
+}
+async function loadLeisureState() {
+  try { B.leisure = await get('/api/board/leisure/state'); B.renderKey = ''; if (S.view === 'board' && B.room === 'leisure') renderBoard(); }
+  catch {}
+}
+async function setLeisureEnabled(enabled) {
+  try { const r = await fetch('/api/board/leisure/state', { method:'POST', headers:{ 'Content-Type':'application/json', Accept:'application/json' }, body:JSON.stringify({ enabled }) }), j = await r.json(); if (!r.ok) throw Error(j.error || r.status); B.leisure = j; if (!enabled) { B.pending.clear(); clearInterval(B.forkTimer); B.forkTimer = 0; } B.renderKey = ''; renderBoard(); }
+  catch (e) { B.sendError = `Could not change leisure forks: ${e.message}`; updateComposer(); }
+}
 function buildBoardShell() {
   B.tabs = h('div', { class: 'board-tabs', role: 'tablist', 'aria-label': 'Board rooms' });
   B.header = h('div', { class: 'board-header' });
@@ -636,9 +649,13 @@ function renderBoard(force = false) {
       on: { click: () => { if (r !== room) location.hash = officeRouteHash({ page: 'board', room: r }); } } }, ROOM_LABEL[r], unread ? h('span', { class: 'board-unread', 'aria-label': `${unread} new` }, String(unread)) : null);
   }));
   B.tabs.onkeydown = (e) => { if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return; const next = BOARD_ROOMS[(BOARD_ROOMS.indexOf(room) + 1) % 2]; location.hash = officeRouteHash({ page: 'board', room: next }); requestAnimationFrame(() => B.tabs.querySelector('.on')?.focus()); };
-  B.header.replaceChildren(h('span', {}, ROOM_HEADER[room]));
+  if (room === 'leisure') {
+    const view = boardForkHeader(B.leisure, B.pending.size > 0, B.noReply);
+    const toggle = h('button', { class: 'board-fork-toggle', type: 'button', 'aria-pressed': String(B.leisure.enabled), on: { click: () => void setLeisureEnabled(!B.leisure.enabled) } }, view.toggle);
+    B.header.replaceChildren(h('div', { class: 'board-header-pin' }, ROOM_HEADER.leisure), h('div', { class: 'board-fork-controls' }, toggle, h('span', { class: 'board-fork-count' }, view.count), view.pending ? h('span', { class: 'board-fork-pending' }, view.pending) : null));
+  } else B.header.replaceChildren(h('span', {}, ROOM_HEADER[room]));
   B.header.classList.toggle('leisure', room === 'leisure');
-  B.note.textContent = room === 'leisure' ? 'stand-in replies aren’t connected yet' : '';
+  B.note.textContent = '';
   B.input.placeholder = `Write to ${ROOM_LABEL[room]}. Enter sends, Shift+Enter adds a line, @ names a role.`;
   const key = `${room}|${msgs.at(-1)?.id || ''}|${B.error[room] || ''}|${B.loaded[room] ? 1 : 0}|${Math.floor(Date.now() / 60e3)}`;
   if (force || key !== B.renderKey) {
@@ -717,6 +734,12 @@ async function sendBoard() {
     let j = {}; try { j = await r.json(); } catch {}
     if (!r.ok) { B.sendError = `Not sent (${r.status}): ${j.error || r.statusText}${r.status === 429 ? '. Try again in a minute.' : ''}`; return; }
     addMessages(room, [j.message]); setSeen(room, j.message.id);
+    if (room === 'leisure') {
+      const roles = new Set(['operator','coordinator','partner','experimenter','engineer','jev-correspondent','prompter','brainstormer','intern']);
+      const count = new Set([...text.matchAll(/(?<![\w@.-])@([a-z][a-z0-9-]*)(?![\w-])/g)].map(m => m[1]).filter(r => roles.has(r))).size;
+      if (count && !B.leisure.enabled) setTimeout(() => { void pollBoard(); }, 700);
+      else if (count) { B.noReply=false; B.pending.set(j.message.id,{remaining:count,since:Date.now()}); clearInterval(B.forkTimer); B.forkTimer = setInterval(() => { if (!B.leisure.enabled || !B.pending.size) { clearInterval(B.forkTimer); B.forkTimer = 0; return; } const now=Date.now(); for(const [id,item] of B.pending) if(now-item.since>=150_000){B.pending.delete(id);B.noReply=true;} void pollBoard(); void loadLeisureState(); B.renderKey=''; renderBoard(); }, 700); }
+    }
     if (B.input.value === text) B.input.value = '';
     B.reply = null; B.renderKey = '';
   } catch (e) { B.sendError = 'Not sent: the Office server is not answering.'; }

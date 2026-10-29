@@ -1,5 +1,5 @@
 import express from 'express';
-import { appendBoard, pageBoard, roomOf, visibleMessage, BoardError } from './board';
+import { appendBoard, appendBoardInternal, pageBoard, readBoard, roomOf, visibleMessage, BoardError } from './board';
 import path from 'node:path';
 import { collect, type Collected } from './collect/index';
 import { config, redact, redactDeep, type Config } from './collect/privacy';
@@ -14,12 +14,28 @@ import { operationPlacement } from './web/operation-placement.mjs';
 
 import { deniedDocument, visibleDocuments } from './collect/deny';
 import { nodeDocuments } from './collect/documents';
+import { readRegistry } from './collect/roles';
+import { buildForkPrompt, cleanForkReply, ForkFailure, runnerFromEnv, weightedUsage, type ForkRunner } from './fork';
+import fs from 'node:fs';
 
-// The Office is loopback-only. The board POST is its sole write route.
+// The Office is loopback-only. The board POSTs are its only write routes.
 const meta = (e: OfficeEvent) => { const { hints, ...m } = e; return m; }; // hints carry command/prompt text: never in the summary tier
 const inOp = (e: OfficeEvent, op?: string) => !op || op === '*' || e.operation === op || !!e.operation?.startsWith(op + '/');
 
-export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
+type ForkRecord = { id: string; at: string; role: string; session: string; triggerId: string; status: 'started'|'ok'|'failed'|'timeout'|'withheld'; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }; model?: string | null; weighted?: number; error?: string };
+const statePath = (cfg: Config) => path.join(cfg.board || path.join(cfg.room || path.join(cfg.home, 'dev/room'), 'board'), 'leisure-state.json');
+const forksPath = (cfg: Config) => path.join(cfg.board || path.join(cfg.room || path.join(cfg.home, 'dev/room'), 'board'), 'forks.jsonl');
+function leisureState(cfg: Config) { try { const s = JSON.parse(fs.readFileSync(statePath(cfg), 'utf8')); if (typeof s.enabled !== 'boolean') throw 0; return { enabled: s.enabled, cap: 20 }; } catch { return { enabled: false, cap: 20 }; } }
+function forkRecords(cfg: Config): ForkRecord[] { let text: string; try { text = fs.readFileSync(forksPath(cfg), 'utf8'); } catch (e:any) { if (e.code === 'ENOENT') return []; throw e; } return text.split('\n').filter(Boolean).map(x => { const r=JSON.parse(x); if (!r || typeof r.id!=='string' || typeof r.at!=='string' || !Number.isFinite(Date.parse(r.at)) || !['started','ok','failed','timeout','withheld'].includes(r.status)) throw new Error('invalid fork record'); return r; }); }
+const localDay = (s: string) => { const d = new Date(s); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+function writeForkRecord(cfg: Config, record: ForkRecord) { const p = forksPath(cfg); fs.mkdirSync(path.dirname(p), { recursive: true }); const fd=fs.openSync(p,fs.constants.O_CREAT|fs.constants.O_WRONLY|fs.constants.O_APPEND|fs.constants.O_NOFOLLOW,0o600); try { const line=Buffer.from(JSON.stringify(record)+'\n'); if(fs.writeSync(fd,line)!==line.length) throw new Error('incomplete fork record'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
+class ForkLockUnavailable extends Error {}
+function withForkLock<T>(cfg: Config, fn:()=>T): T { const dir=path.dirname(forksPath(cfg)), lock=path.join(dir,'forks.lock'); fs.mkdirSync(dir,{recursive:true}); for(let i=0;;i++){ try { fs.mkdirSync(lock); break; } catch(e:any) { if(e.code!=='EEXIST') throw e; if(i>=249) throw new ForkLockUnavailable('fork lock unavailable'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20); } } try { return fn(); } finally { fs.rmdirSync(lock); } }
+function sessionFor(cfg: Config, role: string) { const registry = readRegistry(cfg.sessions); if (registry.error || registry.skipped) return undefined; const es = registry.entries.filter(e => e.role === role && e.since <= new Date().toISOString()); return es.at(-1)?.session; }
+export const isHumanForkTrigger = (trigger: import('./board').Message) => trigger.author.kind === 'human' && trigger.author.role === 'deniz';
+const requestId = () => `f-${Date.now()}-${Math.random().toString(36).slice(2,9)}`;
+
+export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts, forkRunner: ForkRunner = runnerFromEnv(process.env, cfg.room || path.join(cfg.home,'dev/room'))) {
   let data: Collected = collect(cfg);
   const live = new Live(() => data, d => { data = d; }, cfg, liveOpts || {});
   const app = express();
@@ -29,7 +45,7 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
     res.on('finish', () => { if (req.path.startsWith('/api/')) console.info('[office timing]', req.path, Math.round(performance.now()-started), 'ms'); });
     const host = req.headers.host || '';
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return res.status(403).json({ error: 'Local connections only' });
-    if (req.method !== 'GET' && req.method !== 'HEAD' && !(req.method === 'POST' && /^\/api\/board\/[^/]+$/.test(req.path))) return res.status(405).set('Allow', 'GET, HEAD').json({ error: 'The Office is read-only.' });
+    if (req.method !== 'GET' && req.method !== 'HEAD' && !(req.method === 'POST' && (/^\/api\/board\/[^/]+$/.test(req.path) || req.path === '/api/board/leisure/state'))) return res.status(405).set('Allow', 'GET, HEAD').json({ error: 'The Office is read-only.' });
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
     if (req.path.startsWith('/api/')) { res.setHeader('Cache-Control', 'no-store'); refreshBlind(data.allow); } // fail closed: index any new masked folder before answering
@@ -37,6 +53,56 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   });
   // last line of defence: every API string passes redaction, and trajectory ids of masked operations are masked
   const send = (res: any, v: unknown) => res.json(redactDeep(maskDeep(data.allow)(v)));
+  const stateView = () => {
+    const state = leisureState(cfg), today = localDay(new Date().toISOString()), records = forkRecords(cfg);
+    const terminal = new Set(records.filter(r => r.status !== 'started').map(r => r.id));
+    const usedToday = records.filter(r => r.status === 'started' && localDay(r.at) === today).length;
+    const unknownToday = records.filter(r => r.status === 'started' && localDay(r.at) === today && !terminal.has(r.id)).length;
+    const successful = records.filter(r => r.status === 'ok' && r.weighted !== undefined);
+    return { ...state, usedToday, unknownToday, avgWeighted: successful.length ? Math.round(successful.reduce((n,r) => n + (r.weighted || 0),0)/successful.length) : null };
+  };
+  app.get('/api/board/leisure/state', (_req,res) => send(res, stateView()));
+  app.post('/api/board/leisure/state', (req,res,next) => {
+    if (req.headers.origin !== `http://${req.headers.host}` || Number(req.headers.host?.split(':')[1] || 80) !== req.socket.localPort) return res.status(403).json({ error: 'Office same-origin required' });
+    if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) return res.status(415).json({ error: 'JSON content-type required' });
+    next();
+  }, express.json({ limit: 1024, inflate: false }), (req,res) => {
+    if (!req.body || typeof req.body.enabled !== 'boolean' || Object.keys(req.body).some(k => k !== 'enabled')) return res.status(400).json({ error: 'Only enabled is accepted' });
+    const old = leisureState(cfg), p = statePath(cfg), temp = `${p}.${process.pid}.tmp`; fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(temp, JSON.stringify({ enabled: req.body.enabled, cap: old.cap })+'\n', { mode: 0o600 }); fs.renameSync(temp,p); send(res,stateView());
+  });
+  let forkQueue = Promise.resolve();
+  const queueForks = (trigger: import('./board').Message) => {
+    if (!isHumanForkTrigger(trigger)) return;
+    for (const role of [...new Set(trigger.mentions)]) forkQueue = forkQueue.then(async () => {
+      const notice = (text: string) => appendBoardInternal(cfg,'leisure',text,{ role:'office',kind:'notice' },trigger.id);
+      const state = leisureState(cfg);
+      if (!state.enabled) { notice('leisure is off'); return; }
+      const session = sessionFor(cfg,role);
+      if (!session) { notice(`${role} has no registered session`); return; }
+      const at = new Date().toISOString(), today = localDay(at); let records: ForkRecord[];
+      const id = requestId(); let used=0, admitted=false, readFailure=false, lockFailure=false;
+      try { withForkLock(cfg,()=>{ records=forkRecords(cfg); used=records.filter(r=>r.status==='started'&&localDay(r.at)===today).length; if(used<state.cap){writeForkRecord(cfg,{id,at,role,session,triggerId:trigger.id,status:'started'}); admitted=true;} }); }
+      catch(e) { lockFailure=e instanceof ForkLockUnavailable; readFailure=!lockFailure; }
+      if(lockFailure){notice('fork lock unavailable, leisure forks paused');return;}
+      if(readFailure){notice('fork records unreadable, leisure forks paused');return;}
+      if(!admitted){notice(`fork cap reached (${used}/${state.cap} today)`);return;}
+      try {
+        const history = readBoard(cfg,'leisure'), prompt = buildForkPrompt(cfg,role,history,trigger,at);
+        const result = await forkRunner({ sessionId:session,prompt,timeoutMs:120_000 });
+        const cleaned = cleanForkReply(result.text,data.allow);
+        if (cleaned.withheld) { writeForkRecord(cfg,{id,at,role,session,triggerId:trigger.id,status:'withheld',usage:result.usage,model:result.model,weighted:weightedUsage(result.usage)}); notice('reply withheld by the deny-list'); return; }
+        if (!cleaned.text) throw new ForkFailure('empty or oversized fork reply');
+        appendBoardInternal(cfg,'leisure',cleaned.text,{role,kind:'standin'},trigger.id);
+        writeForkRecord(cfg,{id,at,role,session,triggerId:trigger.id,status:'ok',usage:result.usage,model:result.model,weighted:weightedUsage(result.usage)});
+      } catch (e:any) {
+        const timeout = e instanceof ForkFailure && e.timeout;
+        const safe = redact(String(e?.message || 'fork failed')).slice(0,500);
+        writeForkRecord(cfg,{id,at,role,session,triggerId:trigger.id,status:timeout?'timeout':'failed',error:safe});
+        notice(timeout ? 'fork timed out' : 'fork failed');
+      }
+    }).catch(() => {});
+  };
   app.get('/api/board/:room', (req, res) => {
     try { const room = roomOf(req.params.room); send(res, { messages: pageBoard(cfg, room, req.query.after === undefined ? undefined : String(req.query.after), req.query.limit === undefined ? 100 : Number(req.query.limit)).map(m => visibleMessage(m, data.allow)) }); }
     catch (e) { const err = e as BoardError; res.status(err.status || 503).json({ error: err instanceof BoardError ? err.message : 'Board unavailable' }); }
@@ -50,7 +116,7 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
     if (posts.length >= 30) return res.status(429).set('Retry-After', '60').json({ error: 'Board rate limit: 30/minute' });
     posts.push(now); next();
   }, express.json({ limit: 16384, inflate: false }), (req, res) => {
-    try { const message = appendBoard(cfg, roomOf(req.params.room), req.body, { role: 'deniz', kind: 'human' }); res.status(201); send(res, { message: visibleMessage(message, data.allow) }); }
+    try { const message = appendBoard(cfg, roomOf(req.params.room), req.body, { role: 'deniz', kind: 'human' }); res.status(201); send(res, { message: visibleMessage(message, data.allow) }); if (message.room === 'leisure' && message.mentions.length) queueMicrotask(() => queueForks(message)); }
     catch (e) { const err = e as BoardError; res.status(err.status || 503).json({ error: err instanceof BoardError ? err.message : 'Board unavailable' }); }
   });
   app.get('/api/summary', (_req, res) => send(res, {
@@ -109,7 +175,7 @@ export function createOffice(cfg: Config = config(), liveOpts?: LiveOpts) {
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
   app.use(express.static(path.join(__dirname, 'web'), { etag: false, setHeaders: (res, p) => { res.setHeader('Cache-Control', 'no-cache'); if (p.endsWith('.mjs')) res.setHeader('Content-Type', 'text/javascript; charset=utf-8'); } }));
   app.use((err: any, req: any, res: any, _next: any) => req.path.startsWith('/api/board/') ? res.status(err.status === 413 ? 413 : err.status === 415 ? 415 : 400).json({ error: 'Invalid board request' }) : res.status(500).json({ error: redact(String(err?.message || err)) }));
-  return { app, live, get data() { return data; } };
+  return { app, live, get data() { return data; }, drainForks: () => forkQueue };
 }
 
 if (require.main === module) {

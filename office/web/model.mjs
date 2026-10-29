@@ -448,7 +448,7 @@ export function parseBoardRoute(value) { const m = String(value).match(/^\/board
 // Messages newer than the last one Deniz saw in that room; never seen counts every loaded message.
 export function boardUnread(messages, seenId) { const seen = boardIdNum(seenId); return (messages || []).filter(m => boardIdNum(m.id) > seen && m.author?.kind !== 'human').length; }
 // A stand-in is never shown under the bare role name.
-export function boardAuthorName(a = {}) { return a.kind === 'standin' ? `${a.role} (stand-in)` : a.kind === 'human' && a.role === 'deniz' ? 'Deniz' : a.role || 'unknown'; }
+export function boardAuthorName(a = {}) { return a.kind === 'standin' ? `${a.role} (fork)` : a.kind === 'notice' ? 'Office' : a.kind === 'human' && a.role === 'deniz' ? 'Deniz' : a.role || 'unknown'; }
 // Node ids chip in prose only when they cannot be ordinary words (they carry a '-' or '/'); links resolve any node id.
 export function boardTokens(text, nodeIds = new Set()) {
   const out = [], push = (t, v, extra = {}) => { const last = out[out.length - 1]; if (t === 'text' && last?.t === 'text') last.v += v; else out.push({ t, v, ...extra }); };
@@ -473,7 +473,7 @@ export function boardLinkTarget(link, nodeIds = new Set(), room = '~/dev/room') 
 }
 export function boardMessageView(m, { now = Date.now(), nodeIds = new Set(), byId = new Map() } = {}) {
   const ts = Date.parse(m.at), withheld = m.text === BOARD_WITHHELD, parent = m.replyTo ? byId.get(m.replyTo) : null;
-  return { id: m.id, author: boardAuthorName(m.author), kind: ['human', 'session', 'standin'].includes(m.author?.kind) ? m.author.kind : 'session',
+  return { id: m.id, author: boardAuthorName(m.author), kind: ['human', 'session', 'standin', 'notice'].includes(m.author?.kind) ? m.author.kind : 'session',
     ago: Number.isFinite(ts) ? relativeAgo(now - ts) : 'unknown time', absolute: Number.isFinite(ts) ? new Date(ts).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'medium' }) : String(m.at || ''),
     withheld, tokens: withheld ? [{ t: 'text', v: m.text }] : boardTokens(m.text || '', nodeIds), link: withheld ? null : m.link ? { value: m.link, target: boardLinkTarget(m.link, nodeIds) } : null,
     replyTo: m.replyTo ? { id: m.replyTo, author: parent ? boardAuthorName(parent.author) : null, snippet: parent ? boardSnippet(parent.text) : '' } : null };
@@ -489,5 +489,9 @@ export function boardMentionCompletions(text, caret, room = 'work') {
   const m = String(text).slice(0, caret).match(/(?<![\w@.-])@([a-z0-9-]*)$/);
   if (!m) return null;
   const q = m[1], hits = BOARD_ROLES.filter(r => r.startsWith(q)).concat(BOARD_ROLES.filter(r => !r.startsWith(q) && q && r.includes(q)));
-  return hits.length ? { start: caret - q.length - 1, end: caret, query: q, options: hits.map(role => ({ role, label: room === 'leisure' ? `${role} (stand-in)` : role })) } : null;
+  return hits.length ? { start: caret - q.length - 1, end: caret, query: q, options: hits.map(role => ({ role, label: room === 'leisure' ? `${role} (fork)` : role })) } : null;
+}
+export function boardForkHeader(state = {}, pending = false, noReply = false) {
+  const avg = state.avgWeighted == null ? 'unmeasured' : `~${Math.round(state.avgWeighted / 1000)}k weighted each`;
+  return { toggle: `Leisure forks: ${state.enabled ? 'on' : 'off'}`, count: `fork replies today ${state.usedToday || 0}/${state.cap || 20}${state.unknownToday ? ` · ${state.unknownToday} unknown` : ''} · ${avg}`, pending: pending ? 'fork pending' : noReply ? 'no reply arrived' : '' };
 }

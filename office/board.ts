@@ -4,12 +4,12 @@ import { type Config, type Allowlist, redactDeep } from './collect/privacy';
 import { isRole } from './collect/roles';
 import { deniedBoardText } from './collect/deny';
 export type Room = 'work' | 'leisure';
-export interface Message { id: string; at: string; room: Room; author: { role: string; kind: 'human' | 'session' | 'standin' }; text: string; replyTo?: string; mentions: string[]; link?: string }
+export interface Message { id: string; at: string; room: Room; author: { role: string; kind: 'human' | 'session' | 'standin' | 'notice' }; text: string; replyTo?: string; mentions: string[]; link?: string }
 export class BoardError extends Error { constructor(message: string, public status = 400) { super(message); } }
 export function roomOf(room: string): Room { if (room !== 'work' && room !== 'leisure') throw new BoardError('Unknown board room', 404); return room; }
 export const boardDir = (cfg: Config) => cfg.board || path.join(cfg.room || path.join(cfg.home, 'dev/room'), 'board');
 const mentionable = new Set(['operator', 'coordinator', 'partner', 'experimenter', 'engineer', 'jev-correspondent', 'prompter', 'brainstormer', 'intern']);
-export const mentions = (text: string) => [...new Set([...text.matchAll(/(?<![\w@.-])@([a-z][a-z0-9-]*)(?![\w-])/g)].map(m => m[1]).filter(r => mentionable.has(r)))];
+export const mentions = (text: string) => [...text.matchAll(/(?<![\w@.-])@([a-z][a-z0-9-]*)(?![\w-])/g)].map(m => m[1]).filter(r => mentionable.has(r));
 export function input(room: Room, body: any): Pick<Message, 'text' | 'link' | 'replyTo' | 'mentions'> {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['text', 'link', 'replyTo'].includes(k))) throw new BoardError('Only text, link and replyTo are accepted');
   if (typeof body.text !== 'string' || !body.text.trim() || [...body.text].length > 2000 || (body.text.match(/(?:\r\n|[\r\n\u2028\u2029])+/g) || []).length > 1) throw new BoardError('Text requires 1–2000 characters and at most one line-break run');
@@ -23,9 +23,9 @@ export function readBoard(cfg: Config, room: Room): Message[] {
   if (raw && !raw.endsWith('\n')) throw new BoardError('Board has an incomplete append; repair required', 503);
   try { return raw.split('\n').filter(Boolean).map(s => JSON.parse(s)); } catch { throw new BoardError('Board has an invalid record; repair required', 503); }
 }
-export function appendBoard(cfg: Config, room: Room, body: unknown, author: Message['author']): Message {
+function append(cfg: Config, room: Room, body: unknown, author: Message['author'], internal = false, mentionsOverride?: string[]): Message {
   roomOf(room); const value = input(room, body);
-  if (!(author.kind === 'human' && author.role === 'deniz') && !(author.kind === 'session' && isRole(author.role))) throw new BoardError('Stand-in or invalid author refused');
+  if (!(author.kind === 'human' && author.role === 'deniz') && !(author.kind === 'session' && isRole(author.role)) && !(internal && ((author.kind === 'standin' && isRole(author.role)) || (author.kind === 'notice' && author.role === 'office')))) throw new BoardError('Stand-in or invalid author refused');
   if (author.kind === 'session' && room === 'leisure' && /@[a-z][\w-]*/i.test(value.text)) throw new BoardError('Session leisure posts cannot @mention');
   const dir = boardDir(cfg), lock = path.join(dir, room + '.lock'); fs.mkdirSync(dir, { recursive: true });
   if (fs.lstatSync(dir).isSymbolicLink()) throw new BoardError('Board directory must not be a symlink', 500);
@@ -33,11 +33,16 @@ export function appendBoard(cfg: Config, room: Room, body: unknown, author: Mess
   try {
     const rows = readBoard(cfg, room), last = rows.at(-1), n = last ? Number(last.id.slice(2)) + 1 : 1;
     if (!Number.isSafeInteger(n)) throw new BoardError('Board id exhausted', 503);
-    const message: Message = { id: `${room[0]}-${String(n).padStart(6, '0')}`, at: new Date().toISOString(), room, author: { ...author }, ...value };
+    const message: Message = { id: `${room[0]}-${String(n).padStart(6, '0')}`, at: new Date().toISOString(), room, author: { ...author }, ...value, ...(mentionsOverride ? { mentions: mentionsOverride } : {}) };
     const line = Buffer.from(JSON.stringify(message) + '\n'), fd = fs.openSync(path.join(dir, room + '.jsonl'), fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600);
     try { if (fs.writeSync(fd, line) !== line.length) throw new BoardError('Incomplete board append; repair required', 503); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     return message;
   } finally { fs.rmdirSync(lock); }
+}
+export function appendBoard(cfg: Config, room: Room, body: unknown, author: Message['author']): Message { return append(cfg, room, body, author); }
+export function appendBoardInternal(cfg: Config, room: Room, text: string, author: { role: string; kind: 'standin' | 'notice' }, replyTo?: string): Message {
+  const value = input(room, { text, ...(replyTo ? { replyTo } : {}) });
+  return append(cfg, room, { text: value.text, ...(replyTo ? { replyTo } : {}) }, author, true, []);
 }
 export function pageBoard(cfg: Config, room: Room, after?: string, limit = 100) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new BoardError('Limit must be 1–1000');
