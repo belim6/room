@@ -200,7 +200,12 @@ export function inferOperations(cfg: Config, sink: Sink, allow: Allowlist) {
       { c.operation = h.operation; c.opInferred = true; if (!sink.actors.get(c.target.id)?.permanent) pinned.set(c.target.id, h.operation!); }
   }
   const evOps = new Map<OfficeEvent, string | undefined>();
-  for (const e of sink.events) if (!e.operation) evOps.set(e, deepest(opsIn([e.target?.path || '', ...(e.hints || [])].join('\n'))));
+  for (const e of sink.events) if (!e.operation) {
+    // An unresolved handoff ref still identifies its history operation. Keep the raw ref useful for attribution
+    // without presenting a nonexistent file as a resolved path.
+    const rawRef = e.detailRef.kind === 'handoff' ? e.hints?.find(h => /^20\d\d-\d\d-\d\d\//.test(h)) : undefined;
+    evOps.set(e, deepest(opsIn([e.target?.path || '', ...(rawRef ? ['coordination/' + rawRef] : []), ...(e.hints || [])].join('\n'))));
+  }
   // Ephemeral actors take the deepest operation seen across their own events; their spawn/end follow.
   const byActor = new Map<string, string[]>();
   for (const [e, o] of evOps) if (o && !sink.actors.get(e.actor.id)?.permanent && !e.actor.id.startsWith('session:')) (byActor.get(e.actor.id) || byActor.set(e.actor.id, []).get(e.actor.id)!).push(o);
@@ -230,7 +235,7 @@ function crossCheck(sink: Sink) {
   const strip = (h: string) => h.replace(/\{[^{}\n]*"kind"\s*:[^{}\n]*\}/g, '').split(/\n|;|&&|\|\|/).filter(x => !x.includes('events.jsonl')).join('\n');
   const calls = sink.coordinatorCalls.map(c => ({ ...c, hints: (c.hints || []).map(strip) }) as OfficeEvent), orig = new Map(calls.map((x, i) => [x, sink.coordinatorCalls[i]]));
   const near = (a: OfficeEvent, b: OfficeEvent) => Math.abs(Date.parse(a.ts) - Date.parse(b.ts)) <= W;
-  const keyOf = (l: OfficeEvent) => base(String(l.detailRef.extra?.ref || ''));
+  const keyOf = (l: OfficeEvent) => base(String(l.detailRef.extra?.ref || l.hints?.find(h => !!h) || ''));
   const mentions = (c: OfficeEvent, k: string) => k.length >= 4 && (c.hints || []).some(h => h.includes(k));
   const gap = (of: OfficeEvent, direction: 'log-without-action' | 'action-without-log') => sink.push({ ts: of.ts, actor: sink.ref('coordinator'), verb: 'deviation', target: of.target,
     operation: of.operation, opInferred: of.opInferred, detailRef: { kind: 'gap', file: of.detailRef.file, lines: of.detailRef.lines, extra: { of: of.id } }, source: 'cross-check', provenance: 'inferred',
