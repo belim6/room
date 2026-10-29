@@ -60,7 +60,8 @@ main { display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
 #view { position: absolute; inset: 0; overflow: auto; background: var(--bg); padding: 10px 14px; }
 .home-mode main { display:block; height:100%; }
 .home-mode #floorwrap { height:100%; }
-.home-mode #floor,.home-mode #tip,.home-mode #inspector { display:none; }
+.home-mode #floor,.home-mode #tip { display:none; }
+.home-mode #inspector { display:block; position:absolute; z-index:3; right:10px; top:52px; bottom:10px; width:min(380px,42vw); border:1px solid var(--line); border-radius:5px; box-shadow:0 8px 28px #0009; }
 .home-mode #view { inset:0; padding:0; overflow:hidden; }
 .home-mode #view .op-graph-wrap { padding-top:42px; }
 #running-now { position:absolute; z-index:2; top:0; left:0; right:0; min-height:40px; display:flex; align-items:center; gap:8px; padding:5px 9px; overflow:auto; border-bottom:1px solid var(--line); background:var(--panel); white-space:nowrap; }

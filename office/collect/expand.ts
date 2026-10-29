@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { deniedDocument } from './deny';
 import type { Collected } from './index';
 import type { OfficeEvent } from './types';
 import { codexSessions, execOf } from './codex';
@@ -24,7 +25,7 @@ const json = (s: string) => { try { return JSON.parse(s); } catch { return undef
 const textOf = (c: any): string => typeof c === 'string' ? c : Array.isArray(c) ? c.map(b => b?.type === 'text' ? b.text : b?.type === 'image' ? '[image]' : '').join('\n') : '';
 const fileLines = (c: Collected, file: string) => { const o = openSource(c, file); if (!o) return []; try { const b = Buffer.alloc(o.size); fs.readSync(o.fd, b, 0, o.size, 0); return b.toString('utf8').split('\n'); } finally { fs.closeSync(o.fd); } };
 
-export function expandEvent(c: Collected, e: OfficeEvent): { id: string; source: { file: string; lines: number[] }; sections: Section[] } {
+function expandEventRaw(c: Collected, e: OfficeEvent): { id: string; source: { file: string; lines: number[] }; sections: Section[] } {
   const d = e.detailRef, out: Section[] = [], allow = c.allow, src = { file: d.file, lines: d.lines.map(n => n + 1) };
   if (d.kind === 'room-notice') { // Room live feed: read the turn record directly (allowlisted kind), never the feed itself
     const t = allow.read(path.join(allow.cfg.roomData, 'turns', String(d.key) + '.json'));
@@ -149,4 +150,13 @@ export function actorContext(c: Collected, actorId: string, withPrompt = true): 
   const end = evs.find(e => e.verb === 'end');
   if (end?.detailRef.kind === 'claude-subagent-end' && end.detailRef.lines.length) { const r = json(lineAt(c, end.detailRef.file, end.detailRef.lines[0])); const t = textOf(r?.message?.content); if (t) out.push({ title: 'final output', prose: true, ...clip(t) }); }
   return out;
+}
+
+// Deny-list guard for every expansion path: an event that targets, names or commands on a denied document is withheld whole (path-based and text-fragment based, conservative on purpose)
+const DENIED_TEXT = /(?:^|[\/\s'"=:])(?:restricted|labels|\.room-data)\/|archive\/(?:private|personality)\/|conversation-\d{2}\.md|deniz-model\.md/i;
+export function expandEvent(c: Collected, e: OfficeEvent) { return withholdDenied(c, e, expandEventRaw(c, e)); }
+export function withholdDenied<R extends { id: string; source: { file: string; lines: number[] }; sections: Section[] }>(c: Collected, e: OfficeEvent, r: R): R {
+  const tgt = e.target?.kind === 'file' ? e.target.path : undefined;
+  const hit = (tgt && deniedDocument(tgt, c.allow)) || r.sections.some(x => (x.path && deniedDocument(x.path, c.allow)) || (/^(command|input|file|source)/i.test(x.title) && DENIED_TEXT.test(`${x.path || ''} ${x.text || ''}`)));
+  return hit ? { id: r.id, source: r.source, sections: [{ title: 'withheld', allowed: false, note: 'withheld by the Office deny-list' } as any] } as R : r;
 }

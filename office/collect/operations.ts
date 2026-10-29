@@ -5,15 +5,16 @@ import type { OfficeEvent, OperationNode } from './types';
 import { tokenRollup } from './token-usage';
 import type { TokenUsage } from './types';
 import { operationPlacement } from '../web/operation-placement.mjs';
+import { artifactDocumentCounts } from './documents';
 
 type InputNode = Omit<OperationNode, 'eventCount' | 'unfiledEventCount' | 'gapCount'>;
 export interface OperationTree { nodes: OperationNode[]; unattributed?: TokenUsage; error?: string }
 
 /** Load a configured operation forest and compute metadata counts without changing source events. */
-export function operationTree(file: string | undefined, allow: Allowlist, events: OfficeEvent[], unattributed?: TokenUsage): OperationTree | undefined {
-  try { return loadTree(file, allow, events, unattributed); } catch (e: any) { return { nodes: [], error: String(e?.message || e) }; }
+export function operationTree(file: string | undefined, allow: Allowlist, events: OfficeEvent[], unattributed?: TokenUsage, artifacts: { path: string; operation?: string }[] = []): OperationTree | undefined {
+  try { return loadTree(file, allow, events, unattributed, artifacts); } catch (e: any) { return { nodes: [], error: String(e?.message || e) }; }
 }
-function loadTree(file: string | undefined, allow: Allowlist, events: OfficeEvent[], unattributed?: TokenUsage): OperationTree | undefined {
+function loadTree(file: string | undefined, allow: Allowlist, events: OfficeEvent[], unattributed?: TokenUsage, artifacts: { path: string; operation?: string }[] = []): OperationTree | undefined {
   if (!file) return undefined;
   const path = allow.canonical(file);
   const opened = allow.openVerified(path, p => allow.allows(p));
@@ -45,7 +46,8 @@ function loadTree(file: string | undefined, allow: Allowlist, events: OfficeEven
   }
   const direct = new Map<string, { placed: number; unfiled: number; gaps: number }>();
   for (const n of nodes) direct.set(n.id, { placed: 0, unfiled: 0, gaps: 0 });
-  const unfiled = { id: 'unfiled', title: 'Unfiled', parent: null, goal: '', status: 'unfiled', owner: '', budget: {}, eventCount: 0, unfiledEventCount: 0, gapCount: 0 } as OperationNode;
+  const { counts: docCounts, unfiled: unfiledDocs } = artifactDocumentCounts(nodes as OperationNode[], artifacts as any, allow);
+  const unfiled = { id: 'unfiled', title: 'Unfiled', parent: null, goal: '', status: 'unfiled', owner: '', budget: {}, eventCount: 0, unfiledEventCount: 0, gapCount: 0, documentCount: unfiledDocs } as OperationNode;
   for (const e of events) {
     const id = operationPlacement(e.operation, nodes) || undefined;
     if (!id) { unfiled.eventCount++; unfiled.unfiledEventCount++; if (e.gap) unfiled.gapCount++; continue; }
@@ -53,15 +55,15 @@ function loadTree(file: string | undefined, allow: Allowlist, events: OfficeEven
   }
   const children = new Map<string, InputNode[]>();
   for (const n of nodes) if (n.parent !== null) children.set(n.parent, [...(children.get(n.parent) || []), n]);
-  const computed = new Map<string, { eventCount: number; gapCount: number }>();
-  const totals = (id: string): { eventCount: number; gapCount: number } => {
-    const own = direct.get(id)!; let eventCount = own.placed, gapCount = own.gaps;
-    for (const child of children.get(id) || []) { const c = totals(child.id); eventCount += c.eventCount; gapCount += c.gapCount; }
-    const result = { eventCount, gapCount }; computed.set(id, result); return result;
+  const computed = new Map<string, { eventCount: number; gapCount: number; documentCount: number }>();
+  const totals = (id: string): { eventCount: number; gapCount: number; documentCount: number } => {
+    const own = direct.get(id)!; let eventCount = own.placed, gapCount = own.gaps, documentCount = docCounts.get(id)!;
+    for (const child of children.get(id) || []) { const c = totals(child.id); eventCount += c.eventCount; gapCount += c.gapCount; documentCount += c.documentCount; }
+    const result = { eventCount, gapCount, documentCount }; computed.set(id, result); return result;
   };
   for (const n of nodes) if (n.parent === null) totals(n.id);
   const output = nodes.map(n => {
-    const node: OperationNode = { ...n, eventCount: computed.get(n.id)!.eventCount, unfiledEventCount: 0, gapCount: computed.get(n.id)!.gapCount };
+    const node: OperationNode = { ...n, eventCount: computed.get(n.id)!.eventCount, unfiledEventCount: 0, gapCount: computed.get(n.id)!.gapCount, documentCount: computed.get(n.id)!.documentCount };
     const problems: string[] = [];
     if (['done', 'closed'].includes(node.status)) {
       const close = (n as any).close;
@@ -98,7 +100,7 @@ function loadTree(file: string | undefined, allow: Allowlist, events: OfficeEven
     }
     unfiled.tokenUsage = tokenRollup(events.filter(e=>!operationPlacement(e.operation, nodes)));
   }
-  if (unfiled.eventCount) output.push(unfiled);
+  if (unfiled.eventCount || unfiled.documentCount) output.push(unfiled);
   return { nodes: output, ...(unattributed ? { unattributed } : {}) };
 }
 const str = (v: unknown): v is string => typeof v === 'string' && v.length > 0;

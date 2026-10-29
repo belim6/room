@@ -19,7 +19,7 @@ export interface OfficeEvent {
 export interface TokenUsage { input: number; output: number; cacheRead: number; cacheWrite: number; model: string | null; engine: string; weightedAssumption?: number }
 export interface OperationClose { summary: string; evidence: string[]; closedAt: string; tokens?: TokenRollup }
 export interface OperationNode { id: string; title: string; parent: string | null; goal: string; status: string; owner: string; budget: Record<string, unknown>; aliases?: string[]; close?: OperationClose; closeProblems?: string[];
-  eventCount: number; unfiledEventCount: number; gapCount: number; tokenUsage?: TokenRollup }
+  eventCount: number; unfiledEventCount: number; gapCount: number; documentCount?: number; tokenUsage?: TokenRollup }
 export interface TokenRollup { input: number; output: number; cacheRead: number; cacheWrite: number; weightedAssumption: number; weightedLabel: string; knownEvents: number; totalEvents: number }
 export interface SourceStat { kind: string; path: string; records: number; events: number; unparsed: number; note?: string }
 export interface Artifact { path: string; group: string; size: number; mtime: string; operation?: string }

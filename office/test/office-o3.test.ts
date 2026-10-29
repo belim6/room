@@ -143,7 +143,7 @@ test('archive: artifacts with writer and reader links, searchable by friendly ti
   try {
     const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, a = await (await fetch(base + '/api/archive?op=*&q=bundled')).json();
     assert.deepEqual(a.items.map((x: any) => x.title), ['Date room v1: the bundled revision']);
-    const all = await (await fetch(base + '/api/archive?op=*')).json(); assert.ok(all.items.some((x: any) => x.path.endsWith('restricted/key.json') && x.title === 'key'), 'restricted files: name only');
+    const all = await (await fetch(base + '/api/archive?op=*')).json(); assert.ok(!all.items.some((x: any) => x.path.includes('restricted/')), 'restricted files: not shown at all (deny-list)');
   } finally { await new Promise(r => srv.close(r)); }
   const c = collect(cfg); assert.ok(c.artifacts.length >= 3);
 });

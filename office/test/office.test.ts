@@ -280,8 +280,8 @@ test('review fixes: a Codex labeler shows its concatenated output once, not unde
   const outs = secs.filter((x: any) => x.title.startsWith('output')); assert.equal(outs.length, 1); assert.match(outs[0].text || '', /You are a careful/);
   // the multi-line critic command is parsed as one exec, and its output is withheld with a reason
   const ex = c.events.find(e => e.actor.id === 'critic:critic-2026-10-17-date-baseline' && e.detailRef.kind === 'codex-exec' && /for f in/.test((e.hints || []).join('')))!;
-  const x = expandEvent(c, ex).sections; assert.ok(x.some(q => q.title.startsWith('command') && /done'/.test(q.text || '')));
-  assert.ok(x.some(q => q.title === 'output' && q.allowed === false && /variable or substitution/.test(q.note || '')));
+  // since the Office deny-list: an exec that names labels/ (blind material) is withheld whole
+  const x = expandEvent(c, ex).sections; assert.ok(x.length === 1 && x[0].title === 'withheld' && x[0].allowed === false);
   const reads = secs.filter((x: any) => x.title === 'read'); assert.equal(reads.length, 3); assert.ok(reads.every((x: any) => x.text === undefined));
 });
 
