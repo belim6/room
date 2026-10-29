@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseEvents } from '../collect/events';
+import { parseEvents, resolveEventRef } from '../collect/events';
 import { Allowlist, type Config } from '../collect/privacy';
 import { Sink } from '../collect/types';
 
@@ -28,9 +28,9 @@ test('events.jsonl refs use the date-specific root and leave missing refs unreso
     const refs = f.sink.events.map(e => e.detailRef.extra?.ref);
     assert.equal(refs[0], path.join(f.room, 'work/dinner-party/README.md'));
     assert.equal(refs[1], path.join(f.coordination, '2026-10-17/old.md'));
-    assert.equal(refs[2], path.join(f.room, 'work/missing.md'));
+    assert.equal(refs[2], undefined);
     assert.equal(f.sink.events[0].target?.path, refs[0], 'target path and detail ref share the resolved path');
-    assert.equal(f.sink.events[2].detailRef.extra?.ref, refs[2], 'missing refs stay represented without becoming parse errors');
+    assert.equal(f.sink.events[2].detailRef.extra?.ref, undefined, 'missing refs stay unresolved without becoming parse errors');
     assert.equal(f.sink.sources[0].unparsed, 0);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -43,4 +43,36 @@ test('pre-migration event refs fall back to the repo root when history has no ma
     parseEvents(file, f.sink, f.allow);
     assert.equal(f.sink.events[0].detailRef.extra?.ref, path.join(f.room, 'critic/old.md'));
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('missing refs stay unresolved without counting as malformed records', () => {
+  const f = fixture();
+  try {
+    const file = path.join(f.coordination, 'events.jsonl'); fs.writeFileSync(file, event('2026-10-20T00:00:00Z', 'work/gone.md') + '\n');
+    parseEvents(file, f.sink, f.allow);
+    assert.equal(f.sink.events[0].detailRef.extra?.ref, undefined);
+    assert.equal(f.sink.events[0].target?.path, undefined);
+    assert.equal(f.sink.sources[0].unparsed, 0);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('entry timestamp selects the root, with the cutover instant inclusive', () => {
+  const f = fixture();
+  try {
+    for (const [base, body] of [[f.coordination, 'history'], [f.room, 'repo']] as const) {
+      fs.mkdirSync(path.join(base, 'same'), { recursive: true }); fs.writeFileSync(path.join(base, 'same/ref.md'), body);
+    }
+    assert.equal(fs.readFileSync(resolveEventRef('2026-10-18T23:59:59Z', 'same/ref.md', f.allow)!, 'utf8'), 'history');
+    assert.equal(fs.readFileSync(resolveEventRef('2026-10-19T00:00:00Z', 'same/ref.md', f.allow)!, 'utf8'), 'repo');
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('refs cannot traverse, be absolute, or follow a symlink outside the repo', () => {
+  const f = fixture(), outside = fs.mkdtempSync(path.join(os.tmpdir(), 'office-event-outside-'));
+  try {
+    fs.writeFileSync(path.join(outside, 'secret.md'), 'outside');
+    fs.symlinkSync(outside, path.join(f.room, 'escape'));
+    for (const ref of ['../secret.md', '/etc/passwd', 'C:/secret.md', 'escape/secret.md'])
+      assert.equal(resolveEventRef('2026-10-20T00:00:00Z', ref, f.allow), undefined, ref);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); fs.rmSync(outside, { recursive: true, force: true }); }
 });
