@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Sink } from './types';
-import { readLines } from './claude';
+import { manifestFileRecords } from './manifest-json';
 import type { Allowlist } from './privacy';
 import { maskerFor, opFolderOf } from './rooms';
 
@@ -14,10 +14,10 @@ export function parseManifest(file: string, sink: Sink, allow: Allowlist) {
   const id = `driver:${rel}/${phase}`; sink.actor({ id, kind: 'driver', label: `driver ${rel} ${phase}`, parent: 'coordinator', parentInferred: true, source: file });
   const me = sink.ref(id); let started = false, last = ''; let held: { ts: string; r: any }[] = [];
   // arm names in trajectory ids are masked unless the operation folder has a valid unmask record (rooms.ts)
-  const lines: string[] = readLines(file, sink), M = maskerFor(allow, op?.dir || path.dirname(file), op?.id || rel), T = (t: unknown) => M.name(String(t));
+  const parsed = manifestFileRecords(file), M = maskerFor(allow, op?.dir || path.dirname(file), op?.id || rel), T = (t: unknown) => M.name(String(t));
   const push = (e: any, i: number, kind = 'manifest') => { stat.events++; sink.push({ actor: me, source: file, provenance: 'captured', tsSource: 'record', detailRef: { kind, file, lines: i >= 0 ? [i] : [] }, hints: [file], ...e }); };
-  lines.forEach((l, i) => {
-    if (!l.trim()) return; let r: any; try { r = JSON.parse(l); } catch { stat.unparsed++; return; }
+  stat.unparsed += parsed.unparsed;
+  parsed.records.forEach(({ r, i }) => {
     if (!r.at || !r.kind || !Number.isFinite(Date.parse(r.at))) { stat.unparsed++; return; } stat.records++; const ts = new Date(r.at).toISOString(); last = ts;
     if (!started) { started = true; push({ ts, verb: 'spawn', actor: sink.ref('coordinator'), target: { kind: 'actor', id }, label: phase, provenance: 'inferred' }, i); }
     switch (r.kind) {
@@ -45,7 +45,7 @@ export function parseManifest(file: string, sink: Sink, allow: Allowlist) {
     // the pair is present (members from phase-start, branch and turn records), or the pair is stopped, or after a bounded
     // timeout (2 min of later manifest records, or 10 min of wall time). Full collect and live give the same events.
     const members = new Map<string, Set<string>>(), stopped = new Set<string>(); let turnsSeen = false;
-    for (const l of lines) { let r: any; try { r = JSON.parse(l); } catch { continue; }
+    for (const { r } of parsed.records) {
       for (const t of [r?.traj, ...(Array.isArray(r?.trajectories) ? r.trajectories : [])]) if (typeof t === 'string') { const k = pairOf(t); (members.get(k) || members.set(k, new Set()).get(k)!).add(t); }
       if (r?.kind === 'intent' || r?.kind === 'done') turnsSeen = true;
       if (r?.kind === 'phase-end') { for (const k of Object.keys(r.stoppedPairs || {})) stopped.add(k); for (const f of r.qualifyingFailures || []) stopped.add(String(f?.pair || f?.traj || f)); } }

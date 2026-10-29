@@ -6,8 +6,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { collect } from '../collect/index';
+import { parseManifest } from '../collect/manifests';
 import { Allowlist, type Config } from '../collect/privacy';
 import { fans, maskerFor } from '../collect/rooms';
+import { manifestFileRecords } from '../collect/manifest-json';
+import { Sink } from '../collect/types';
 import { createOffice } from '../server';
 
 // Review fixes on d3663e1 (Claude reviewer + Codex privacy NO-GO): blinding of room records, nested manifests, seeded order,
@@ -235,27 +238,71 @@ test('live: a held request whose driver died is released at the wall-time limit,
   } finally { o.live.stop(); }
 });
 
+test('pretty-printed manifest JSON yields the same parsed masked trajectories', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'office-manifest-json-'))); roots.push(root);
+  const cfg: Config = { home: path.join(root, 'home'), room: root, coordination: path.join(root, 'coordination'), promptKnowledge: path.join(root, 'pk'), roomData: path.join(root, 'rd'),
+    claudeProject: path.join(root, 'proj'), spool: path.join(root, 'spool'), repos: [], work: path.join(root, 'work'), research: path.join(root, 'research'), extra: [] };
+  const dir = path.join(root, 'work', 'dinner'), file = path.join(dir, 'manifest-pretty.jsonl');
+  const records = ['v0', 'v1'].map((arm, i) => ({ turnId: id(), turn: 1, traj: `compare·${arm}·r01`, kind: 'done', at: `2026-10-19T20:0${i}:00.000Z` }));
+  W(path.join(dir, 'restricted/key.json'), { 'T-1': { traj: 'compare·v0·r01' } }); W(file, JSON.stringify(records, null, 2).replace(/·/g, '\\u00b7'));
+  const allow = new Allowlist(cfg), sink = new Sink(); parseManifest(file, sink, allow);
+  const turns = sink.events.filter(e => e.verb === 'turn');
+  assert.equal(sink.sources[0].unparsed, 0);
+  assert.equal(turns.length, 2);
+  assert.ok(turns.every(e => /room [AB]/.test(e.label || '')));
+  assert.deepEqual(maskerFor(allow, dir, 'work/dinner').trajs.sort(), ['compare·v0·r01', 'compare·v1·r01']);
+  const fanRuns = fans(allow, sink.events, dir, 'work/dinner');
+  assert.equal(fanRuns.reduce((n, run) => n + run.pairs.reduce((m: number, pair: any) => m + pair.lanes.reduce((k: number, lane: any) => k + lane.ticks.length, 0), 0), 0), 2,
+    'room-fans includes both records from the pretty-printed document');
+});
+
+test('manifest null records are counted as unparsed and never crash collection', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'office-manifest-null-'))); roots.push(root);
+  const cfg: Config = { home: path.join(root, 'home'), room: root, coordination: path.join(root, 'coordination'), promptKnowledge: path.join(root, 'pk'), roomData: path.join(root, 'rd'),
+    claudeProject: path.join(root, 'proj'), spool: path.join(root, 'spool'), repos: [], work: path.join(root, 'work'), research: path.join(root, 'research'), extra: [] };
+  const dir = path.join(root, 'work', 'null-case'), file = path.join(dir, 'manifest-null.jsonl'); fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, 'null\n{"at":"2026-10-19T20:00:00Z","kind":"done","traj":"phase·v0·r01","turn":1,"turnId":"t1"}\n');
+  const sink = new Sink(); parseManifest(file, sink, new Allowlist(cfg));
+  assert.equal(sink.sources[0].unparsed, 1);
+  assert.equal(sink.sources[0].records, 1);
+  assert.equal(sink.events.filter(e => e.verb === 'turn').length, 1);
+});
+
+test('large JSONL manifests parse incrementally while preserving complete records', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'office-manifest-large-'))); roots.push(root);
+  const file = path.join(root, 'manifest-large.jsonl');
+  const fd = fs.openSync(file, 'w');
+  try { for (let i = 0; i < 12000; i++) fs.writeSync(fd, JSON.stringify({ at: '2026-10-19T20:00:00Z', kind: 'done', traj: `phase·v0·r${i}`, turn: 1, turnId: `t${i}` }) + '\n'); }
+  finally { fs.closeSync(fd); }
+  const parsed = manifestFileRecords(file);
+  assert.equal(parsed.unparsed, 0);
+  assert.equal(parsed.records.length, 12000);
+  assert.equal(parsed.records[11999].r.turnId, 't11999');
+});
+
 test('masking is scoped: an unmasked operation sharing trajectory ids with a masked one shows its own rooms; free text stays masked; any JSON formatting is learned', async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'office-spill-'))); roots.push(root);
   const coord = path.join(root, 'coordination'), date = path.join(coord, '2026-10-17/date'), dinner = path.join(root, 'work/dinner'), cfg: Config = { home: path.join(root, 'home'), room: root, coordination: coord,
     promptKnowledge: path.join(root, 'pk'), roomData: path.join(root, 'rd'), claudeProject: path.join(root, 'proj'), spool: path.join(root, 'spool'), repos: [], work: path.join(root, 'work'), research: path.join(root, 'research'), extra: [] };
   fs.mkdirSync(cfg.claudeProject, { recursive: true });
   const lines = (r: string, fmt = (o: any) => JSON.stringify(o)) => ['v0', 'v1'].flatMap((a, i) => [{ at: `2026-10-1${r === 'r02' ? 9 : 7}T20:0${i}:00.000Z`, kind: 'done', traj: `compare·${a}·${r}`, turn: 1, turnId: id() }]).map(fmt).join('\n') + '\n';
-  // date: unmasked (valid record); dinner: masked, same ids, and one pair written with spaces and an escaped "·"
+  // date: unmasked (valid record); dinner: masked, same ids, with whitespace, reordered keys and an escaped "·"
   W(path.join(date, 'restricted/key.json'), { 'T-1': { traj: 'compare·v0·r01' } }); W(path.join(date, 'manifest-compare.jsonl'), lines('r01'));
   const lock = JSON.stringify({ at: '2026-10-18T19:00:00Z' }); W(path.join(date, 'labels-lock.json'), lock);
   W(path.join(date, 'restricted/unmask.json'), { operation: '2026-10-17/date', at: '2026-10-18T20:00:00Z', by: 'deniz', labelsLock: { file: 'labels-lock.json', sha256: sha(lock) }, keySha256: sha(fs.readFileSync(path.join(date, 'restricted/key.json'))) });
   W(path.join(dinner, 'restricted/key.json'), { 'T-1': { traj: 'compare·v1·r01' } });
-  fs.writeFileSync(path.join(dinner, 'manifest-compare.jsonl'), lines('r01') + lines('r02', o => JSON.stringify(o, null, 0).replace(/":/g, '": ').replace(/·/g, '\\u00b7')));
+  const pretty = ['v0', 'v1'].map((a, i) => ({ at: `2026-10-19T20:0${i}:00.000Z`, kind: 'done', traj: `compare·${a}·r03`, turn: 1, turnId: id() }));
+  fs.writeFileSync(path.join(dinner, 'manifest-pretty.jsonl'), JSON.stringify(pretty.map(o => Object.fromEntries(Object.entries(o).reverse())), null, 2).replace(/·/g, '\\u00b7'));
+  fs.writeFileSync(path.join(dinner, 'manifest-compare.jsonl'), lines('r01') + lines('r02', o => JSON.stringify(Object.fromEntries(Object.entries(o).reverse()), null, 0).replace(/":/g, '": ').replace(/·/g, '\\u00b7')));
   W(path.join(coord, '2026-10-17/notes.md'), '# notes\nthe rooms were compare·v0·r01 and compare·v1·r01\n');
   const A = new Allowlist(cfg), Md = maskerFor(A, dinner, 'work/dinner');
-  assert.deepEqual(Md.trajs.sort(), ['compare·v0·r01', 'compare·v0·r02', 'compare·v1·r01', 'compare·v1·r02'], 'spaced and escaped records are learned');
+  assert.deepEqual(Md.trajs.sort(), ['compare·v0·r01', 'compare·v0·r02', 'compare·v0·r03', 'compare·v1·r01', 'compare·v1·r02', 'compare·v1·r03'], 'pretty-printed, whitespace-varied, key-reordered and escaped records are learned');
   assert.ok(!Md.name('compare·v0·r02').endsWith('room ?'), 'a learned pair gets real room letters');
   const s = await serve(cfg);
   try {
     const ev = async (op: string) => (await s.json('/api/events?op=' + encodeURIComponent(op))).events.filter((e: any) => e.verb === 'turn').map((e: any) => e.label).sort();
     assert.deepEqual(await ev('2026-10-17/date'), ['compare·v0·r01 t1', 'compare·v1·r01 t1'], 'the unmasked operation keeps its own ids');
-    const dl = await ev('work/dinner'); assert.equal(dl.length, 4); assert.ok(dl.every((l: string) => /room [AB]/.test(l)), 'the masked one shows room letters: ' + dl);
+    const dl = await ev('work/dinner'); assert.equal(dl.length, 6); assert.ok(dl.every((l: string) => /room [AB]/.test(l)), 'the masked one shows room letters: ' + dl);
     const dr = JSON.stringify(await s.json('/api/rooms?op=work/dinner')), da = JSON.stringify(await s.json('/api/rooms?op=2026-10-17/date'));
     assert.ok(!/·v[01]·/.test(dr)); assert.ok(da.includes('compare·v0·r01') && !da.includes('room A'), 'the unmasked fans keep their ids');
     const notes = JSON.stringify(await s.json('/api/expand/file?path=' + encodeURIComponent(path.join(coord, '2026-10-17/notes.md'))));
