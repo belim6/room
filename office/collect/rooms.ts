@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { Allowlist } from './privacy';
 import type { OfficeEvent } from './types';
+import { manifestFileRecords } from './manifest-json';
 
 // The unmask gate (spec 76 amendment P1, recheck P2). Arm names are shown only behind a VALID restricted/unmask.json:
 //   {operation, at, by, labelsLock:{file, sha256}, responseLock?:{file, sha256}, keySha256}
@@ -103,7 +104,7 @@ export function maskerFor(allow: Allowlist, opDir: string, opId: string) {
   const hit = cache.get(opDir); if (hit && hit.sig === sig) return hit.m;
   // parsed, not pattern-matched: spacing, escaped "·" or key order can't hide a trajectory from the masker
   const trajs: string[] = [];
-  for (const n of names) for (const l of fs.readFileSync(n, 'utf8').split('\n')) { let r: any; try { r = JSON.parse(l); } catch { continue; }
+  for (const n of names) for (const { r } of manifestFileRecords(n).records) {
     for (const t of [r?.traj, ...(Array.isArray(r?.trajectories) ? r.trajectories : [])]) if (typeof t === 'string') trajs.push(t); }
   const m = armMasker(allow, opDir, opId, trajs); cache.set(opDir, { sig, m }); return m;
 }
@@ -207,7 +208,7 @@ export function fans(allow: Allowlist, events: OfficeEvent[], opDir: string, opI
   const files = manifestsIn(opDir, opId);
   const runs: any[] = [];
   for (const n of files) {
-    const file = n, lines = fs.readFileSync(file, 'utf8').split('\n'), recs = lines.map((l, i) => { try { return { r: JSON.parse(l), i }; } catch { return null; } }).filter(Boolean) as { r: any; i: number }[];
+    const file = n, recs = manifestFileRecords(file).records;
     const M = maskerFor(allow, opDir, opId);
     const evByLine = new Map(events.filter(e => e.detailRef.file === file && e.detailRef.kind === 'manifest-turn').map(e => [e.detailRef.lines[0], e.id]));
     const evByTurn = new Map(events.filter(e => e.detailRef.file === file && e.detailRef.kind === 'manifest-turn-masked').map(e => [e.target?.id, e.id])); // masked: no line numbers
