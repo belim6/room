@@ -9,8 +9,8 @@
 <body>
 <header id="bar">
   <strong>Office</strong>
-  <span id="breadcrumb"><button id="home-link" class="crumb">Home</button></span>
   <span id="views"><button data-v="floor" class="on">Floor</button><button data-v="workflow">Workflow</button><button data-v="rooms">Rooms</button><button data-v="archive">Archive</button></span>
+  <button id="unfiled-chip" class="unfiled-chip" title="Events placed in Unfiled, by local day. Click to open Unfiled." hidden></button>
   <select id="op" title="Operation"></select>
   <span id="operation-error" class="note" hidden></span>
   <span id="coverage" class="cov" title="Coverage for this operation: events by provenance, and gaps between events.jsonl and the session transcript"></span>
@@ -28,6 +28,7 @@
   <span class="grow"></span>
   <span id="legend" class="mono"></span>
 </header>
+<nav id="crumbs" aria-label="Operation path"><span id="breadcrumb"><button id="home-link" class="crumb">Home</button></span></nav>
 <div id="scrub"><canvas id="tl"></canvas></div>
 <div id="workspace">
 <main>

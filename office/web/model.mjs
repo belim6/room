@@ -344,7 +344,9 @@ export function visibleOperationNodes(tree, expanded=new Set()) {
 // Reserve a stable slot at each depth independent of disclosure. Hidden branches cannot move existing cards.
 export function progressiveOperationGraph(tree, expanded=new Set()) {
   const full=operationTreeGraph(tree),rows=operationTreeRows(tree),slots=new Map(),positions=new Map();
-  for(const n of rows){const slot=slots.get(n.depth)||0;slots.set(n.depth,slot+1);positions.set(n.id,{x:n.depth*280,y:slot*104});}
+  const groups=new Map(),lastParent=new Map();
+  // a new sibling group at the same depth starts 28px lower, so neighbouring groups do not read as one list
+  for(const n of rows){const slot=slots.get(n.depth)||0,g=(groups.get(n.depth)||0)+(slot&&lastParent.get(n.depth)!==n.parent?1:0);slots.set(n.depth,slot+1);groups.set(n.depth,g);lastParent.set(n.depth,n.parent);positions.set(n.id,{x:n.depth*280,y:slot*104+g*28});}
   const visible=new Set(visibleOperationNodes(tree,expanded).map(n=>n.id));
   const nodes=full.nodes.filter(n=>visible.has(n.id)).map(n=>({...n,...positions.get(n.id),collapsed:!expanded.has(n.id),childCount:rows.filter(c=>c.parent===n.id).length}));
   return {...full,nodes,edges:full.edges.filter(e=>visible.has(e.from)&&visible.has(e.to)),cardHeight:88,width:Math.max(220,...nodes.map(n=>n.x+220)),height:Math.max(88,...nodes.map(n=>n.y+88))};
@@ -356,4 +358,80 @@ export function centreOperationGraph(graph,id,{width,height},includeChildren=tru
   const right=Math.max(...nodes.map(n=>n.x+graph.cardWidth)),bottom=Math.max(...nodes.map(n=>n.y+graph.cardHeight));
   const s=Math.max(.6,Math.min(1.2,(width-32)/(right-left),(height-32)/(bottom-top)));
   return {x:width/2-(left+right)/2*s,y:height/2-(top+bottom)/2*s,s};
+}
+
+// ---- Home polish: recent operations, document groups, breadcrumb ellipsis, unfiled by day, edge paths ----------------
+export function relativeAgo(ms) {
+  const m = Math.max(0, Math.floor(ms / 60e3));
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 48 * 60 ? `${Math.floor(m / 60)} h ago` : `${Math.floor(m / 1440)} d ago`;
+}
+// Nodes ordered by their newest placed event (the most specific node, not its ancestors); unfiled is left out.
+export function recentOperations(events, tree, now = Date.now(), limit = 10) {
+  const nodes = tree?.nodes || [], byId = new Map(nodes.map(n => [n.id, n])), cache = new Map(), acc = new Map();
+  for (const e of events || []) {
+    const ts = Date.parse(e.ts); if (!Number.isFinite(ts)) continue;
+    if (!cache.has(e.operation)) cache.set(e.operation, operationPlacement(e.operation, nodes));
+    const id = cache.get(e.operation); if (!id || !byId.has(id)) continue;
+    const a = acc.get(id) || acc.set(id, { last: 0, day: 0 }).get(id);
+    if (ts > a.last) a.last = ts; if (now - ts <= 24 * 3600e3 && ts <= now) a.day++;
+  }
+  return [...acc].sort((a, b) => b[1].last - a[1].last || a[0].localeCompare(b[0])).slice(0, limit).map(([id, a]) => {
+    const n = byId.get(id), p = n.parent ? byId.get(n.parent) : null;
+    return { id, title: n.title || id, parentTitle: p ? p.title || p.id : '', lastTs: a.last, ago: relativeAgo(now - a.last), last24h: a.day };
+  });
+}
+export function nodeAncestors(tree, id) {
+  const byId = new Map((tree?.nodes || []).map(n => [n.id, n])), out = [], seen = new Set();
+  let n = byId.get(id); while (n?.parent && !seen.has(n.parent)) { seen.add(n.parent); out.unshift(n.parent); n = byId.get(n.parent); }
+  return out;
+}
+const DOC_KINDS = [['results', 'Results & summaries'], ['plans', 'Plans & READMEs'], ['critic', 'Critic reviews'], ['packets', 'Packets'], ['scripts', 'Scripts'], ['other', 'Other'], ['raw', 'Raw logs']];
+const stemOf = (p = '') => p.split('/').pop().replace(/\.[A-Za-z0-9]+$/, '');
+// Machine-named records: numeric, hash-like, or "<word> item 4045"-style stems; their titles carry no meaning.
+export const machineNamed = (p = '') => { const s = stemOf(p); return /^[\d._-]+$/.test(s) || /^[0-9a-f]{8,}$/i.test(s) || /^[0-9a-f-]{20,}$/i.test(s) || /^[a-z]+[-_ ](item|turn|row|record)[-_ ]?\d+$/i.test(s) || /^t\d+$/i.test(s); };
+export function documentKind(p = '') {
+  const b = p.split('/').pop().toLowerCase();
+  if (/\.raw\.log$/.test(b)) return 'raw';
+  if (machineNamed(p)) return 'other';
+  if (/\.(sh|py|js|mjs|cjs|ts)$/.test(b)) return 'scripts';
+  if (/^critic/.test(b) || /\/critic\/[^/]+\.md$/i.test(p)) return 'critic';
+  if (/(close|summary|results?|findings)/.test(b)) return 'results';
+  if (/(plan|readme|spec)/.test(b)) return 'plans';
+  if (/(packet|for-deniz|deniz)/.test(b)) return 'packets';
+  return 'other';
+}
+// Never a bare number as a title: fall back to "file name · folder".
+export function documentTitle(d) {
+  const t = String(d.title || '').trim(), parts = String(d.path || '').split('/');
+  return !t || !/[a-z]/i.test(t.replace(/\b(item|turn|row|record)\b/gi, '')) || machineNamed(d.path) ? `${parts.pop() || t} · ${parts.slice(-2).join('/')}` : t;
+}
+export function groupNodeDocuments(items) {
+  const groups = new Map(DOC_KINDS.map(([k, label]) => [k, { kind: k, label, items: [], collapsed: k === 'other' || k === 'raw' }]));
+  for (const d of items || []) groups.get(documentKind(d.path)).items.push({ ...d, display: documentTitle(d), machine: machineNamed(d.path) });
+  for (const g of groups.values()) g.items.sort(g.kind === 'critic' ? (a, b) => String(b.mtime).localeCompare(String(a.mtime)) : (a, b) => a.machine - b.machine || a.display.localeCompare(b.display, 'en', { numeric: true }));
+  return [...groups.values()].filter(g => g.items.length);
+}
+// Home and the last two crumbs stay; the middle collapses to one "…" carrying the hidden titles.
+export function breadcrumbDisplay(crumbs, { keepLast = 2, maxChars = 70 } = {}) {
+  const chars = crumbs.reduce((s, c) => s + String(c.title).length + 3, 0);
+  if (crumbs.length <= keepLast + 2 && chars <= maxChars || crumbs.length <= keepLast + 1) return { crumbs, full: crumbs.map(c => c.title).join(' › ') };
+  const middle = crumbs.slice(1, -keepLast);
+  return { crumbs: [crumbs[0], { id: undefined, ellipsis: true, title: '…', hidden: middle.map(c => c.title) }, ...crumbs.slice(-keepLast)], full: crumbs.map(c => c.title).join(' › ') };
+}
+const localDay = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; };
+export function unfiledByDay(events, tree, now = Date.now()) {
+  const nodes = tree?.nodes || [], today = localDay(now), y = new Date(now); y.setDate(y.getDate() - 1);
+  const yesterday = localDay(y.getTime()), cache = new Map(); let t = 0, yd = 0;
+  for (const e of events || []) {
+    if (!cache.has(e.operation)) cache.set(e.operation, operationPlacement(e.operation, nodes));
+    if (cache.get(e.operation)) continue;
+    const ts = Date.parse(e.ts); if (!Number.isFinite(ts)) continue; const d = localDay(ts);
+    if (d === today) t++; else if (d === yesterday) yd++;
+  }
+  return { today: t, yesterday: yd };
+}
+// Each parent->child edge is its own path: a short stub out of the parent's right edge, then a curve to the child.
+export function operationGraphEdgePath(a, b, cardWidth, cardHeight, stub = 14) {
+  const x1 = a.x + cardWidth, y1 = a.y + cardHeight / 2, sx = x1 + stub, x2 = b.x, y2 = b.y + cardHeight / 2, mx = sx + Math.max(8, (x2 - sx) / 2);
+  return y1 === y2 ? `M${x1},${y1} H${x2}` : `M${x1},${y1} H${sx} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
 }

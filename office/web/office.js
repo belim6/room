@@ -1,4 +1,5 @@
-import { progressiveOperationGraph, centreOperationGraph, operationGraphWheel, operationGraphZoom, PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeDisplay, operationGraphPointerHandlers, operationTreeNodeEvents, parseOfficeRoute, officeRouteHash, operationBreadcrumb, runningStripModel, createRouteGuard, validOfficeOperationRoute } from './model.mjs';
+import { progressiveOperationGraph, centreOperationGraph, operationGraphWheel, operationGraphZoom, PERM, ARTIFACT, layout, endpoints, stateAt, timeline, isFailure, visibleAt, descendants, narrate, bundleSummary, agentStory, operationTreeDisplay, operationGraphPointerHandlers, operationTreeNodeEvents, parseOfficeRoute, officeRouteHash, operationBreadcrumb, runningStripModel, createRouteGuard, validOfficeOperationRoute, recentOperations, nodeAncestors, groupNodeDocuments, breadcrumbDisplay, unfiledByDay, operationGraphEdgePath } from './model.mjs';
+import { operationPlacement } from './operation-placement.mjs';
 import { liveClient } from './liveclient.mjs';
 
 const $ = (s) => document.querySelector(s);
@@ -39,7 +40,8 @@ async function init() {
   $('#raw').onchange = (e) => { S.raw = e.target.checked; $('#logrows').classList.toggle('raw', S.raw); S.lastLog = ''; };
   $('#live').onclick = toggleLive;
   for (const b of document.querySelectorAll('#views button')) b.onclick = () => navigateOperation(S.op, b.dataset.v, true);
-  $('#home-link').onclick = () => { location.hash = '#/'; };
+  $('#unfiled-chip').onclick = openUnfiled;
+  loadUnfiled();
   addEventListener('keydown', (e) => { if (e.key === ' ' && e.target === document.body) { e.preventDefault(); togglePlay(); } if (e.key === 'Escape') follow(null); });
   $('#legend').append('read artifact→actor · write actor→artifact · ', h('span', { class: 'lc' }, '— captured '), h('span', { class: 'ld' }, '- - derived '), h('span', { class: 'li' }, '··· inferred '), h('span', { class: 'lr' }, '■ fail/gap'));
   setupCanvas(); setupTimeline();
@@ -76,16 +78,61 @@ async function applyRoute(route = parseOfficeRoute(location.hash), token = route
       if (S.summary.operationTree && !S.summary.operationTree.error) void loadTreeNode(route.id, token);
       else void loadOp(route.id, token);
     }
-    $('#views').hidden=false; $('#breadcrumb').replaceChildren(...operationBreadcrumb(S.summary.operationTree,route.id).map((c,i,a)=>h('button',{class:'crumb',on:{click:()=>{if(c.id==null)location.hash='#/';else if(i<a.length-1)navigateOperation(c.id,'floor',true);}}},i?' › ':'',c.title)));
+    $('#views').hidden=false; $('#crumbs').hidden=false; renderBreadcrumb(route.id);
     showView(route.tab); renderRunning(); renderTopRunning();
     return;
   }
-  S.treeNode=''; document.body.classList.add('home-page'); $('#workspace').classList.add('home-mode'); $('#scrub').hidden=true; $('#log').hidden=true; $('#views').hidden=true; $('#running-now').hidden=false;
+  S.treeNode=''; document.body.classList.add('home-page'); $('#workspace').classList.add('home-mode'); $('#scrub').hidden=true; $('#log').hidden=true; $('#views').hidden=true; $('#crumbs').hidden=true; $('#running-now').hidden=false;
   const epoch=eventEpoch;
-  if (!S.allEvents) get('/api/events?op=*').then(({events})=>{if(epoch!==eventEpoch)return;S.allEvents=events;if(S.view==='home'){renderRunning();renderTopRunning();renderOperationGraph();}}).catch(console.error);
+  if (!S.allEvents) get('/api/events?op=*').then(({events})=>{if(epoch!==eventEpoch)return;S.allEvents=events;renderUnfiledChip();if(S.view==='home'){renderRunning();renderTopRunning();renderOperationGraph();renderHomePanel(true);}}).catch(console.error);
   S.op='*'; $('#clock').textContent='';
-  $('#breadcrumb').replaceChildren(h('button',{class:'crumb',on:{click:()=>{}}},'Home'));
-  S.view='home'; $('#view').hidden=false; renderOperationGraph(); renderRunning(); renderTopRunning();
+  const sel=S.graphSelection&&S.summary.operationTree?.nodes?.some(n=>n.id===S.graphSelection)?S.graphSelection:null; // coming back from an operation: show its card
+  if(sel)for(const a of nodeAncestors(S.summary.operationTree,sel))S.expanded.add(a);
+  S.view='home'; $('#view').hidden=false; renderOperationGraph(sel); renderRunning(); renderTopRunning(); renderHomePanel();
+}
+function renderBreadcrumb(id) {
+  const {crumbs,full}=breadcrumbDisplay(operationBreadcrumb(S.summary.operationTree,id)),last=crumbs.length-1;
+  $('#crumbs').title=full;
+  $('#breadcrumb').replaceChildren(...crumbs.flatMap((c,i)=>[i?h('span',{class:'sepc'},'›'):null,
+    c.ellipsis?h('span',{class:'crumb gap',title:c.hidden.join(' › ')},'…'):h('button',{class:'crumb'+(i===last?' current':''),title:c.title,on:{click:()=>{if(c.id==null)location.hash='#/';else if(i<last)navigateOperation(c.id,'floor',true);}}},c.title)]).filter(Boolean));
+}
+// Home side panel: the selected node, else the operations with the newest events. ✕ on the list closes the drawer.
+function renderHomePanel(onlyIfRecent=false) {
+  if(S.view!=='home')return;
+  const n=S.graphSelection&&S.summary.operationTree?.nodes?.find(x=>x.id===S.graphSelection);
+  if(n){if(!onlyIfRecent)showOperationDetail(n);return;}
+  const box=$('#inspector'),live=new Set(runningStripModel(S.allEvents||[],S.summary.actors,S.summary.operationTree).map(r=>r.nodeId));
+  const head=h('div',{class:'panel-head'},h('h3',{},'Recent operations'),h('button',{class:'panel-close',title:'Close panel',on:{click:()=>setDrawer(false)}},'✕'));
+  if(!S.allEvents)return box.replaceChildren(head,h('div',{class:'note'},'Loading events…'));
+  const rows=recentOperations(S.allEvents,S.summary.operationTree,Date.now(),10);
+  box.replaceChildren(h('div',{class:'recent'},head,h('div',{class:'recent-list'},...(rows.length?rows.map(r=>h('div',{class:'recent-row',tabindex:'0',role:'button',title:r.title,on:{click:()=>focusGraphNode(r.id),keydown:e=>{if(e.key==='Enter')focusGraphNode(r.id);}}},
+    h('span',{class:'rt'},r.title),h('span',{class:'rp'},r.parentTitle||'goal'),
+    h('span',{class:'rm'},live.has(r.id)?h('span',{class:'live-dot',title:'running now'},'● live · '):null,`last event ${r.ago} · ${r.last24h} in the last 24 h`),
+    h('button',{title:'Open this operation\u2019s Floor',on:{click:e=>{e.stopPropagation();navigateOperation(r.id,'floor',true);}}},'▶'))):[h('div',{class:'note'},'No placed events yet')]))));
+}
+function setDrawer(open){ $('#workspace').classList.toggle('drawer-closed',!open); if(S.view==='home')renderOperationGraph(); }
+function closeDetail(){ S.graphSelection=''; renderOperationGraph(); renderHomePanel(); }
+function focusGraphNode(id){
+  for(const a of nodeAncestors(S.summary.operationTree,id))S.expanded.add(a);
+  S.graphSelection=id; $('#workspace').classList.remove('drawer-closed');
+  const n=S.summary.operationTree?.nodes?.find(x=>x.id===id); if(n)showOperationDetail(n);
+  renderOperationGraph(id);
+}
+function openUnfiled(){
+  const n=S.summary.operationTree?.nodes?.find(x=>x.id==='unfiled'); if(!n)return;
+  S.graphSelection='unfiled'; $('#workspace').classList.remove('drawer-closed');
+  if(S.view!=='home'){location.hash='#/';return;} // applyRoute shows the selected node's panel
+  showOperationDetail(n); renderOperationGraph();
+}
+function loadUnfiled(){
+  if(!S.summary.operationTree?.nodes?.some(n=>n.id==='unfiled')){renderUnfiledChip();return;}
+  const epoch=eventEpoch;get('/api/events/node?id=unfiled').then(({events})=>{if(epoch!==eventEpoch)return;S.unfiledEvents=events;renderUnfiledChip();}).catch(console.error);
+}
+function renderUnfiledChip(){
+  const src=S.allEvents||S.unfiledEvents,chip=$('#unfiled-chip');
+  if(!src||!S.summary.operationTree?.nodes?.some(n=>n.id==='unfiled')){chip.hidden=true;return;}
+  const {today,yesterday}=unfiledByDay(src,S.summary.operationTree);
+  chip.hidden=false; chip.classList.toggle('zero',!today); chip.textContent=`unfiled today ${today} · yesterday ${yesterday}`;
 }
 function renderRunning() {
   const strip=$('#running-now'); if(!strip)return;
@@ -103,11 +150,11 @@ function renderOperationGraph(focusId=null) {
   const liveNodes=new Set(runningStripModel(S.allEvents||S.events,S.summary.actors,tree).map(r=>r.nodeId));
   const g=progressiveOperationGraph(tree,S.expanded),outer=h('div',{class:'op-graph-wrap'}),tools=h('div',{class:'op-graph-tools'});
   const svg=sv('svg',{class:'op-graph',tabindex:'0'}),world=sv('g');
-  const activate=n=>{S.graphSelection=n.id;if(S.expanded.has(n.id))S.expanded.delete(n.id);else S.expanded.add(n.id);showOperationDetail(n);requestAnimationFrame(()=>{if(S.view==='home')renderOperationGraph(n.id);});};
-  for(const edge of g.edges){const a=g.nodes.find(n=>n.id===edge.from),b=g.nodes.find(n=>n.id===edge.to),mid=a.x+g.cardWidth+30;world.append(sv('path',{class:'op-edge',d:`M${a.x+g.cardWidth},${a.y+g.cardHeight/2} H${mid} V${b.y+g.cardHeight/2} H${b.x}`}));}
+  const activate=n=>{S.graphSelection=n.id;$('#workspace').classList.remove('drawer-closed');if(S.expanded.has(n.id))S.expanded.delete(n.id);else S.expanded.add(n.id);showOperationDetail(n);requestAnimationFrame(()=>{if(S.view==='home')renderOperationGraph(n.id);});};
+  for(const edge of g.edges){const a=g.nodes.find(n=>n.id===edge.from),b=g.nodes.find(n=>n.id===edge.to);world.append(sv('path',{class:'op-edge',d:operationGraphEdgePath(a,b,g.cardWidth,g.cardHeight)}));}
   for(const n of g.nodes){const c=n.card,group=sv('g',{class:`op-node status-${c.status}${liveNodes.has(n.id)?' live':''}${S.graphSelection===n.id?' selected':''}`,transform:`translate(${n.x},${n.y})`,'data-id':n.id,tabindex:'0',role:'button','aria-label':`${c.title}, ${c.status}, ${n.documentCount||0} documents`,...(n.childCount?{'aria-expanded':String(S.expanded.has(n.id))}:{})});
     const title=c.title.length>24?`${c.title.slice(0,23)}…`:c.title;
-    group.append(sv('rect',{class:'op-card',width:g.cardWidth,height:g.cardHeight,rx:5}),sv('text',{class:'op-title',x:10,y:19},title),sv('text',{class:'op-status',x:10,y:35},c.status),sv('text',{class:'op-meta',x:10,y:49},`${c.events} ev · ${c.knownEvents} w/ tokens · ${c.tokens}`),sv('text',{class:'op-meta',x:10,y:67},`${n.documentCount||0} docs`),sv('rect',{class:'op-bar-bg',x:10,y:78,width:g.cardWidth-20,height:3,rx:2}),sv('rect',{class:'op-bar',x:10,y:78,width:(g.cardWidth-20)*c.share,height:3,rx:2}));
+    group.append(sv('rect',{class:'op-card',width:g.cardWidth,height:g.cardHeight,rx:5}),sv('text',{class:'op-title',x:10,y:19},title),sv('rect',{class:'op-chip',x:8,y:25,width:c.status.length*5.4+10,height:14,rx:7}),sv('text',{class:'op-status',x:13,y:35},c.status),sv('text',{class:'op-meta',x:10,y:49},`${c.events} ev · ${c.knownEvents} w/ tokens · ${c.tokens}`),sv('text',{class:'op-meta',x:10,y:67},`${n.documentCount||0} docs`),sv('rect',{class:'op-bar-bg',x:10,y:78,width:g.cardWidth-20,height:3,rx:2}),sv('rect',{class:'op-bar',x:10,y:78,width:(g.cardWidth-20)*c.share,height:3,rx:2}));
     if(n.childCount)group.append(sv('text',{class:'op-twist',x:g.cardWidth-10,y:35,'text-anchor':'end'},`${S.expanded.has(n.id)?'−':'+'}${n.childCount}`));
     const open=sv('g',{class:'op-open',tabindex:'0',role:'button','aria-label':`Open ${c.title}`},sv('rect',{x:172,y:54,width:38,height:20,rx:3}),sv('text',{x:191,y:68,'text-anchor':'middle'},'▶'));
     open.addEventListener('click',e=>{e.stopPropagation();navigateOperation(n.id,'floor',true);});
@@ -118,7 +165,7 @@ function renderOperationGraph(focusId=null) {
     world.append(group);
   }
   const sync=()=>world.setAttribute('transform',`translate(${S.graphCam.x},${S.graphCam.y}) scale(${S.graphCam.s})`);
-  const viewport=()=>{const r=svg.getBoundingClientRect(),panel=$('#inspector').getBoundingClientRect();return {width:Math.max(1,Math.min(r.width,panel.left-r.left-12)),height:Math.max(1,r.height)};};
+  const viewport=()=>{const r=svg.getBoundingClientRect(),panel=$('#inspector').getBoundingClientRect(),open=panel.width>0&&panel.left>r.left;return {width:Math.max(1,open?Math.min(r.width,panel.left-r.left-12):r.width),height:Math.max(1,r.height)};};
   const fit=()=>{const v=viewport(),s=Math.max(.6,Math.min(1.2,(v.width-24)/g.width,(v.height-24)/g.height));S.graphCam={x:v.width/2-g.width*s/2,y:v.height/2-g.height*s/2,s};sync();};
   const zoom=factor=>{graphAnimation++;const v=viewport();S.graphCam=operationGraphZoom(S.graphCam,factor,{x:v.width/2,y:v.height/2});sync();};
   const gesture=operationGraphPointerHandlers({select:node=>{const n=g.nodes.find(n=>n.id===node.getAttribute('data-id'));if(n)activate(n);},pan:(dx,dy)=>{graphAnimation++;S.graphCam.x+=dx;S.graphCam.y+=dy;sync();},capture:id=>svg.setPointerCapture(id)});
@@ -127,7 +174,8 @@ function renderOperationGraph(focusId=null) {
   svg.addEventListener('pointerdown',e=>{graphAnimation++;gesture.down(e);});svg.addEventListener('pointermove',e=>gesture.move(e));svg.addEventListener('pointerup',e=>gesture.up(e));svg.addEventListener('pointercancel',()=>gesture.cancel());svg.addEventListener('click',e=>gesture.click(e),true);
   svg.addEventListener('wheel',e=>{e.preventDefault();graphAnimation++;const r=svg.getBoundingClientRect();S.graphCam=operationGraphWheel(S.graphCam,e,{x:e.clientX-r.left,y:e.clientY-r.top},r.height);sync();},{passive:false});
   tools.append(h('button',{on:{click:()=>{graphAnimation++;fit();}}},'Fit'),h('button',{on:{click:()=>zoom(1.2)}},'+'),h('button',{on:{click:()=>zoom(1/1.2)}},'−'));
-  const unfiled=tree?.nodes?.find(n=>n.id==='unfiled');if(unfiled)tools.append(h('button',{on:{click:()=>showOperationDetail(unfiled)}},`Unfiled · ${unfiled.documentCount||0} docs`));
+  const unfiled=tree?.nodes?.find(n=>n.id==='unfiled');if(unfiled)tools.append(h('button',{on:{click:openUnfiled}},`Unfiled · ${unfiled.documentCount||0} docs`));
+  if($('#workspace').classList.contains('drawer-closed'))tools.append(h('button',{on:{click:()=>{setDrawer(true);renderHomePanel();}}},'Show panel'));
   outer.append(tools,svg);box.replaceChildren(outer);
   graphResize=new ResizeObserver(()=>{const r=svg.getBoundingClientRect();svg.setAttribute('viewBox',`0 0 ${Math.max(1,r.width)} ${Math.max(1,r.height)}`);});graphResize.observe(svg);
   requestAnimationFrame(()=>{
@@ -141,10 +189,18 @@ function renderOperationGraph(focusId=null) {
   });
 }
 function showOperationDetail(n){
-  const documents=h('div',{class:'rows'},'Loading documents…');
+  const documents=h('div',{class:'docs'},h('div',{class:'note'},'Loading documents…'));
   const box=$('#inspector'), d=operationTreeDisplay(n), lines=[['Goal',n.goal||'n/a'],['Owner',n.owner||'n/a'],['Budget',d.budget||'n/a'],['Spend',d.burn],['Events',d.events],['Event gaps',String(n.gapCount??'n/a')],['Token gaps',d.tokenGaps],['Tokens',d.tokensFull],['Close',n.close?.status|| (n.close?'closed':'n/a')]];
-  box.replaceChildren(h('h3',{},n.title||n.id),h('button',{title:'Go to this operation\u2019s floor',on:{click:()=>navigateOperation(n.id,'floor',true)}},'▶ Floor'),h('table',{},...lines.map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.close?.summary?[['Close summary',n.close.summary],['Close evidence',(n.close.evidence||[]).join(', ')],['Closed at',n.close.closedAt]]:[]).map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.closeProblems||[]).map(p=>h('tr',{class:'note'},h('td',{},'Close issue'),h('td',{},p)))),h('h3',{},n.id==='unfiled'?'Documents · not yet housed':'Documents'),documents);
-  get('/api/node/documents?id='+encodeURIComponent(n.id)).then(({items})=>{if(!documents.isConnected)return;const rows=[];let raw=[];for(const a of items){if(/\.raw\.log$/i.test(a.path)){raw.push(a);continue;}rows.push(h('div',{class:'row'},h('a',{on:{click:()=>select({type:'file',id:a.path})}},a.title),h('span',{class:'note'},` · ${a.operation}`)));}if(raw.length)rows.push(h('details',{},h('summary',{},`raw (${raw.length})`),...raw.map(a=>h('div',{class:'row'},h('a',{on:{click:()=>select({type:'file',id:a.path})}},a.title),h('span',{class:'note'},` · ${a.operation}`)))));documents.replaceChildren(...(rows.length?rows:[h('div',{class:'note'},'No documents')]));}).catch(error=>{if(documents.isConnected)documents.replaceChildren(h('div',{class:'note'},'Documents unavailable: '+error.message));});
+  const head=h('div',{class:'panel-head'},h('h3',{},n.title||n.id),S.view==='home'?h('button',{class:'panel-close',title:'Close (back to recent operations)',on:{click:closeDetail}},'✕'):null);
+  box.replaceChildren(head,h('button',{title:'Go to this operation’s floor',on:{click:()=>navigateOperation(n.id,'floor',true)}},'▶ Floor'),h('table',{},...lines.map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.close?.summary?[['Close summary',n.close.summary],['Close evidence',(n.close.evidence||[]).join(', ')],['Closed at',n.close.closedAt]]:[]).map(([k,v])=>h('tr',{},h('td',{},k),h('td',{},v))),...(n.closeProblems||[]).map(p=>h('tr',{class:'note'},h('td',{},'Close issue'),h('td',{},p)))),h('h3',{},n.id==='unfiled'?'Documents · not yet housed':'Documents'),documents);
+  const docRow=a=>h('div',{class:'row',title:a.path},h('a',{on:{click:()=>select({type:'file',id:a.path})}},a.display),a.operation&&a.operation!==n.id?h('span',{class:'note'},` · ${a.operation}`):null);
+  const groupBox=g=>{const list=h('div',{}),shown={n:0},more=h('button',{class:'more'});
+    const fill=k=>{list.append(...g.items.slice(shown.n,shown.n+k).map(docRow));shown.n=Math.min(g.items.length,shown.n+k);const left=g.items.length-shown.n;more.hidden=!left;more.textContent=`show ${Math.min(left,50).toLocaleString('en-US')} more${left>50?` (of ${left.toLocaleString('en-US')})`:''}`;};
+    more.addEventListener('click',()=>fill(50));
+    const count=h('span',{class:'n'},g.items.length.toLocaleString('en-US'));
+    if(!g.collapsed){fill(8);return h('div',{class:'doc-group'},h('div',{class:'gh'},g.label,count),list,more);}
+    const det=h('details',{class:'doc-group'},h('summary',{class:'gh'},g.label,count),list,more);det.addEventListener('toggle',()=>{if(det.open&&!shown.n)fill(8);});return det;};
+  get('/api/node/documents?id='+encodeURIComponent(n.id)).then(({items})=>{if(!documents.isConnected)return;const groups=groupNodeDocuments(items);documents.replaceChildren(...(groups.length?groups.map(groupBox):[h('div',{class:'note'},'No documents')]));}).catch(error=>{if(documents.isConnected)documents.replaceChildren(h('div',{class:'note'},'Documents unavailable: '+error.message));});
 }
 function compactTokens(value) { const abs=Math.abs(value); for (const [limit,unit] of [[1e12,'T'],[1e9,'B'],[1e6,'M'],[1e3,'K']]) if(abs>=limit)return `${Number((value/limit).toFixed(3))}${unit}`; return String(value); }
 async function loadTreeNode(id, token) {
@@ -196,7 +252,7 @@ function togglePlay() { if(!S.tl)return; if (S.live) toggleLive(); if (!S.playin
 // ---- live (SSE) ----------------------------------------------------------------------------------------------------
 const live = liveClient({
   refetch: async () => { const token=routeGuard.begin(),node=S.treeNode,url=node?'/api/events/node?id='+encodeURIComponent(node):'/api/events?op='+encodeURIComponent(S.view==='home'?'*':S.op);const [summary,result]=await Promise.all([get('/api/summary'),get(url)]);return {summary,events:result.events,token,node}; },
-  onReset: ({ summary, events, token, node }) => { if(!routeGuard.current(token))return;S.summary=summary; invalidateEventCaches();S.allEvents=null;fillOps();if(node)nodeEvents.set(node,events);if(S.view==='home'){S.allEvents=events;renderOperationGraph();}else setEvents(events,false);renderRunning();renderTopRunning(); },
+  onReset: ({ summary, events, token, node }) => { if(!routeGuard.current(token))return;S.summary=summary; invalidateEventCaches();S.allEvents=null;fillOps();loadUnfiled();if(node)nodeEvents.set(node,events);if(S.view==='home'){S.allEvents=events;renderOperationGraph();renderHomePanel(true);}else setEvents(events,false);renderRunning();renderTopRunning(); },
   onDelta: (d) => applyLive(d),
 });
 function toggleLive() {
@@ -214,7 +270,9 @@ export function applyLive(msg) {
   if (msg.operations) S.summary.operations = msg.operations;
   if (msg.operationTree) S.summary.operationTree = msg.operationTree;
   if (msg.operations || msg.operationTree) fillOps();
-  if(S.view==='home'){renderOperationGraph();renderRunning();renderTopRunning();return;}
+  if(S.unfiledEvents){const nodes=S.summary.operationTree?.nodes||[],u=new Map(S.unfiledEvents.map(e=>[e.id,e]));for(const id of msg.removes||[])u.delete(id);for(const e of msg.upserts||[])if(!operationPlacement(e.operation,nodes))u.set(e.id,e);else u.delete(e.id);S.unfiledEvents=[...u.values()];}
+  renderUnfiledChip();
+  if(S.view==='home'){renderOperationGraph();renderRunning();renderTopRunning();renderHomePanel(true);return;}
   if(reload){void loadTreeNode(S.treeNode,routeGuard.begin());return;}
   const rm = new Set(msg.removes || []), byId = new Map((S.base || S.events).filter((e) => !rm.has(e.id)).map((e) => [e.id, e]));
   for (const e of msg.upserts || []) if (S.treeNode ? operationTreeNodeEvents([e],S.summary.operationTree,S.treeNode).length : S.view==='home' || inOp(e, S.op)) byId.set(e.id, e); else byId.delete(e.id);
